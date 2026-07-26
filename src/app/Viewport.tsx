@@ -1,0 +1,782 @@
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
+import type { EditorSession } from '@/core/editor/EditorSession';
+import { viewportEngine } from '@/app/viewportEngine';
+import type { WorkspaceController } from '@/workspace/WorkspaceController';
+import type { ViewId } from '@/workspace/types';
+import { VIEW_LABELS } from '@/workspace/types';
+import type { ViewportRect } from '@/workspace/SplitLayoutManager';
+import { CreateDoodleTool } from '@/core/tools/CreateDoodleTool';
+import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
+import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
+import { KnifeTool } from '@/core/tools/KnifeTool';
+import { LoopCutTool } from '@/core/tools/LoopCutTool';
+import { commitDeleteSelection } from '@/core/editor/DeleteSelection';
+import { handleTransformHotkey } from '@/app/TransformHotkeys';
+import { clampTextureSplit } from '@/workspace/TextureWorkspace';
+import type { CameraAxes } from '@/core/transform/Orientation';
+import { importPngAsImagePlane } from '@/core/editor/ImagePlane';
+import { pushToast } from '@/app/Toast';
+
+const UvPixelEditor = lazy(() =>
+  import('@/app/UvPixelEditor').then((module) => ({ default: module.UvPixelEditor })),
+);
+
+type Props = {
+  session: EditorSession;
+  workspace: WorkspaceController;
+};
+
+type DragKind = 'horizontal' | 'upperVertical' | 'lowerVertical';
+
+export function Viewport({ session, workspace }: Props) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [rects, setRects] = useState<ViewportRect[]>([]);
+  const [hovered, setHovered] = useState<ViewId | null>(null);
+  const [mode, setMode] = useState(workspace.layoutMode);
+  const [perspectiveAxes, setPerspectiveAxes] = useState<CameraAxes | null>(null);
+  const [pngDropActive, setPngDropActive] = useState(false);
+  const [pngImporting, setPngImporting] = useState(false);
+  const [splits, setSplits] = useState({ ...workspace.splits.splits });
+  const dragRef = useRef<{ kind: DragKind; start: number; origin: number } | null>(null);
+  const textureDividerDrag = useRef<{ startX: number; origin: number } | null>(null);
+  const textureLeftRef = useRef<HTMLDivElement>(null);
+  const textureRightRef = useRef<HTMLDivElement>(null);
+  const textureSplitRef = useRef<HTMLDivElement>(null);
+  const liveTextureSplitRef = useRef<number | null>(null);
+
+  const syncUi = useCallback(() => {
+    const host = hostRef.current;
+    if (host) {
+      const bounds = host.getBoundingClientRect();
+      const w = Math.max(1, Math.floor(bounds.width));
+      const h = Math.max(1, Math.floor(bounds.height));
+      // Always derive chrome labels from workspace layout (not a stale engine cache).
+      setRects(workspace.computeViewportRects(w, h));
+    } else {
+      setRects(viewportEngine.getRects());
+    }
+    setHovered(workspace.hoveredViewportId);
+    setMode(workspace.layoutMode);
+    setSplits({ ...workspace.splits.splits });
+    setPerspectiveAxes(viewportEngine.getCameraAxes('persp'));
+  }, [workspace]);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const mount = (attempt: number) => {
+      if (cancelled) return;
+      try {
+        viewportEngine.attach(host, session, workspace, {
+          onLayoutChange: syncUi,
+          onCameraChange: (id, axes) => {
+            if (id === 'persp') setPerspectiveAxes(axes);
+          },
+        });
+        syncUi();
+        setError(null);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        if (attempt < 5) {
+          retryTimer = setTimeout(() => mount(attempt + 1), 500 * (attempt + 1));
+        }
+      }
+    };
+
+    mount(0);
+    const unsub = workspace.subscribe(syncUi);
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      unsub();
+      viewportEngine.detach();
+    };
+  }, [session, workspace, syncUi]);
+
+  const hasPngFiles = (event: DragEvent<HTMLElement>) =>
+    [...event.dataTransfer.items].some(
+      (item) => item.kind === 'file' && item.type === 'image/png',
+    ) ||
+    [...event.dataTransfer.files].some((file) => file.name.toLowerCase().endsWith('.png')) ||
+    [...event.dataTransfer.types].includes('Files');
+
+  const importDroppedPngs = async (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setPngDropActive(false);
+    const files = [...event.dataTransfer.files].filter(
+      (file) => file.type === 'image/png' || file.name.toLowerCase().endsWith('.png'),
+    );
+    if (!files.length) return;
+
+    setPngImporting(true);
+    const objectIds: string[] = [];
+    try {
+      let xOffset = 0;
+      for (const file of files) {
+        const created = await importPngAsImagePlane(session, file);
+        const object = session.document.objects.get(created.objectId)!;
+        object.transform.position = {
+          x: session.constructionPlane.origin.x + xOffset,
+          y: session.constructionPlane.origin.y,
+          z: session.constructionPlane.origin.z,
+        };
+        xOffset += created.width + 0.25;
+        objectIds.push(created.objectId);
+      }
+      session.selection.setMode('object');
+      session.selection.selectObjects(objectIds, 'replace');
+      session.requestRedraw();
+      viewportEngine.invalidate();
+      window.requestAnimationFrame(() => viewportEngine.frameSelection());
+      pushToast(
+        `${files.length} PNG${files.length === 1 ? '' : 's'} created as two-sided 3D object${files.length === 1 ? '' : 's'}`,
+        'success',
+      );
+      syncUi();
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Could not create the PNG object', 'error');
+    } finally {
+      setPngImporting(false);
+    }
+  };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        handleTransformHotkey(
+          e,
+          session,
+          workspace,
+          (id) => viewportEngine.getCameraAxes(id),
+          (id) => viewportEngine.getLastPointerSample(id),
+        )
+      ) {
+        viewportEngine.syncTransformInteractionState();
+        if (session.transform.active) {
+          viewportEngine.syncLiveTransform();
+        } else {
+          viewportEngine.syncGizmo();
+          viewportEngine.invalidate();
+        }
+        syncUi();
+        return;
+      }
+      const tool = session.tools.getActive();
+      if (
+        e.key === 'Escape' &&
+        (tool instanceof CreatePrimitiveTool || tool instanceof CreateDoodleTool)
+      ) {
+        e.preventDefault();
+        tool.cancel(session.context());
+        session.tools.setActive('select', session.context());
+        workspace.input.end('tool');
+        syncUi();
+        return;
+      }
+      if (e.key === 'Escape' && tool instanceof DrawPolyTool) {
+        e.preventDefault();
+        if (tool.state.chain.length > 0) {
+          tool.cancel(session.context());
+        } else {
+          tool.cancel(session.context());
+          session.tools.setActive('select', session.context());
+          workspace.input.end('tool');
+        }
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Escape' && tool instanceof KnifeTool) {
+        e.preventDefault();
+        if (tool.state.dragging) {
+          tool.cancel(session.context());
+          workspace.input.end('tool');
+          viewportEngine.syncInputControls();
+        } else {
+          tool.cancel(session.context());
+          session.tools.setActive('select', session.context());
+          workspace.input.end('tool');
+        }
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Enter' && tool instanceof KnifeTool && tool.state.dragging) {
+        e.preventDefault();
+        tool.confirm(session.context());
+        workspace.input.end('tool');
+        viewportEngine.syncInputControls();
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Escape' && tool instanceof LoopCutTool) {
+        e.preventDefault();
+        tool.cancel(session.context());
+        session.tools.setActive('select', session.context());
+        workspace.input.end('tool');
+        viewportEngine.syncInputControls();
+        syncUi();
+        return;
+      }
+      if (
+        e.key === 'Enter' &&
+        tool instanceof LoopCutTool &&
+        tool.state.phase === 'slide'
+      ) {
+        e.preventDefault();
+        const completed = tool.confirm(session.context());
+        if (completed) {
+          session.tools.setActive('select', session.context());
+          workspace.input.end('tool');
+          viewportEngine.syncInputControls();
+        }
+        syncUi();
+        return;
+      }
+      if (
+        e.key === 'Enter' &&
+        tool instanceof CreatePrimitiveTool &&
+        tool.state.stage !== 'idle'
+      ) {
+        e.preventDefault();
+        (e.target as HTMLElement)?.blur?.();
+        tool.confirm(session.context());
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Enter' && tool instanceof CreateDoodleTool && tool.state.stage === 'drawing') {
+        e.preventDefault();
+        (e.target as HTMLElement)?.blur?.();
+        tool.confirm(session.context());
+        workspace.input.end('tool');
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (
+        e.key === 'Enter' &&
+        tool instanceof DrawPolyTool &&
+        (tool.buildMode === 'vertices'
+          ? tool.state.createdInChain.length > 0
+          : tool.state.chain.length >= 3)
+      ) {
+        e.preventDefault();
+        (e.target as HTMLElement)?.blur?.();
+        tool.confirm(session.context());
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Backspace' && tool instanceof DrawPolyTool) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        if (tool.state.chain.length > 0) {
+          tool.popLast(session.context());
+        } else {
+          commitDeleteSelection(session);
+        }
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Delete' || (e.key === 'Backspace' && !(tool instanceof DrawPolyTool))) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        commitDeleteSelection(session);
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      const tag = (e.target as HTMLElement)?.tagName;
+      const isTextInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+      if (!isTextInput && !session.transform.active && workspace.shellMode === 'model') {
+        if (e.code === 'NumpadDecimal' || e.key === '.' || e.key.toLowerCase() === 'f') {
+          e.preventDefault();
+          viewportEngine.frameSelection();
+          syncUi();
+          return;
+        }
+        if (e.key === 'Home' && e.shiftKey) {
+          e.preventDefault();
+          viewportEngine.resetView();
+          syncUi();
+          return;
+        }
+        if (e.key === 'Home') {
+          e.preventDefault();
+          viewportEngine.frameAll();
+          syncUi();
+          return;
+        }
+      }
+      if (!workspace.input.canHandleTab(e)) return;
+      e.preventDefault();
+      // Texture shell: Tab maximizes left/right based on pointer side
+      if (workspace.shellMode === 'texture') {
+        const host = hostRef.current?.parentElement;
+        if (host) {
+          const rect = host.getBoundingClientRect();
+          const ratio = workspace.texture.splitRatio;
+          const overLeft = (window as unknown as { __lastPointerX?: number }).__lastPointerX != null
+            ? ((window as unknown as { __lastPointerX: number }).__lastPointerX - rect.left) / rect.width < ratio
+            : true;
+          workspace.toggleTextureMaximize(overLeft ? 'left' : 'right');
+        } else {
+          workspace.handleTab();
+        }
+      } else {
+        workspace.handleTab();
+      }
+      viewportEngine.invalidate();
+      syncUi();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [workspace, session, syncUi]);
+
+  useEffect(() => {
+    const track = (e: PointerEvent) => {
+      (window as unknown as { __lastPointerX: number }).__lastPointerX = e.clientX;
+    };
+    window.addEventListener('pointermove', track);
+    return () => window.removeEventListener('pointermove', track);
+  }, []);
+
+  const beginDrag = (kind: DragKind, clientPos: number) => {
+    const origin =
+      kind === 'horizontal'
+        ? splits.horizontal
+        : kind === 'upperVertical'
+          ? splits.upperVertical
+          : splits.lowerVertical;
+    dragRef.current = { kind, start: clientPos, origin };
+    workspace.input.begin('divider');
+  };
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      const drag = dragRef.current;
+      const host = hostRef.current;
+      if (!drag || !host) return;
+      const rect = host.getBoundingClientRect();
+      if (drag.kind === 'horizontal') {
+        const y = (e.clientY - rect.top) / Math.max(rect.height, 1);
+        workspace.setSplits({ horizontal: y });
+      } else if (drag.kind === 'upperVertical') {
+        const x = (e.clientX - rect.left) / Math.max(rect.width, 1);
+        workspace.setSplits({ upperVertical: x });
+      } else {
+        const x = (e.clientX - rect.left) / Math.max(rect.width, 1);
+        workspace.setSplits({ lowerVertical: x });
+      }
+      viewportEngine.invalidate();
+      syncUi();
+    };
+    const onUp = () => {
+      if (!dragRef.current) return;
+      dragRef.current = null;
+      workspace.input.end('divider');
+      workspace.schedulePersist();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, [workspace, syncUi]);
+
+  const showDividers = mode === 'quad' && workspace.shellMode === 'model';
+  const textureMode = workspace.shellMode === 'texture';
+  const texMax = workspace.texture.maximize;
+  const leftPct =
+    texMax === 'left' ? 100 : texMax === 'right' ? 0 : workspace.texture.splitRatio * 100;
+  const rightPct = 100 - leftPct;
+
+  useEffect(() => {
+    if (!textureMode) return;
+    let raf = 0;
+    const applyLiveSplit = (ratio: number) => {
+      const left = `${ratio * 100}%`;
+      const right = `${(1 - ratio) * 100}%`;
+      if (textureLeftRef.current) {
+        textureLeftRef.current.style.width = left;
+        textureLeftRef.current.style.display = ratio <= 0 ? 'none' : 'block';
+      }
+      if (textureRightRef.current) {
+        textureRightRef.current.style.width = right;
+        textureRightRef.current.style.display = ratio >= 1 ? 'none' : 'flex';
+      }
+      if (textureSplitRef.current) textureSplitRef.current.style.left = left;
+      liveTextureSplitRef.current = ratio;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => viewportEngine.invalidate());
+    };
+    const onMove = (e: PointerEvent) => {
+      const drag = textureDividerDrag.current;
+      const region = hostRef.current?.parentElement;
+      if (!drag || !region) return;
+      const rect = region.getBoundingClientRect();
+      applyLiveSplit(clampTextureSplit((e.clientX - rect.left) / Math.max(1, rect.width)));
+    };
+    const onUp = () => {
+      if (!textureDividerDrag.current) return;
+      textureDividerDrag.current = null;
+      const ratio = liveTextureSplitRef.current;
+      liveTextureSplitRef.current = null;
+      if (ratio != null) workspace.setTextureSplit(ratio);
+      workspace.input.end('divider');
+      requestAnimationFrame(() => {
+        viewportEngine.invalidate();
+        syncUi();
+      });
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, [textureMode, workspace, syncUi]);
+
+  return (
+    <div
+      className={`modelling-region${textureMode ? ' is-texture-shell' : ''}`}
+      onDragEnter={(event) => {
+        if (!hasPngFiles(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+        setPngDropActive(true);
+      }}
+      onDragOver={(event) => {
+        if (!hasPngFiles(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+        if (!pngDropActive) setPngDropActive(true);
+      }}
+      onDragLeave={(event) => {
+        const next = event.relatedTarget as Node | null;
+        if (!next || !event.currentTarget.contains(next)) setPngDropActive(false);
+      }}
+      onDrop={(event) => void importDroppedPngs(event)}
+    >
+      <div
+        ref={textureLeftRef}
+        className="texture-left"
+        style={textureMode ? { width: `${leftPct}%`, display: leftPct <= 0 ? 'none' : 'block' } : undefined}
+      >
+        <div ref={hostRef} className="modelling-canvas" />
+
+        {!textureMode && (
+          <div className="viewport-chrome">
+            {rects.map((r) => (
+              <div key={r.id}>
+                <div
+                  className={`viewport-label${hovered === r.id ? ' is-hover' : ''}${
+                    workspace.activeViewportId === r.id || mode === 'maximized' ? ' is-active' : ''
+                  }`}
+                  style={{ left: r.x + 8, top: r.y + 8 }}
+                  aria-hidden
+                >
+                  <span className="viewport-name">{VIEW_LABELS[r.id]}</span>
+                  <span className="viewport-proj">
+                    {r.id === 'persp' ? 'Perspective' : 'Orthographic'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="viewport-maximize"
+                  style={{ left: r.x + r.width - 30, top: r.y + 8 }}
+                  aria-label={
+                    mode === 'maximized'
+                      ? `Restore ${VIEW_LABELS[r.id]} viewport`
+                      : `Maximize ${VIEW_LABELS[r.id]} viewport`
+                  }
+                  title={mode === 'maximized' ? 'Restore quad view (Tab)' : 'Maximize viewport (Tab)'}
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  }}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    workspace.toggleViewportMaximize(r.id);
+                    viewportEngine.invalidate();
+                    syncUi();
+                  }}
+                >
+                  {mode === 'maximized' ? (
+                    <svg viewBox="0 0 16 16" aria-hidden>
+                      <path d="M3.5 6.5h6v6h-6zM6.5 3.5h6v6" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 16 16" aria-hidden>
+                      <path d="M3.5 6V3.5H6M10 3.5h2.5V6M12.5 10v2.5H10M6 12.5H3.5V10" />
+                    </svg>
+                  )}
+                </button>
+                {r.id === 'persp' && (
+                  <PerspectiveOrientationWidget
+                    axes={perspectiveAxes}
+                    left={r.x + r.width - 80}
+                    top={r.y + r.height - 80}
+                    onOrient={(axis, sign) => viewportEngine.orientPerspective(axis, sign)}
+                    onOrbit={(deltaX, deltaY) =>
+                      viewportEngine.orbitPerspective(deltaX, deltaY)
+                    }
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {textureMode && leftPct > 0 && (
+          <div className="viewport-chrome" aria-hidden>
+            <div className="viewport-label is-active" style={{ left: 8, top: 8 }}>
+              <span className="viewport-name">User</span>
+              <span className="viewport-proj">Perspective</span>
+            </div>
+          </div>
+        )}
+
+        {showDividers && (
+          <>
+            <div
+              className="divider divider-h"
+              style={{ top: `${splits.horizontal * 100}%` }}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                (e.target as HTMLElement).setPointerCapture(e.pointerId);
+                beginDrag('horizontal', e.clientY);
+              }}
+            />
+            <div
+              className="divider divider-v upper"
+              style={{
+                left: `${splits.upperVertical * 100}%`,
+                height: `${splits.horizontal * 100}%`,
+              }}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                (e.target as HTMLElement).setPointerCapture(e.pointerId);
+                beginDrag('upperVertical', e.clientX);
+              }}
+            />
+            <div
+              className="divider divider-v lower"
+              style={{
+                left: `${splits.lowerVertical * 100}%`,
+                top: `${splits.horizontal * 100}%`,
+                height: `${(1 - splits.horizontal) * 100}%`,
+              }}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                (e.target as HTMLElement).setPointerCapture(e.pointerId);
+                beginDrag('lowerVertical', e.clientX);
+              }}
+            />
+          </>
+        )}
+      </div>
+
+      {textureMode && texMax === 'none' && (
+        <div
+          ref={textureSplitRef}
+          className="divider divider-v texture-split"
+          style={{ left: `${leftPct}%` }}
+          onPointerDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            (e.target as HTMLElement).setPointerCapture(e.pointerId);
+            textureDividerDrag.current = {
+              startX: e.clientX,
+              origin: workspace.texture.splitRatio,
+            };
+            liveTextureSplitRef.current = workspace.texture.splitRatio;
+            workspace.input.begin('divider');
+          }}
+        />
+      )}
+
+      {textureMode && rightPct > 0 && (
+        <div ref={textureRightRef} className="texture-right" style={{ width: `${rightPct}%` }}>
+          <Suspense fallback={<div className="uv-canvas-empty"><strong>Loading UV workspace…</strong></div>}>
+            <UvPixelEditor session={session} workspace={workspace} />
+          </Suspense>
+        </div>
+      )}
+
+      {error && (
+        <div className="quad-error">
+          <div>
+            <strong>WebGL unavailable</strong>
+            <p>{error}</p>
+            <button type="button" onClick={() => window.location.reload()}>
+              Reload
+            </button>
+          </div>
+        </div>
+      )}
+      {(pngDropActive || pngImporting) && (
+        <div className="png-drop-overlay" aria-live="polite">
+          <div>
+            <strong>{pngImporting ? 'Creating 3D image object…' : 'Drop PNG to create a 3D object'}</strong>
+            <span>Correct aspect ratio · full-image UV · same texture on both sides</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+type OrientationAxis = 'x' | 'y' | 'z';
+
+function PerspectiveOrientationWidget({
+  axes,
+  left,
+  top,
+  onOrient,
+  onOrbit,
+}: {
+  axes: CameraAxes | null;
+  left: number;
+  top: number;
+  onOrient: (axis: OrientationAxis, sign: 1 | -1) => void;
+  onOrbit: (deltaX: number, deltaY: number) => void;
+}) {
+  const drag = useRef<{
+    pointerId: number;
+    lastX: number;
+    lastY: number;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressAxisClick = useRef(false);
+  const centre = 36;
+  const radius = 24;
+  const projected = (['x', 'y', 'z'] as const).map((axis) => {
+    const right = axes?.right[axis] ?? (axis === 'x' ? -0.75 : axis === 'y' ? 0.9 : 0);
+    const up = axes?.up[axis] ?? (axis === 'x' ? -0.65 : axis === 'z' ? 1 : 0.15);
+    return {
+      axis,
+      positive: { x: centre + right * radius, y: centre - up * radius },
+      negative: { x: centre - right * radius, y: centre + up * radius },
+    };
+  });
+  const beginOrbit = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    suppressAxisClick.current = false;
+    drag.current = {
+      pointerId: event.pointerId,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    };
+  };
+  const updateOrbit = (event: React.PointerEvent<HTMLDivElement>) => {
+    const active = drag.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const deltaX = event.clientX - active.lastX;
+    const deltaY = event.clientY - active.lastY;
+    active.lastX = event.clientX;
+    active.lastY = event.clientY;
+    if (Math.hypot(event.clientX - active.startX, event.clientY - active.startY) > 3) {
+      active.moved = true;
+    }
+    if (active.moved && (deltaX !== 0 || deltaY !== 0)) onOrbit(deltaX, deltaY);
+  };
+  const endOrbit = (event: React.PointerEvent<HTMLDivElement>) => {
+    const active = drag.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    suppressAxisClick.current = active.moved;
+    drag.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    window.setTimeout(() => {
+      suppressAxisClick.current = false;
+    }, 0);
+  };
+  return (
+    <div
+      className="viewport-axis-gizmo"
+      style={{ left, top }}
+      aria-label="Perspective viewport orientation"
+      role="group"
+      onPointerDown={beginOrbit}
+      onPointerMove={updateOrbit}
+      onPointerUp={endOrbit}
+      onPointerCancel={endOrbit}
+    >
+      <svg viewBox="0 0 72 72" aria-hidden>
+        <circle className="axis-centre" cx={centre} cy={centre} r="3" />
+        {projected.map(({ axis, positive, negative }) => (
+          <g key={axis}>
+            <line
+              className={`axis-line axis-${axis}`}
+              x1={negative.x}
+              y1={negative.y}
+              x2={positive.x}
+              y2={positive.y}
+            />
+          </g>
+        ))}
+      </svg>
+      {projected.flatMap(({ axis, positive, negative }) => [
+        <button
+          key={`${axis}+`}
+          type="button"
+          className={`axis-button axis-node axis-${axis}`}
+          style={{ left: positive.x, top: positive.y }}
+          aria-label={`View from positive ${axis.toUpperCase()} axis`}
+          title={`View from +${axis.toUpperCase()}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (suppressAxisClick.current) return;
+            onOrient(axis, 1);
+          }}
+        >
+          {axis.toUpperCase()}
+        </button>,
+        <button
+          key={`${axis}-`}
+          type="button"
+          className={`axis-button axis-tail axis-${axis}`}
+          style={{ left: negative.x, top: negative.y }}
+          aria-label={`View from negative ${axis.toUpperCase()} axis`}
+          title={`View from −${axis.toUpperCase()}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (suppressAxisClick.current) return;
+            onOrient(axis, -1);
+          }}
+        />,
+      ])}
+    </div>
+  );
+}

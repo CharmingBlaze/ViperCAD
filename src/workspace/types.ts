@@ -1,0 +1,87 @@
+export type ViewId = 'persp' | 'top' | 'front' | 'right';
+
+export type LayoutMode = 'quad' | 'maximized';
+
+export type ProjectionType = 'perspective' | 'orthographic';
+
+export type ShadingMode = 'solid' | 'material' | 'wireframe' | 'solid-wire';
+
+/** Split ratios for default quad tree (root horizontal, then vertical per row). */
+export type QuadSplitRatios = {
+  /** Upper row height as fraction of modelling region [0–1]. */
+  horizontal: number;
+  /** Perspective width within upper row [0–1]. */
+  upperVertical: number;
+  /** Front width within lower row [0–1]. */
+  lowerVertical: number;
+};
+
+export type CameraSnapshot = {
+  position: [number, number, number];
+  target: [number, number, number];
+  up: [number, number, number];
+  /** Perspective FOV degrees, or unused for ortho. */
+  fov: number;
+  /** Orthographic view height (world units). Preserved across resize. */
+  orthoHeight: number;
+  zoom: number;
+};
+
+export type ViewportState = {
+  id: ViewId;
+  label: string;
+  projection: ProjectionType;
+  camera: CameraSnapshot;
+  shadingMode: ShadingMode;
+  gridVisible: boolean;
+  xRay: boolean;
+};
+
+export type ViewportLayoutState = {
+  mode: LayoutMode;
+  maximizedViewportId: ViewId | null;
+  splits: QuadSplitRatios;
+  lastActiveViewportId: ViewId;
+  hoveredViewportId: ViewId | null;
+};
+
+/** Top-level application shell: modelling, terrain, or UV/Pixel authoring. */
+export type AppShellMode = 'model' | 'terrain' | 'texture';
+
+export type WorkspacePreferences = {
+  version: 2;
+  layout: ViewportLayoutState;
+  viewports: Record<ViewId, Pick<ViewportState, 'camera' | 'shadingMode' | 'gridVisible' | 'xRay'>>;
+};
+
+export const DEFAULT_SPLITS: QuadSplitRatios = {
+  horizontal: 0.5,
+  upperVertical: 0.5,
+  lowerVertical: 0.5,
+};
+
+export const MIN_SPLIT = 0.15;
+export const MAX_SPLIT = 0.85;
+
+export const VIEW_ORDER: ViewId[] = ['persp', 'top', 'front', 'right'];
+
+export const VIEW_LABELS: Record<ViewId, string> = {
+  persp: 'User',
+  top: 'Top',
+  front: 'Front',
+  right: 'Right',
+};
+
+export function clampSplit(value: number): number {
+  return Math.min(MAX_SPLIT, Math.max(MIN_SPLIT, value));
+}
+
+export function createDefaultLayoutState(): ViewportLayoutState {
+  return {
+    mode: 'quad',
+    maximizedViewportId: null,
+    splits: { ...DEFAULT_SPLITS },
+    lastActiveViewportId: 'persp',
+    hoveredViewportId: null,
+  };
+}
