@@ -3,6 +3,7 @@ import { EditorSession } from '@/core/editor/EditorSession';
 import { CreateDoodleTool, smoothDoodlePoints } from '@/core/tools/CreateDoodleTool';
 import { v3 } from '@/core/math/Vec3';
 import type { ToolPointerInput } from '@/core/tools/Tool';
+import { readCurveOperation } from '@/core/curves/CurveOperation';
 
 function pointer(
   origin: { x: number; y: number; z: number },
@@ -42,6 +43,10 @@ describe('CreateDoodleTool', () => {
     expect(tool.state.stage).toBe('idle');
     expect(session.document.objects.size).toBe(1);
     expect(session.document.meshes.size).toBe(1);
+    const object = [...session.document.objects.values()][0]!;
+    const operation = readCurveOperation(object.metadata.curveOperation);
+    expect(operation?.style).toBe('soft');
+    expect(operation?.points.length).toBeGreaterThanOrEqual(2);
     expect(session.history.canUndo()).toBe(true);
 
     expect(session.undo()).toBe(true);
@@ -124,6 +129,24 @@ describe('CreateDoodleTool', () => {
     expect(Math.max(...zValues) - Math.min(...zValues)).toBeLessThan(1e-6);
   });
 
+  it('exposes the live source guide while freehand Sketch drawing', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-doodle') as CreateDoodleTool;
+    session.tools.setActive('create-doodle', session.context());
+    tool.setStyle('tube', session.context());
+    const origin = { x: 0, y: 0, z: 4 };
+    tool.begin(pointer(origin, { x: -0.3, y: 0.1, z: -1 }), session.context());
+    tool.update(pointer(origin, { x: 0, y: 0.35, z: -1 }), session.context());
+    tool.update(pointer(origin, { x: 0.35, y: 0, z: -1 }), session.context());
+
+    const guide = tool.getDraftOperation();
+    expect(guide).toMatchObject({
+      inputMode: 'sketch',
+      style: 'tube',
+    });
+    expect(guide!.points.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('smooths an open stroke while preserving both endpoints', () => {
     const points = [v3(0, 0, 0), v3(1, 0.5, 0), v3(2, -0.5, 0), v3(3, 0, 0)];
     const smooth = smoothDoodlePoints(points, false, 2);
@@ -139,5 +162,95 @@ describe('CreateDoodleTool', () => {
     const radius = (values: typeof points) =>
       values.reduce((sum, point) => sum + Math.hypot(point.x, point.y), 0) / values.length;
     expect(radius(smooth)).toBeCloseTo(radius(points), 1);
+  });
+
+  it('builds a precise Vector Pen sweep from click-by-click control points', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-doodle') as CreateDoodleTool;
+    session.tools.setActive('create-doodle', session.context());
+    tool.setInputMode('pen', session.context());
+    tool.setStyle('rail-sweep', session.context());
+    const origin = { x: 0, y: 0, z: 4 };
+
+    tool.begin(pointer(origin, { x: -0.35, y: 0.2, z: -1 }), session.context());
+    tool.update(pointer(origin, { x: 0, y: 0.45, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 0, y: 0.45, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 0.4, y: 0.1, z: -1 }), session.context());
+    expect(tool.state.points).toHaveLength(3);
+
+    tool.popPoint(session.context());
+    expect(tool.state.points).toHaveLength(2);
+    tool.begin(pointer(origin, { x: 0.4, y: -0.15, z: -1 }), session.context());
+    tool.confirm(session.context());
+
+    const object = [...session.document.objects.values()][0]!;
+    const operation = readCurveOperation(object.metadata.curveOperation);
+    expect(operation).toMatchObject({
+      style: 'rail-sweep',
+      inputMode: 'pen',
+    });
+    expect(operation?.points).toHaveLength(3);
+  });
+
+  it('keeps Vector Pen draft nodes and Bézier handles editable before finish', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-doodle') as CreateDoodleTool;
+    session.tools.setActive('create-doodle', session.context());
+    tool.setInputMode('pen', session.context());
+    tool.setCurveType('bezier', session.context());
+    tool.setStyle('ribbon', session.context());
+    const origin = { x: 0, y: 0, z: 4 };
+
+    tool.begin(pointer(origin, { x: -0.4, y: -0.2, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 0, y: 0.45, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 0.45, y: -0.1, z: -1 }), session.context());
+    const before = tool.getDraftOperation()!;
+    expect(before.points).toHaveLength(3);
+
+    const movedHandle = {
+      ...tool.state.handlesOut[0]!,
+      y: tool.state.handlesOut[0]!.y + 0.75,
+    };
+    tool.updateDraftControl(
+      { kind: 'handle-out', index: 0 },
+      movedHandle,
+      session.context(),
+    );
+    tool.setDraftPointCoordinate(1, 'x', 1.234567891, session.context());
+    const edited = tool.getDraftOperation()!;
+    expect(edited.handlesOut[0]).toEqual(movedHandle);
+    expect(edited.points[1]!.x).toBe(1.234567891);
+    expect(tool.getPreviewMesh()?.vertices.size).toBeGreaterThan(0);
+
+    tool.confirm(session.context());
+    const object = [...session.document.objects.values()][0]!;
+    const committed = readCurveOperation(object.metadata.curveOperation)!;
+    expect(committed.points[1]!.x).toBe(1.234567891);
+    expect(committed.handlesOut[0]).toEqual(movedHandle);
+  });
+
+  it('snaps a Vector Pen Capsule exactly to its first point when Auto Connect is enabled', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-doodle') as CreateDoodleTool;
+    session.tools.setActive('create-doodle', session.context());
+    tool.setInputMode('pen', session.context());
+    tool.setStyle('capsule', session.context());
+    tool.radius = 0.1;
+    const origin = { x: 0, y: 0, z: 4 };
+    const firstRay = { x: -0.35, y: 0.2, z: -1 };
+
+    tool.begin(pointer(origin, firstRay), session.context());
+    tool.begin(pointer(origin, { x: 0.1, y: 0.5, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 0.45, y: -0.15, z: -1 }), session.context());
+    const first = { ...tool.state.points[0]! };
+    tool.update(pointer(origin, { x: -0.345, y: 0.205, z: -1 }), session.context());
+
+    expect(tool.state.closed).toBe(true);
+    expect(tool.state.previewPoint).toEqual(first);
+
+    tool.setAutoConnect(false, session.context());
+    tool.update(pointer(origin, { x: -0.345, y: 0.205, z: -1 }), session.context());
+    expect(tool.state.closed).toBe(false);
+    expect(tool.state.previewPoint).not.toEqual(first);
   });
 });

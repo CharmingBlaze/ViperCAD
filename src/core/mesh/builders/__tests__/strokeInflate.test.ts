@@ -57,5 +57,15 @@ describe('StrokeInflateBuilder', () => {
     expect(mesh.vertices.size).toBe(64); // four clean outline rings
     expect(mesh.faces.size).toBeGreaterThan(50);
     expect(validateMeshFull(mesh).issues.filter((i) => i.severity === 'error')).toEqual([]);
+    const layerId = mesh.defaultUvLayerId!;
+    const uvs = [...mesh.faceCorners.values()]
+      .map((corner) => corner.uvs.get(layerId))
+      .filter((uv): uv is { x: number; y: number } => !!uv);
+    expect(Math.min(...uvs.map((uv) => uv.x))).toBeCloseTo(0);
+    expect(Math.max(...uvs.map((uv) => uv.x))).toBeCloseTo(1);
+    expect(Math.min(...uvs.map((uv) => uv.y))).toBeCloseTo(0);
+    expect(Math.max(...uvs.map((uv) => uv.y))).toBeCloseTo(1);
+    expect(new Set(uvs.map((uv) => `${uv.x.toFixed(5)}:${uv.y.toFixed(5)}`)).size)
+      .toBeLessThan(uvs.length / 2);
   });
 });

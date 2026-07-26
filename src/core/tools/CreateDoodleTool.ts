@@ -1,5 +1,10 @@
 import { commitMeshObject } from '@/core/document/ModelDocument';
 import {
+  applySimpleTextureToObject,
+  defaultSimpleTextureSettings,
+  type SimpleTextureSettings,
+} from '@/core/curves/SimpleTexture';
+import {
   addVec3,
   lengthSqVec3,
   normalizeVec3,
@@ -9,20 +14,38 @@ import {
   v3,
 } from '@/core/math/Vec3';
 import type { EditableMesh } from '@/core/mesh/types';
+import type {
+  PathDistributionMode,
+  PathOutput,
+  PathProfile,
+} from '@/core/mesh/builders/PathOutputBuilder';
+import type { CurveSweepCapStyle } from '@/core/mesh/builders/CurveSweepBuilder';
 import {
-  buildInflatedDoodle,
   doodleCloseDistance,
   isStrokeClosed,
   strokePathLength,
 } from '@/core/mesh/builders/StrokeInflateBuilder';
-import { buildStrokeTube } from '@/core/mesh/builders/StrokeTubeBuilder';
 import { validateMeshFull } from '@/core/mesh/Validation';
 import { cloneSelection, type SelectionState } from '@/core/selection/SelectionManager';
+import {
+  curveOperationFromStroke,
+  defaultBezierHandles,
+  evaluateCurveOperation,
+  isPathStyle,
+  serializeCurveOperation,
+  type CurveOperation,
+  type CurveInputMode,
+  type CurveSolidMode,
+  type CurveStyle,
+  type CurveType,
+} from '@/core/curves/CurveOperation';
+import type { LatheAxis } from '@/core/mesh/builders/LatheBuilder';
+export { smoothCurvePoints as smoothDoodlePoints } from '@/core/curves/CurveOperation';
 import type { ModellingContext, Tool, ToolPointerInput } from './Tool';
 
 export type DoodleDrawStage = 'idle' | 'drawing';
 export type DoodlePolyPreset = 'low' | 'medium';
-export type DoodleStyle = 'soft' | 'sharp' | 'tube';
+export type DoodleStyle = CurveStyle;
 
 export type DoodleToolState = {
   stage: DoodleDrawStage;
@@ -31,10 +54,13 @@ export type DoodleToolState = {
   revision: number;
   /** End returned near start — inflate on commit. */
   closed: boolean;
+  /** Live segment endpoint for click-by-click Pen input. */
+  previewPoint: Vec3 | null;
+  handlesIn: Vec3[];
+  handlesOut: Vec3[];
 };
 
 const RADIAL: Record<DoodlePolyPreset, number> = { low: 6, medium: 10 };
-const OUTLINE: Record<DoodlePolyPreset, number> = { low: 16, medium: 28 };
 
 /**
  * Free-air Paint 3D–style doodle:
@@ -46,7 +72,46 @@ export class CreateDoodleTool implements Tool {
   radius = 0.08;
   preset: DoodlePolyPreset = 'low';
   style: DoodleStyle = 'soft';
+  inputMode: CurveInputMode = 'sketch';
+  curveType: CurveType = 'catmull-rom';
+  solidMode: CurveSolidMode = 'extrude';
+  latheAxis: LatheAxis = 'y';
+  latheSegments = 16;
+  latheProfileRings = 32;
+  latheSmoothing = 0.15;
+  latheAngle = 360;
+  latheCaps = true;
+  pathOutput: PathOutput = 'tube';
+  startScale = 1;
+  endScale = 1;
+  twist = 0;
+  profileWidth = 1;
+  profileHeight = 1;
+  pathStartCap: CurveSweepCapStyle = 'flat';
+  pathEndCap: CurveSweepCapStyle = 'flat';
+  pathRadiusScale = 1;
+  pathRadialSegments = 8;
+  pathOffset = 0;
+  pathSpacing = 1;
+  pathProfile: PathProfile = 'round';
+  pathChainAlternating = true;
+  pathCardCrossed = false;
+  pathDistributionMode: PathDistributionMode = 'spacing';
+  pathCount = 8;
+  pathStartPadding = 0;
+  pathEndPadding = 0;
+  pathRandomScale = 0;
+  pathRotation = 0;
+  pathRandomRotation = 0;
+  pathAlternateRotation = false;
+  pathMirrorAlternate = false;
+  pathSeed = 1;
+  pathKeepInstances = true;
+  pathSourceObjectId: string | null = null;
+  pathSourceMesh: EditableMesh | null = null;
+  autoConnect = true;
   smoothDrawing = true;
+  simpleTextureSettings: SimpleTextureSettings = defaultSimpleTextureSettings();
   state: DoodleToolState = this.emptyState();
   private previousSelection: SelectionState | null = null;
   private strokePlaneOrigin: Vec3 | null = null;
@@ -67,9 +132,62 @@ export class CreateDoodleTool implements Tool {
 
   setStyle(style: DoodleStyle, context: ModellingContext): void {
     this.style = style;
-    if (this.state.stage === 'drawing') {
-      this.state.closed = style !== 'tube' && this.state.points.length >= 3;
+    if (style === 'capsule' && this.pathRadialSegments < 12) {
+      this.pathRadialSegments = 12;
     }
+    if (this.state.stage === 'drawing') {
+      this.state.closed =
+        this.solidMode !== 'lathe' &&
+        !isPathStyle(style) &&
+        this.state.points.length >= 3;
+    }
+    this.touch(context);
+  }
+
+  setInputMode(mode: CurveInputMode, context: ModellingContext): void {
+    if (mode === this.inputMode) return;
+    this.cancel(context);
+    this.inputMode = mode;
+    this.touch(context);
+  }
+
+  setCurveType(type: CurveType, context: ModellingContext): void {
+    this.curveType = type;
+    this.smoothDrawing = type !== 'polyline';
+    this.touch(context);
+  }
+
+  setSolidMode(mode: CurveSolidMode, context: ModellingContext): void {
+    this.solidMode = mode;
+    if (mode === 'lathe') this.state.closed = false;
+    this.touch(context);
+  }
+
+  setLatheSettings(
+    settings: Partial<{
+      axis: LatheAxis;
+      segments: number;
+      profileRings: number;
+      smoothing: number;
+      angle: number;
+      caps: boolean;
+    }>,
+    context: ModellingContext,
+  ): void {
+    if (settings.axis) this.latheAxis = settings.axis;
+    if (settings.segments != null) {
+      this.latheSegments = Math.max(8, Math.min(64, Math.round(settings.segments)));
+    }
+    if (settings.profileRings != null) {
+      this.latheProfileRings = Math.max(4, Math.min(128, Math.round(settings.profileRings)));
+    }
+    if (settings.smoothing != null) {
+      this.latheSmoothing = Math.max(0, Math.min(1, settings.smoothing));
+    }
+    if (settings.angle != null) {
+      this.latheAngle = Math.max(1, Math.min(360, settings.angle));
+    }
+    if (settings.caps != null) this.latheCaps = settings.caps;
     this.touch(context);
   }
 
@@ -78,13 +196,138 @@ export class CreateDoodleTool implements Tool {
     this.touch(context);
   }
 
+  setAutoConnect(enabled: boolean, context: ModellingContext): void {
+    this.autoConnect = enabled;
+    if (this.state.stage === 'drawing') {
+      this.state.closed = this.shouldFill(this.state.points);
+      if (!enabled) this.state.previewPoint = null;
+    }
+    this.touch(context);
+  }
+
   setRadius(radius: number, context: ModellingContext): void {
     this.radius = Math.max(0.01, Math.min(2, radius));
     this.touch(context);
   }
 
+  setSimpleTextureSettings(
+    settings: SimpleTextureSettings,
+    context: ModellingContext,
+  ): void {
+    this.simpleTextureSettings = { ...settings };
+    this.touch(context);
+  }
+
+  setPathSettings(
+    settings: Partial<{
+      output: PathOutput;
+      startScale: number;
+      endScale: number;
+      twist: number;
+      profileWidth: number;
+      profileHeight: number;
+      startCap: CurveSweepCapStyle;
+      endCap: CurveSweepCapStyle;
+      radiusScale: number;
+      radialSegments: number;
+      offset: number;
+      spacing: number;
+      profile: PathProfile;
+      chainAlternating: boolean;
+      cardCrossed: boolean;
+      distributionMode: PathDistributionMode;
+      count: number;
+      startPadding: number;
+      endPadding: number;
+      randomScale: number;
+      rotation: number;
+      randomRotation: number;
+      alternateRotation: boolean;
+      mirrorAlternate: boolean;
+      seed: number;
+      keepInstances: boolean;
+      sourceObjectId: string | null;
+      sourceMesh: EditableMesh | null;
+    }>,
+    context: ModellingContext,
+  ): void {
+    if (settings.output) this.pathOutput = settings.output;
+    if (settings.startScale != null) this.startScale = clamp(settings.startScale, 0.02, 4);
+    if (settings.endScale != null) this.endScale = clamp(settings.endScale, 0.02, 4);
+    if (settings.twist != null) this.twist = clamp(settings.twist, -2160, 2160);
+    if (settings.profileWidth != null) this.profileWidth = clamp(settings.profileWidth, 0.05, 4);
+    if (settings.profileHeight != null) this.profileHeight = clamp(settings.profileHeight, 0.05, 4);
+    if (settings.startCap) this.pathStartCap = settings.startCap;
+    if (settings.endCap) this.pathEndCap = settings.endCap;
+    if (settings.radiusScale != null) this.pathRadiusScale = clamp(settings.radiusScale, 0.1, 4);
+    if (settings.radialSegments != null) {
+      this.pathRadialSegments = Math.round(clamp(settings.radialSegments, 3, 24));
+    }
+    if (settings.offset != null) this.pathOffset = clamp(settings.offset, -64, 64);
+    if (settings.spacing != null) this.pathSpacing = clamp(settings.spacing, 0.05, 128);
+    if (settings.profile) this.pathProfile = settings.profile;
+    if (settings.chainAlternating != null) this.pathChainAlternating = settings.chainAlternating;
+    if (settings.cardCrossed != null) this.pathCardCrossed = settings.cardCrossed;
+    if (settings.distributionMode) this.pathDistributionMode = settings.distributionMode;
+    if (settings.count != null) this.pathCount = Math.round(clamp(settings.count, 1, 200));
+    if (settings.startPadding != null) this.pathStartPadding = clamp(settings.startPadding, 0, 128);
+    if (settings.endPadding != null) this.pathEndPadding = clamp(settings.endPadding, 0, 128);
+    if (settings.randomScale != null) this.pathRandomScale = clamp(settings.randomScale, 0, 1);
+    if (settings.rotation != null) this.pathRotation = clamp(settings.rotation, -180, 180);
+    if (settings.randomRotation != null) {
+      this.pathRandomRotation = clamp(settings.randomRotation, 0, 180);
+    }
+    if (settings.alternateRotation != null) {
+      this.pathAlternateRotation = settings.alternateRotation;
+    }
+    if (settings.mirrorAlternate != null) this.pathMirrorAlternate = settings.mirrorAlternate;
+    if (settings.seed != null) this.pathSeed = Math.round(clamp(settings.seed, 1, 9999));
+    if (settings.keepInstances != null) this.pathKeepInstances = settings.keepInstances;
+    if (settings.sourceObjectId !== undefined) this.pathSourceObjectId = settings.sourceObjectId;
+    if (settings.sourceMesh !== undefined) this.pathSourceMesh = settings.sourceMesh;
+    this.touch(context);
+  }
+
+  popPoint(context: ModellingContext): void {
+    if (this.inputMode !== 'pen' || this.state.stage !== 'drawing') return;
+    this.state.points.pop();
+    this.state.handlesIn.pop();
+    this.state.handlesOut.pop();
+    this.state.closed = false;
+    this.state.previewPoint = null;
+    if (this.state.points.length === 0) {
+      this.previousSelection = null;
+      this.strokePlaneOrigin = null;
+      this.strokePlaneNormal = null;
+      this.state = this.emptyState(this.state.revision + 1);
+    } else {
+      this.state.revision += 1;
+    }
+    context.requestRedraw();
+  }
+
   begin(input: ToolPointerInput, context: ModellingContext): void {
     if (input.button !== 'left') return;
+    if (this.inputMode === 'pen' && this.state.stage === 'drawing') {
+      const point = this.sampleOnStrokePlane(input);
+      const first = this.state.points[0];
+      if (
+        this.autoConnect &&
+        first &&
+        this.state.points.length >= 3 &&
+        this.detectClosed([...this.state.points, point])
+      ) {
+        this.state.closed = true;
+      } else {
+        this.state.points.push(point);
+        this.refreshDraftHandles();
+        this.state.closed = this.shouldFill(this.state.points);
+      }
+      this.state.previewPoint = null;
+      this.state.revision += 1;
+      context.requestRedraw();
+      return;
+    }
     if (this.state.stage !== 'idle') return;
     const depth = this.resolveDepth(input);
     const point = this.samplePoint(input, depth);
@@ -97,6 +340,9 @@ export class CreateDoodleTool implements Tool {
       depth,
       revision: this.state.revision + 1,
       closed: false,
+      previewPoint: null,
+      handlesIn: [{ ...point }],
+      handlesOut: [{ ...point }],
     };
     context.requestRedraw();
   }
@@ -104,6 +350,14 @@ export class CreateDoodleTool implements Tool {
   update(input: ToolPointerInput, context: ModellingContext): void {
     if (this.state.stage !== 'drawing') return;
     const point = this.sampleOnStrokePlane(input);
+    if (this.inputMode === 'pen') {
+      const previewPoint = this.snapToStartIfClosing(this.state.points, point);
+      this.state.previewPoint = previewPoint;
+      this.state.closed = this.shouldFill([...this.state.points, previewPoint]);
+      this.state.revision += 1;
+      context.requestRedraw();
+      return;
+    }
     const minSpacing = this.radius * 0.55;
     const last = this.state.points[this.state.points.length - 1];
     if (!last || lengthSqVec3(subVec3(point, last)) >= minSpacing * minSpacing) {
@@ -133,8 +387,29 @@ export class CreateDoodleTool implements Tool {
       points.push(addVec3(p, v3(this.radius * 2, 0, 0)));
     }
 
-    const closed = this.shouldFill(points);
-    const mesh = this.buildMesh(points, closed);
+    const closed = this.state.closed || this.shouldFill(points);
+    const operation = curveOperationFromStroke({
+      style: this.style,
+      points,
+      radius: this.radius,
+      resolution: this.preset,
+      smooth: this.smoothDrawing,
+      cyclic: closed,
+      inputMode: this.inputMode,
+      curveType: this.curveType,
+      handlesIn: this.state.handlesIn,
+      handlesOut: this.state.handlesOut,
+      tipStyle: this.simpleTextureSettings.tipStyle,
+      solidMode: this.solidMode,
+      latheAxis: this.latheAxis,
+      latheSegments: this.latheSegments,
+      latheProfileRings: this.latheProfileRings,
+      latheSmoothing: this.latheSmoothing,
+      latheAngle: this.latheAngle,
+      latheCaps: this.latheCaps,
+      ...this.pathOperationSettings(),
+    });
+    const mesh = evaluateCurveOperation(operation, this.pathSourceMesh);
     const validation = validateMeshFull(mesh);
     const errors = validation.issues.filter((i) => i.severity === 'error');
     if (errors.length) {
@@ -145,10 +420,11 @@ export class CreateDoodleTool implements Tool {
     const beforeSelection = this.previousSelection
       ? cloneSelection(this.previousSelection)
       : cloneSelection(context.selection.state);
-    const label =
-      this.style === 'soft' ? 'Soft Doodle' : this.style === 'sharp' ? 'Sharp Doodle' : 'Doodle Tube';
+    const label = this.objectLabel();
     const { objectId, meshId } = commitMeshObject(context.document, mesh, { name: label });
     const object = context.document.objects.get(objectId)!;
+    object.metadata.curveOperation = serializeCurveOperation(operation);
+    applySimpleTextureToObject(context.document, object, this.simpleTextureSettings);
     const meshRef = context.document.meshes.get(meshId)!;
     context.selection.setMode('object');
     context.selection.selectObjects([objectId], 'replace');
@@ -156,11 +432,7 @@ export class CreateDoodleTool implements Tool {
     let applied = true;
     context.history.execute({
       name:
-        this.style === 'soft'
-          ? 'Create Soft Doodle'
-          : this.style === 'sharp'
-            ? 'Create Sharp Doodle'
-            : 'Create Doodle Tube',
+        `Create ${label}`,
       execute: () => {
         if (applied) return;
         context.document.objects.set(object.id, object);
@@ -212,11 +484,88 @@ export class CreateDoodleTool implements Tool {
 
   getPreviewMesh() {
     if (this.state.stage !== 'drawing' || this.state.points.length < 1) return null;
+    const sourcePoints =
+      this.inputMode === 'pen' && this.state.previewPoint
+        ? [...this.state.points, this.state.previewPoint]
+        : this.state.points;
     const points =
-      this.state.points.length >= 2
-        ? this.state.points
-        : [this.state.points[0]!, addVec3(this.state.points[0]!, v3(this.radius * 1.5, 0, 0))];
-    return this.buildMesh(points, this.shouldFill(points));
+      sourcePoints.length >= 2
+        ? sourcePoints
+        : [sourcePoints[0]!, addVec3(sourcePoints[0]!, v3(this.radius * 1.5, 0, 0))];
+    const handles = this.draftHandlesFor(points);
+    return this.buildMesh(points, this.shouldFill(points), handles);
+  }
+
+  /** Stable procedural source shown while drawing and edited before a Vector Pen curve is committed. */
+  getDraftOperation(): CurveOperation | null {
+    if (
+      this.state.stage !== 'drawing' ||
+      this.state.points.length === 0
+    ) {
+      return null;
+    }
+    const points = this.state.points;
+    const handles = this.draftHandlesFor(points);
+    return curveOperationFromStroke({
+      style: this.style,
+      points,
+      radius: this.radius,
+      resolution: this.preset,
+      smooth: this.smoothDrawing,
+      cyclic: this.state.closed,
+      inputMode: this.inputMode,
+      curveType: this.curveType,
+      handlesIn: handles.handlesIn,
+      handlesOut: handles.handlesOut,
+      tipStyle: this.simpleTextureSettings.tipStyle,
+      solidMode: this.solidMode,
+      latheAxis: this.latheAxis,
+      latheSegments: this.latheSegments,
+      latheProfileRings: this.latheProfileRings,
+      latheSmoothing: this.latheSmoothing,
+      latheAngle: this.latheAngle,
+      latheCaps: this.latheCaps,
+      ...this.pathOperationSettings(),
+    });
+  }
+
+  updateDraftControl(
+    target: { kind: 'anchor' | 'handle-in' | 'handle-out'; index: number },
+    point: Vec3,
+    context: ModellingContext,
+  ): void {
+    if (this.inputMode !== 'pen' || this.state.stage !== 'drawing') return;
+    if (!this.state.points[target.index]) return;
+    if (target.kind === 'anchor') {
+      const previous = this.state.points[target.index]!;
+      const delta = subVec3(point, previous);
+      this.state.points[target.index] = { ...point };
+      this.state.handlesIn[target.index] = addVec3(this.state.handlesIn[target.index]!, delta);
+      this.state.handlesOut[target.index] = addVec3(this.state.handlesOut[target.index]!, delta);
+    } else if (target.kind === 'handle-in') {
+      this.state.handlesIn[target.index] = { ...point };
+    } else {
+      this.state.handlesOut[target.index] = { ...point };
+    }
+    this.state.previewPoint = null;
+    this.state.closed = this.shouldFill(this.state.points);
+    this.state.revision += 1;
+    context.requestRedraw();
+  }
+
+  setDraftPointCoordinate(
+    index: number,
+    axis: keyof Vec3,
+    value: number,
+    context: ModellingContext,
+  ): void {
+    const point = this.state.points[index];
+    if (!point || !Number.isFinite(value)) return;
+    this.updateDraftControl(
+      { kind: 'anchor', index },
+      { ...point, [axis]: value },
+      context,
+    );
   }
 
   radialSegments(): number {
@@ -276,82 +625,145 @@ export class CreateDoodleTool implements Tool {
   }
 
   private shouldFill(points: Vec3[]): boolean {
-    if (this.style === 'tube') return false;
+    if (this.solidMode === 'lathe') return false;
+    if (isPathStyle(this.style)) return this.autoConnect && this.detectClosed(points);
     if (points.length < 3) return false;
     // Shape modes close the final segment automatically, like Paint 3D's
     // soft/sharp doodles. Near-start detection is still used for live feedback.
     return this.detectClosed(points) || strokePathLength(points) > this.radius * 4;
   }
 
-  private buildMesh(points: Vec3[], closed: boolean): EditableMesh {
-    let source = points;
-    if (closed && this.detectClosed(points) && points.length > 3) {
-      source = points.slice(0, -1);
-    }
-    if (this.smoothDrawing) {
-      source = smoothDoodlePoints(source, closed, this.preset === 'medium' ? 2 : 1);
-    }
-    if (closed) {
-      return buildInflatedDoodle({
-        points: source,
-        thickness: this.style === 'soft' ? this.radius * 1.35 : this.radius,
-        outlineSegments: OUTLINE[this.preset],
-        profile: this.style === 'soft' ? 'soft' : 'sharp',
-        name: 'Doodle',
-      });
-    }
-    return buildStrokeTube({
-      points: source,
+  private snapToStartIfClosing(points: Vec3[], point: Vec3): Vec3 {
+    const first = points[0];
+    if (!this.autoConnect || !first || points.length < 3) return point;
+    const closeDistance = doodleCloseDistance(
+      this.radius,
+      strokePathLength([...points, point]),
+    );
+    return lengthSqVec3(subVec3(point, first)) <= closeDistance * closeDistance
+      ? { ...first }
+      : point;
+  }
+
+  private buildMesh(
+    points: Vec3[],
+    closed: boolean,
+    handles = this.draftHandlesFor(points),
+  ): EditableMesh {
+    return evaluateCurveOperation(curveOperationFromStroke({
+      style: this.style,
+      points,
       radius: this.radius,
-      radialSegments: RADIAL[this.preset],
-      name: 'Doodle',
-    });
+      resolution: this.preset,
+      smooth: this.smoothDrawing,
+      cyclic: closed,
+      inputMode: this.inputMode,
+      curveType: this.curveType,
+      handlesIn: handles.handlesIn,
+      handlesOut: handles.handlesOut,
+      tipStyle: this.simpleTextureSettings.tipStyle,
+      solidMode: this.solidMode,
+      latheAxis: this.latheAxis,
+      latheSegments: this.latheSegments,
+      latheProfileRings: this.latheProfileRings,
+      latheSmoothing: this.latheSmoothing,
+      latheAngle: this.latheAngle,
+      latheCaps: this.latheCaps,
+      ...this.pathOperationSettings(),
+    }), this.pathSourceMesh);
   }
 
   private emptyState(revision = 0): DoodleToolState {
-    return { stage: 'idle', points: [], depth: 4, revision, closed: false };
+    return {
+      stage: 'idle',
+      points: [],
+      depth: 4,
+      revision,
+      closed: false,
+      previewPoint: null,
+      handlesIn: [],
+      handlesOut: [],
+    };
+  }
+
+  private refreshDraftHandles(): void {
+    const defaults = defaultBezierHandles(this.state.points, false);
+    this.state.handlesIn = this.state.points.map((point, index) => {
+      const current = this.state.handlesIn[index];
+      return current && !samePoint(current, point) ? current : defaults.handlesIn[index]!;
+    });
+    this.state.handlesOut = this.state.points.map((point, index) => {
+      const current = this.state.handlesOut[index];
+      return current && !samePoint(current, point) ? current : defaults.handlesOut[index]!;
+    });
+  }
+
+  private draftHandlesFor(points: Vec3[]): { handlesIn: Vec3[]; handlesOut: Vec3[] } {
+    const defaults = defaultBezierHandles(points, false);
+    return {
+      handlesIn: points.map((_point, index) => this.state.handlesIn[index] ?? defaults.handlesIn[index]!),
+      handlesOut: points.map((_point, index) => this.state.handlesOut[index] ?? defaults.handlesOut[index]!),
+    };
+  }
+
+  private objectLabel(): string {
+    if (this.solidMode === 'lathe') return 'Lathe';
+    if (this.style === 'soft') return 'Soft Curve';
+    if (this.style === 'sharp') return 'Sharp Curve';
+    if (this.style === 'tube') return 'Tube Sweep';
+    if (this.style === 'capsule') return 'Capsule Path';
+    if (this.style === 'ribbon') return 'Ribbon Sweep';
+    if (this.style === 'hair') return 'Hair Path';
+    if (this.style === 'hair-strip') return 'Hair Strip';
+    if (this.style === 'rounded-hair') return 'Rounded Hair';
+    if (this.style === 'tapered-tube') return 'Tapered Tube';
+    if (this.style === 'rope') return 'Rope Curve';
+    if (this.style === 'square-sweep') return 'Square Sweep';
+    return 'Rail Sweep';
   }
 
   private touch(context: ModellingContext): void {
     this.state.revision += 1;
     context.requestRedraw();
   }
+
+  private pathOperationSettings() {
+    return {
+      pathOutput: this.pathOutput,
+      startScale: this.startScale,
+      endScale: this.endScale,
+      twist: this.twist,
+      profileWidth: this.profileWidth,
+      profileHeight: this.profileHeight,
+      pathStartCap: this.pathStartCap,
+      pathEndCap: this.pathEndCap,
+      pathRadiusScale: this.pathRadiusScale,
+      pathRadialSegments: this.pathRadialSegments,
+      pathOffset: this.pathOffset,
+      pathSpacing: this.pathSpacing,
+      pathProfile: this.pathProfile,
+      pathChainAlternating: this.pathChainAlternating,
+      pathCardCrossed: this.pathCardCrossed,
+      pathDistributionMode: this.pathDistributionMode,
+      pathCount: this.pathCount,
+      pathStartPadding: this.pathStartPadding,
+      pathEndPadding: this.pathEndPadding,
+      pathRandomScale: this.pathRandomScale,
+      pathRotation: this.pathRotation,
+      pathRandomRotation: this.pathRandomRotation,
+      pathAlternateRotation: this.pathAlternateRotation,
+      pathMirrorAlternate: this.pathMirrorAlternate,
+      pathSeed: this.pathSeed,
+      pathKeepInstances: this.pathKeepInstances,
+      pathSourceObjectId: this.pathSourceObjectId,
+    };
+  }
 }
 
-/** Smooth freehand jitter without changing point count or open-stroke endpoints. */
-export function smoothDoodlePoints(points: Vec3[], closed: boolean, passes = 1): Vec3[] {
-  if (points.length < 3 || passes < 1) return points.map((point) => ({ ...point }));
-  const original = points.map((point) => ({ ...point }));
-  let result = original;
-  for (let pass = 0; pass < passes; pass++) {
-    result = result.map((point, index) => {
-      if (!closed && (index === 0 || index === result.length - 1)) return { ...point };
-      const previous = result[(index - 1 + result.length) % result.length]!;
-      const next = result[(index + 1) % result.length]!;
-      return {
-        x: point.x * 0.5 + (previous.x + next.x) * 0.25,
-        y: point.y * 0.5 + (previous.y + next.y) * 0.25,
-        z: point.z * 0.5 + (previous.z + next.z) * 0.25,
-      };
-    });
-  }
+function samePoint(a: Vec3, b: Vec3): boolean {
+  return lengthSqVec3(subVec3(a, b)) < 1e-12;
+}
 
-  // Cyclic smoothing naturally contracts loops. Restore their average radius
-  // so enabling smoothing cleans the hand motion without shrinking the shape.
-  if (closed) {
-    const centre = (values: Vec3[]) =>
-      scaleVec3(values.reduce((sum, point) => addVec3(sum, point), v3()), 1 / values.length);
-    const beforeCentre = centre(original);
-    const afterCentre = centre(result);
-    const averageRadius = (values: Vec3[], c: Vec3) =>
-      values.reduce((sum, point) => sum + Math.sqrt(lengthSqVec3(subVec3(point, c))), 0) /
-      values.length;
-    const beforeRadius = averageRadius(original, beforeCentre);
-    const afterRadius = averageRadius(result, afterCentre);
-    const scale = afterRadius > 1e-8 ? beforeRadius / afterRadius : 1;
-    result = result.map((point) =>
-      addVec3(beforeCentre, scaleVec3(subVec3(point, afterCentre), scale)),
-    );
-  }
-  return result;
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Number.isFinite(value) ? value : min));
 }

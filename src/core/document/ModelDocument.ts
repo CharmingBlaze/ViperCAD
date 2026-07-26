@@ -188,6 +188,7 @@ export function duplicateObject(doc: ModelDocument, objectId: ObjectId, uniqueMe
   copy.transform = cloneTransform(src.transform);
   copy.visible = src.visible;
   copy.locked = src.locked;
+  copy.metadata = { ...src.metadata };
   addObjectToDocument(doc, copy);
   return copy.id;
 }

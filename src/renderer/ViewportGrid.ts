@@ -10,7 +10,7 @@ import {
   Vector3,
   type Camera,
 } from 'three';
-import type { ViewId } from '@/workspace/types';
+import type { ViewId, ViewPreset } from '@/workspace/types';
 
 /** Number of cells used to choose the adaptive minor-line spacing. */
 export const GRID_BASE_SIZE = 20;
@@ -45,12 +45,12 @@ export class ViewportGrid extends Group {
     this.visible = false;
   }
 
-  update(viewId: ViewId, size: number, target: Vector3): void {
+  update(viewId: ViewId | ViewPreset, size: number, target: Vector3): void {
     const spacing = size / GRID_BASE_DIVISIONS;
     const [targetU, targetV] =
-      viewId === 'top' || viewId === 'persp'
+      viewId === 'top' || viewId === 'bottom' || viewId === 'persp' || viewId === 'perspective'
         ? [target.x, target.z]
-        : viewId === 'front'
+        : viewId === 'front' || viewId === 'back'
           ? [target.x, target.y]
           : [target.y, target.z];
     const anchorU = snappedGridAnchor(targetU, spacing);
@@ -70,8 +70,8 @@ export class ViewportGrid extends Group {
     const colours: number[] = [];
 
     const pushVertex = (u: number, v: number, colour: Color) => {
-      if (viewId === 'top' || viewId === 'persp') positions.push(u, PLANE_EPS, v);
-      else if (viewId === 'front') positions.push(u, v, PLANE_EPS);
+      if (viewId === 'top' || viewId === 'bottom' || viewId === 'persp' || viewId === 'perspective') positions.push(u, PLANE_EPS, v);
+      else if (viewId === 'front' || viewId === 'back') positions.push(u, v, PLANE_EPS);
       else positions.push(PLANE_EPS, u, v);
       colours.push(colour.r, colour.g, colour.b);
     };
@@ -88,14 +88,17 @@ export class ViewportGrid extends Group {
     for (let i = firstU; i <= lastU; i++) {
       const u = i * spacing;
       // A constant-U line runs along V, so the origin line uses V's axis colour.
-      const vAxisColour = viewId === 'top' || viewId === 'right' ? AXIS_Z : AXIS_Y;
+      const vAxisColour =
+        viewId === 'top' || viewId === 'bottom' || viewId === 'left' || viewId === 'right'
+          ? AXIS_Z
+          : AXIS_Y;
       const uColour = lineColour(u, vAxisColour);
       pushVertex(u, vMin, uColour);
       pushVertex(u, vMax, uColour);
     }
     for (let i = firstV; i <= lastV; i++) {
       const v = i * spacing;
-      const uAxisColour = viewId === 'right' ? AXIS_Y : AXIS_X;
+      const uAxisColour = viewId === 'left' || viewId === 'right' ? AXIS_Y : AXIS_X;
       const vColour = lineColour(v, uAxisColour);
       pushVertex(uMin, v, vColour);
       pushVertex(uMax, v, vColour);
@@ -141,7 +144,7 @@ export function snappedGridAnchor(value: number, spacing: number): number {
 
 export function syncViewportGrid(
   grid: ViewportGrid,
-  viewId: ViewId,
+  viewId: ViewId | ViewPreset,
   camera: Camera,
   target: Vector3,
 ): void {

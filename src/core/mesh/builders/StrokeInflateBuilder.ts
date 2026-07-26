@@ -209,6 +209,14 @@ export function buildInflatedDoodle(options: InflateDoodleOptions): EditableMesh
   // Ensure CCW for outward normals with +normal = “front”.
   if (polygonArea(ring2d) < 0) ring2d = [...ring2d].reverse();
   ring2d = resampleClosedRing(ring2d, outlineTarget);
+  const minU = Math.min(...ring2d.map((point) => point.u));
+  const maxU = Math.max(...ring2d.map((point) => point.u));
+  const minV = Math.min(...ring2d.map((point) => point.v));
+  const maxV = Math.max(...ring2d.map((point) => point.v));
+  const spanU = Math.max(1e-8, maxU - minU);
+  const spanV = Math.max(1e-8, maxV - minV);
+  const planarUv = (point: { u: number; v: number }) =>
+    v2((point.u - minU) / spanU, (point.v - minV) / spanV);
 
   // Keep ear-clip for concave silhouettes; fan from centroid for convex-ish rings.
   const tris = earClip2d(ring2d);
@@ -233,22 +241,61 @@ export function buildInflatedDoodle(options: InflateDoodleOptions): EditableMesh
     // Rounded profile: side wall + front/back bevel rings.
     for (let i = 0; i < ring2d.length; i++) {
       const j = (i + 1) % ring2d.length;
-      b.quad(outerFront[i]!, outerBack[i]!, outerBack[j]!, outerFront[j]!);
-      b.quad(outerFront[i]!, outerFront[j]!, innerFront[j]!, innerFront[i]!);
-      b.quad(outerBack[j]!, outerBack[i]!, innerBack[i]!, innerBack[j]!);
+      const u0 = i / ring2d.length;
+      const u1 = (i + 1) / ring2d.length;
+      const outerI = planarUv(ring2d[i]!);
+      const outerJ = planarUv(ring2d[j]!);
+      const innerI = planarUv({
+        u: cu + (ring2d[i]!.u - cu) * inset,
+        v: cv + (ring2d[i]!.v - cv) * inset,
+      });
+      const innerJ = planarUv({
+        u: cu + (ring2d[j]!.u - cu) * inset,
+        v: cv + (ring2d[j]!.v - cv) * inset,
+      });
+      b.quad(outerFront[i]!, outerBack[i]!, outerBack[j]!, outerFront[j]!, [
+        v2(u0, 1), v2(u0, 0), v2(u1, 0), v2(u1, 1),
+      ]);
+      b.quad(outerFront[i]!, outerFront[j]!, innerFront[j]!, innerFront[i]!, [
+        outerI, outerJ, innerJ, innerI,
+      ]);
+      b.quad(outerBack[j]!, outerBack[i]!, innerBack[i]!, innerBack[j]!, [
+        outerJ, outerI, innerI, innerJ,
+      ]);
     }
     if (tris.length) {
       for (const [i0, i1, i2] of tris) {
-        b.tri(innerFront[i0]!, innerFront[i1]!, innerFront[i2]!);
-        b.tri(innerBack[i0]!, innerBack[i2]!, innerBack[i1]!);
+        const uv0 = planarUv({
+          u: cu + (ring2d[i0]!.u - cu) * inset,
+          v: cv + (ring2d[i0]!.v - cv) * inset,
+        });
+        const uv1 = planarUv({
+          u: cu + (ring2d[i1]!.u - cu) * inset,
+          v: cv + (ring2d[i1]!.v - cv) * inset,
+        });
+        const uv2 = planarUv({
+          u: cu + (ring2d[i2]!.u - cu) * inset,
+          v: cv + (ring2d[i2]!.v - cv) * inset,
+        });
+        b.tri(innerFront[i0]!, innerFront[i1]!, innerFront[i2]!, [uv0, uv1, uv2]);
+        b.tri(innerBack[i0]!, innerBack[i2]!, innerBack[i1]!, [uv0, uv2, uv1]);
       }
     } else {
       const frontCentre = b.vertex(fromLocal(cu, cv, plane, thickness));
       const backCentre = b.vertex(fromLocal(cu, cv, plane, -thickness));
+      const centreUv = planarUv({ u: cu, v: cv });
       for (let i = 0; i < ring2d.length; i++) {
         const j = (i + 1) % ring2d.length;
-        b.tri(frontCentre, innerFront[i]!, innerFront[j]!);
-        b.tri(backCentre, innerBack[j]!, innerBack[i]!);
+        const uvI = planarUv({
+          u: cu + (ring2d[i]!.u - cu) * inset,
+          v: cv + (ring2d[i]!.v - cv) * inset,
+        });
+        const uvJ = planarUv({
+          u: cu + (ring2d[j]!.u - cu) * inset,
+          v: cv + (ring2d[j]!.v - cv) * inset,
+        });
+        b.tri(frontCentre, innerFront[i]!, innerFront[j]!, [centreUv, uvI, uvJ]);
+        b.tri(backCentre, innerBack[j]!, innerBack[i]!, [centreUv, uvJ, uvI]);
       }
     }
     return finishDoodleMesh(b.build());
@@ -267,18 +314,24 @@ export function buildInflatedDoodle(options: InflateDoodleOptions): EditableMesh
   // that twins the rim edges of those caps.
   if (tris.length > 0) {
     for (const [i0, i1, i2] of tris) {
+      const uv0 = planarUv(ring2d[i0]!);
+      const uv1 = planarUv(ring2d[i1]!);
+      const uv2 = planarUv(ring2d[i2]!);
       // Front: CCW from +normal (outside).
-      b.tri(front[i0]!, front[i1]!, front[i2]!);
+      b.tri(front[i0]!, front[i1]!, front[i2]!, [uv0, uv1, uv2]);
       // Back: CCW from -normal (outside) ⇒ reverse index order.
-      b.tri(back[i0]!, back[i2]!, back[i1]!);
+      b.tri(back[i0]!, back[i2]!, back[i1]!, [uv0, uv2, uv1]);
     }
   } else {
     const frontCentre = b.vertex(fromLocal(cu, cv, plane, thickness));
     const backCentre = b.vertex(fromLocal(cu, cv, plane, -thickness));
+    const centreUv = planarUv({ u: cu, v: cv });
     for (let i = 0; i < ring2d.length; i++) {
       const j = (i + 1) % ring2d.length;
-      b.tri(frontCentre, front[i]!, front[j]!);
-      b.tri(backCentre, back[j]!, back[i]!);
+      const uvI = planarUv(ring2d[i]!);
+      const uvJ = planarUv(ring2d[j]!);
+      b.tri(frontCentre, front[i]!, front[j]!, [centreUv, uvI, uvJ]);
+      b.tri(backCentre, back[j]!, back[i]!, [centreUv, uvJ, uvI]);
     }
   }
 

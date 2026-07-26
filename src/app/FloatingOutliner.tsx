@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import {
   commitGroupSelection,
@@ -26,6 +26,7 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
   const [collapsed, setCollapsed] = useState<Set<ObjectId>>(() => new Set());
   const [dragObjectId, setDragObjectId] = useState<ObjectId | null>(null);
   const [dropTargetId, setDropTargetId] = useState<ObjectId | null>(null);
+  const [renamingId, setRenamingId] = useState<ObjectId | null>(null);
   const drag = useRef<DragState | null>(null);
   const panel = useRef<HTMLElement>(null);
 
@@ -51,13 +52,21 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
     };
   }, []);
 
-  const groupCount = useMemo(() => {
-    let count = 0;
-    for (const object of session.document.objects.values()) {
-      if (isGroupObject(object)) count += 1;
+  let groupCount = 0;
+  for (const object of session.document.objects.values()) {
+    if (isGroupObject(object)) groupCount += 1;
+  }
+
+  const visibleObjectIds: ObjectId[] = [];
+  const collectVisible = (ids: ObjectId[]) => {
+    for (const id of ids) {
+      const object = session.document.objects.get(id);
+      if (!object) continue;
+      visibleObjectIds.push(id);
+      if (object.childIds.length > 0 && !collapsed.has(id)) collectVisible(object.childIds);
     }
-    return count;
-  }, [session.document.objects, session.document.dirty]);
+  };
+  collectVisible(session.document.rootObjectIds);
 
   const touch = () => {
     session.document.dirty = true;
@@ -67,14 +76,23 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
 
   const select = (objectId: ObjectId, event?: React.MouseEvent) => {
     const object = session.document.objects.get(objectId);
-    if (!object || object.locked) return;
+    if (!object) return;
     session.tools.setActive('select', session.context());
     session.selection.setMode('object');
     const additive = !!event && (event.ctrlKey || event.metaKey);
     const range = !!event && event.shiftKey;
     if (range && session.selection.state.activeObjectId) {
-      // Shift: add without clearing (simple multi-select).
-      session.selection.selectObjects([objectId], 'add');
+      const anchor = visibleObjectIds.indexOf(session.selection.state.activeObjectId);
+      const target = visibleObjectIds.indexOf(objectId);
+      if (anchor >= 0 && target >= 0) {
+        const rangeIds = visibleObjectIds.slice(
+          Math.min(anchor, target),
+          Math.max(anchor, target) + 1,
+        );
+        session.selection.selectObjects(rangeIds, additive ? 'add' : 'replace');
+      } else {
+        session.selection.selectObjects([objectId], additive ? 'add' : 'replace');
+      }
     } else if (additive) {
       const already = session.selection.state.selectedObjectIds.has(objectId);
       session.selection.selectObjects([objectId], already ? 'remove' : 'add');
@@ -83,6 +101,18 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
     }
     session.requestRedraw();
     onRefresh();
+  };
+
+  const moveKeyboardSelection = (objectId: ObjectId, direction: -1 | 1) => {
+    const current = visibleObjectIds.indexOf(objectId);
+    const nextId = visibleObjectIds[Math.max(0, Math.min(visibleObjectIds.length - 1, current + direction))];
+    if (!nextId || nextId === objectId) return;
+    select(nextId);
+    requestAnimationFrame(() => {
+      panel.current
+        ?.querySelector<HTMLElement>(`[data-outliner-object="${CSS.escape(nextId)}"]`)
+        ?.focus();
+    });
   };
 
   const toggleCollapsed = (objectId: ObjectId) => {
@@ -104,6 +134,7 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
       const object = session.document.objects.get(id);
       if (!object) return null;
       const selected = session.selection.state.selectedObjectIds.has(id);
+      const active = session.selection.state.activeObjectId === id;
       const group = isGroupObject(object);
       const hasChildren = object.childIds.length > 0;
       const isCollapsed = collapsed.has(id);
@@ -115,6 +146,7 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
             className={[
               'outliner-row',
               selected ? 'is-selected' : '',
+              active ? 'is-active' : '',
               object.locked ? 'is-locked' : '',
               group ? 'is-group' : '',
               isDropTarget ? 'is-drop-target' : '',
@@ -122,7 +154,13 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
             ]
               .filter(Boolean)
               .join(' ')}
-            style={{ paddingLeft: 4 + depth * 12 }}
+            style={{ paddingLeft: 5 + depth * 16 }}
+            role="treeitem"
+            aria-selected={selected}
+            aria-level={depth + 1}
+            data-outliner-object={id}
+            tabIndex={active || (!session.selection.state.activeObjectId && visibleObjectIds[0] === id) ? 0 : -1}
+            title={`${object.name} · click to select · Ctrl add/remove · Shift range`}
             draggable={!object.locked}
             onDragStart={(event) => {
               event.dataTransfer.setData('text/vipercad-object', id);
@@ -159,6 +197,25 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
               }
             }}
             onClick={(event) => select(id, event)}
+            onKeyDown={(event) => {
+              if ((event.target as HTMLElement).closest('input, button, select, textarea')) return;
+              if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                moveKeyboardSelection(id, 1);
+              } else if (event.key === 'ArrowUp') {
+                event.preventDefault();
+                moveKeyboardSelection(id, -1);
+              } else if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                select(id);
+              } else if (event.key === 'ArrowRight' && hasChildren && isCollapsed) {
+                event.preventDefault();
+                toggleCollapsed(id);
+              } else if (event.key === 'ArrowLeft' && hasChildren && !isCollapsed) {
+                event.preventDefault();
+                toggleCollapsed(id);
+              }
+            }}
           >
             <button
               type="button"
@@ -193,8 +250,36 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
               className="outliner-name"
               aria-label={`Object name ${object.name}`}
               value={object.name}
-              onClick={(event) => event.stopPropagation()}
+              readOnly={renamingId !== id}
+              onClick={(event) => {
+                event.stopPropagation();
+                select(id, event);
+              }}
+              onDoubleClick={(event) => {
+                event.stopPropagation();
+                select(id, event);
+                setRenamingId(id);
+                const input = event.currentTarget;
+                requestAnimationFrame(() => {
+                  input.focus();
+                  input.select();
+                });
+              }}
+              onFocus={(event) => {
+                if (!session.selection.state.selectedObjectIds.has(id)) select(id);
+                if (renamingId === id) event.currentTarget.select();
+              }}
+              onBlur={() => setRenamingId((current) => current === id ? null : current)}
+              onKeyDown={(event) => {
+                event.stopPropagation();
+                if (event.key === 'Enter') event.currentTarget.blur();
+                if (event.key === 'Escape') {
+                  setRenamingId(null);
+                  event.currentTarget.blur();
+                }
+              }}
               onChange={(event) => {
+                if (renamingId !== id) return;
                 object.name = event.target.value;
                 touch();
               }}
@@ -289,6 +374,9 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
           <span>
             {session.document.objects.size} objects
             {groupCount ? ` · ${groupCount} groups` : ''}
+            {session.selection.state.selectedObjectIds.size
+              ? ` · ${session.selection.state.selectedObjectIds.size} selected`
+              : ''}
           </span>
         </div>
         <div className="outliner-actions">
@@ -337,7 +425,7 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
         </div>
       </header>
       {!minimized && (
-        <div className="outliner-body">
+        <div className="outliner-body" role="tree" aria-label="Scene objects">
           {session.document.rootObjectIds.length
             ? rows(session.document.rootObjectIds)
             : <p className="outliner-empty">No objects yet</p>}

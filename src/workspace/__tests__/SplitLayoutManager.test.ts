@@ -12,20 +12,20 @@ describe('SplitLayoutManager CSS rects', () => {
 
     const persp = rects.find((r) => r.id === 'persp')!;
     const top = rects.find((r) => r.id === 'top')!;
-    expect(persp.x + persp.width).toBe(top.x);
+    expect(top.x + top.width).toBe(persp.x);
     expect(persp.width + top.width).toBe(width);
     expect(persp.webglY).toBe(height - persp.y - persp.height);
 
     // Never DPR-scaled — 125% scale must not change these CSS values.
-    expect(persp.x).toBe(0);
+    expect(top.x).toBe(0);
     expect(persp.y).toBe(0);
-    expect(top.x).toBe(Math.round(width * 0.5));
+    expect(persp.x).toBe(Math.round(width * 0.5));
   });
 
   it('hitTest uses the same CSS rectangles', () => {
     const layout = new SplitLayoutManager();
-    expect(layout.hitTest(10, 10, 1000, 800)).toBe('persp');
-    expect(layout.hitTest(900, 10, 1000, 800)).toBe('top');
+    expect(layout.hitTest(10, 10, 1000, 800)).toBe('top');
+    expect(layout.hitTest(900, 10, 1000, 800)).toBe('persp');
     expect(layout.hitTest(10, 700, 1000, 800)).toBe('front');
     expect(layout.hitTest(900, 700, 1000, 800)).toBe('right');
   });

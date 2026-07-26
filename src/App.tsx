@@ -766,8 +766,131 @@ export default function App() {
       ],
     },
     {
+      label: 'Create',
+      entries: [
+        {
+          kind: 'command',
+          label: 'Primitive Builder',
+          action: () => {
+            workspace.setInspectorTab('create');
+            session.tools.setActive('create-primitive', session.context());
+            refresh();
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Draw Mesh Surface',
+          action: () => {
+            workspace.setInspectorTab('create');
+            session.tools.setActive('draw-poly', session.context());
+            refresh();
+          },
+        },
+        { kind: 'separator' },
+        {
+          kind: 'command',
+          label: 'Curve Sketch · Tube Sweep',
+          action: () => {
+            workspace.setInspectorTab('create');
+            doodleTool.setInputMode('sketch', session.context());
+            doodleTool.setStyle('tube', session.context());
+            session.tools.setActive('create-doodle', session.context());
+            refresh();
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Vector Pen · Tube Sweep',
+          action: () => {
+            workspace.setInspectorTab('create');
+            doodleTool.setInputMode('pen', session.context());
+            doodleTool.setStyle('tube', session.context());
+            session.tools.setActive('create-doodle', session.context());
+            refresh();
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Stroke Shape · Ribbon / Hair',
+          action: () => {
+            workspace.setInspectorTab('create');
+            doodleTool.setStyle('hair', session.context());
+            session.tools.setActive('create-doodle', session.context());
+            refresh();
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Stroke Shape · Braided Rope',
+          action: () => {
+            workspace.setInspectorTab('create');
+            doodleTool.setStyle('rope', session.context());
+            session.tools.setActive('create-doodle', session.context());
+            refresh();
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Profile · Soft Volume',
+          action: () => {
+            workspace.setInspectorTab('create');
+            doodleTool.setStyle('soft', session.context());
+            session.tools.setActive('create-doodle', session.context());
+            refresh();
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Sweep · Square / Rail',
+          action: () => {
+            workspace.setInspectorTab('create');
+            doodleTool.setStyle('square-sweep', session.context());
+            session.tools.setActive('create-doodle', session.context());
+            refresh();
+          },
+        },
+      ],
+    },
+    {
       label: 'Model',
       entries: [
+        {
+          kind: 'command',
+          label: 'Select & Objects Tools',
+          checked: workspace.inspectorTab === 'edit' && workspace.inspectorSection === 'select',
+          action: () => workspace.setInspectorSection('select'),
+        },
+        {
+          kind: 'command',
+          label: 'Transform Tools',
+          checked: workspace.inspectorTab === 'edit' && workspace.inspectorSection === 'transform',
+          action: () => workspace.setInspectorSection('transform'),
+        },
+        {
+          kind: 'command',
+          label: 'Mesh Geometry Tools',
+          checked: workspace.inspectorTab === 'edit' && workspace.inspectorSection === 'geometry',
+          action: () => workspace.setInspectorSection('geometry'),
+        },
+        {
+          kind: 'command',
+          label: 'Symmetry Tools',
+          checked: workspace.inspectorTab === 'edit' && workspace.inspectorSection === 'symmetry',
+          action: () => workspace.setInspectorSection('symmetry'),
+        },
+        {
+          kind: 'command',
+          label: 'Construct & Game Tools',
+          checked: workspace.inspectorTab === 'edit' && workspace.inspectorSection === 'scene',
+          action: () => workspace.setInspectorSection('scene'),
+        },
+        {
+          kind: 'command',
+          label: 'Material Tools',
+          checked: workspace.inspectorTab === 'material',
+          action: () => workspace.setInspectorTab('material'),
+        },
+        { kind: 'separator' },
         {
           kind: 'command',
           label: 'Object Selection',
@@ -940,9 +1063,9 @@ export default function App() {
           <span className="transform-status">
             {isDrawing
               ? drawTool.statusLine()
-              : doodleTool.style === 'tube'
-                ? 'Doodle tube · drag an open 3D path'
-                : `Doodle ${doodleTool.style} · draw an outline · release to fill`}
+              : doodleTool.inputMode === 'pen'
+                ? `Vector Pen · ${doodleTool.style.replace('-', ' ')} · ${doodleTool.state.points.length} points`
+                : `Curve Sketch · ${doodleTool.style.replace('-', ' ')} · drag to draw`}
           </span>
         )}
         {workspace.shellMode === 'terrain' && (
@@ -964,7 +1087,9 @@ export default function App() {
                 ? 'Click place · orange = new · Enter commit batch · Backspace undo · Esc clear'
                 : 'Click place · orange = new · green = close · Enter finish · Shift axis · Esc clear'
               : isDoodling
-                ? 'LMB drag · release commit · Esc cancel'
+                ? doodleTool.inputMode === 'pen'
+                  ? 'LMB place point · Enter finish · Backspace undo point · Esc cancel'
+                  : 'LMB draw · release create · Esc cancel'
                 : transformActive
                   ? 'Enter/LMB confirm · Esc/RMB cancel · X/Y/Z · Shift+axis · Ctrl toggle snap'
                   : workspace.shellMode === 'terrain'

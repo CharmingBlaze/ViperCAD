@@ -1,14 +1,25 @@
-import type { CameraSnapshot, ViewId } from './types';
+import type { CameraSnapshot, ViewId, ViewPreset } from './types';
+
+type OrthoView = Exclude<ViewPreset, 'perspective'>;
+type CameraView = ViewId | ViewPreset;
 
 /** Canonical orthographic view axes (camera looks toward −axis through target). */
 const ORTHO_AXIS: Record<
-  Exclude<ViewId, 'persp'>,
-  { axis: 0 | 1 | 2; up: [number, number, number]; defaultDistance: number }
+  OrthoView,
+  { axis: 0 | 1 | 2; sign: 1 | -1; up: [number, number, number]; defaultDistance: number }
 > = {
-  top: { axis: 1, up: [0, 0, -1], defaultDistance: 12 },
-  front: { axis: 2, up: [0, 1, 0], defaultDistance: 12 },
-  right: { axis: 0, up: [0, 1, 0], defaultDistance: 12 },
+  top: { axis: 1, sign: 1, up: [0, 0, -1], defaultDistance: 12 },
+  bottom: { axis: 1, sign: -1, up: [0, 0, 1], defaultDistance: 12 },
+  front: { axis: 2, sign: 1, up: [0, 1, 0], defaultDistance: 12 },
+  back: { axis: 2, sign: -1, up: [0, 1, 0], defaultDistance: 12 },
+  right: { axis: 0, sign: 1, up: [0, 1, 0], defaultDistance: 12 },
+  left: { axis: 0, sign: -1, up: [0, 1, 0], defaultDistance: 12 },
 };
+
+function orthoView(view: CameraView): OrthoView | null {
+  if (view === 'persp' || view === 'perspective') return null;
+  return view;
+}
 
 /** Keep the camera far enough that the near plane cannot slice through the scene. */
 export const ORTHO_MIN_DISTANCE = 8;
@@ -26,7 +37,7 @@ function minOrthoDistance(orthoHeight: number | undefined): number {
 
 function resolveOrthoDistance(
   cam: CameraSnapshot,
-  def: (typeof ORTHO_AXIS)[Exclude<ViewId, 'persp'>],
+  def: (typeof ORTHO_AXIS)[OrthoView],
 ): number {
   const dist = length3(
     cam.position[0] - cam.target[0],
@@ -41,9 +52,10 @@ function resolveOrthoDistance(
 }
 
 /** True when the camera already looks along the canonical ortho axis with the right up. */
-export function isOrthoCameraAligned(viewId: ViewId, cam: CameraSnapshot): boolean {
-  if (viewId === 'persp') return true;
-  const def = ORTHO_AXIS[viewId];
+export function isOrthoCameraAligned(viewId: CameraView, cam: CameraSnapshot): boolean {
+  const view = orthoView(viewId);
+  if (!view) return true;
+  const def = ORTHO_AXIS[view];
   const [tx, ty, tz] = cam.target;
   const [px, py, pz] = cam.position;
   const dx = px - tx;
@@ -54,7 +66,7 @@ export function isOrthoCameraAligned(viewId: ViewId, cam: CameraSnapshot): boole
 
   const forward = [dx / len, dy / len, dz / len];
   const expected = [0, 0, 0];
-  expected[def.axis] = 1;
+  expected[def.axis] = def.sign;
   const axisDot = forward[0]! * expected[0]! + forward[1]! * expected[1]! + forward[2]! * expected[2]!;
   if (axisDot < ALIGN_DOT) return false;
 
@@ -75,10 +87,10 @@ export function isOrthoCameraAligned(viewId: ViewId, cam: CameraSnapshot): boole
  * Force an orthographic camera onto its canonical view axis at a safe distance.
  * Preserves target (pan); repairs orbit drift, bad saves, and near-plane slicing.
  */
-export function sanitizeOrthoCamera(viewId: ViewId, cam: CameraSnapshot): CameraSnapshot {
-  if (viewId === 'persp') return cam;
-
-  const def = ORTHO_AXIS[viewId];
+export function sanitizeOrthoCamera(viewId: CameraView, cam: CameraSnapshot): CameraSnapshot {
+  const view = orthoView(viewId);
+  if (!view) return cam;
+  const def = ORTHO_AXIS[view];
   const target: [number, number, number] = [
     Number.isFinite(cam.target[0]) ? cam.target[0] : 0,
     Number.isFinite(cam.target[1]) ? cam.target[1] : 0,
@@ -91,7 +103,7 @@ export function sanitizeOrthoCamera(viewId: ViewId, cam: CameraSnapshot): Camera
   );
 
   const position: [number, number, number] = [...target];
-  position[def.axis] += dist;
+  position[def.axis] += dist * def.sign;
 
   return {
     ...cam,

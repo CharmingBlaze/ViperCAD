@@ -230,6 +230,10 @@ export function materialAssetToThree(
       texture.magFilter = asset.filtering === 'nearest' ? NearestFilter : LinearFilter;
       texture.minFilter = asset.filtering === 'nearest' ? NearestFilter : asset.generateMipmaps ? LinearMipmapLinearFilter : LinearFilter;
       texture.wrapS = texture.wrapT = asset.wrapping === 'repeat' ? RepeatWrapping : ClampToEdgeWrapping;
+      texture.repeat.set(asset.repeatU ?? 1, asset.repeatV ?? 1);
+      texture.offset.set(asset.offsetU ?? 0, asset.offsetV ?? 0);
+      texture.center.set(0.5, 0.5);
+      texture.rotation = (asset.rotationDegrees ?? 0) * Math.PI / 180;
       texture.generateMipmaps = forGltf ? false : asset.generateMipmaps;
       texture.needsUpdate = true;
       material.map = texture;

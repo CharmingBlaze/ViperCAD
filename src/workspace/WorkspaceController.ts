@@ -14,6 +14,7 @@ import {
 import type { AppShellMode, ViewId, WorkspacePreferences } from './types';
 
 export type InspectorTab = 'create' | 'edit' | 'material';
+export type InspectorSection = 'select' | 'transform' | 'geometry' | 'symmetry' | 'scene';
 
 type Listener = () => void;
 
@@ -30,6 +31,8 @@ export class WorkspaceController {
   texture: TextureWorkspaceState;
   /** Active tab in the model-shell right inspector. */
   inspectorTab: InspectorTab = 'create';
+  /** Focused workflow inside the Edit tab. */
+  inspectorSection: InspectorSection = 'select';
   private listeners = new Set<Listener>();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private texturePersistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -120,6 +123,13 @@ export class WorkspaceController {
     if (this.inspectorTab === tab) return;
     this.inspectorTab = tab;
     this.notify();
+  }
+
+  setInspectorSection(section: InspectorSection): void {
+    const changed = this.inspectorSection !== section || this.inspectorTab !== 'edit';
+    this.inspectorSection = section;
+    this.inspectorTab = 'edit';
+    if (changed) this.notify();
   }
 
   setTextureSplit(ratio: number): void {

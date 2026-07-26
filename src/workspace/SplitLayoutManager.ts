@@ -129,8 +129,8 @@ export class SplitLayoutManager {
     const lowerRightW = Math.max(1, width - lowerLeftW);
 
     return [
-      this.makeRect('persp', 0, 0, upperLeftW, upperH, height),
-      this.makeRect('top', upperLeftW, 0, upperRightW, upperH, height),
+      this.makeRect('top', 0, 0, upperLeftW, upperH, height),
+      this.makeRect('persp', upperLeftW, 0, upperRightW, upperH, height),
       this.makeRect('front', 0, upperH, lowerLeftW, lowerH, height),
       this.makeRect('right', lowerLeftW, upperH, lowerRightW, lowerH, height),
     ];

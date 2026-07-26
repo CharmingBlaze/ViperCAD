@@ -3,7 +3,12 @@ import type { EditorSession } from '@/core/editor/EditorSession';
 import { viewportEngine } from '@/app/viewportEngine';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';
 import type { ViewId } from '@/workspace/types';
-import { VIEW_LABELS } from '@/workspace/types';
+import {
+  DEFAULT_VIEW_PRESETS,
+  VIEW_PRESETS,
+  VIEW_PRESET_LABELS,
+  type ViewPreset,
+} from '@/workspace/types';
 import type { ViewportRect } from '@/workspace/SplitLayoutManager';
 import { CreateDoodleTool } from '@/core/tools/CreateDoodleTool';
 import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
@@ -34,7 +39,10 @@ export function Viewport({ session, workspace }: Props) {
   const [rects, setRects] = useState<ViewportRect[]>([]);
   const [hovered, setHovered] = useState<ViewId | null>(null);
   const [mode, setMode] = useState(workspace.layoutMode);
-  const [perspectiveAxes, setPerspectiveAxes] = useState<CameraAxes | null>(null);
+  const [cameraAxes, setCameraAxes] = useState<Partial<Record<ViewId, CameraAxes>>>({});
+  const [paneViews, setPaneViews] =
+    useState<Record<ViewId, ViewPreset>>({ ...DEFAULT_VIEW_PRESETS });
+  const [openViewMenu, setOpenViewMenu] = useState<ViewId | null>(null);
   const [pngDropActive, setPngDropActive] = useState(false);
   const [pngImporting, setPngImporting] = useState(false);
   const [splits, setSplits] = useState({ ...workspace.splits.splits });
@@ -59,7 +67,18 @@ export function Viewport({ session, workspace }: Props) {
     setHovered(workspace.hoveredViewportId);
     setMode(workspace.layoutMode);
     setSplits({ ...workspace.splits.splits });
-    setPerspectiveAxes(viewportEngine.getCameraAxes('persp'));
+    setPaneViews({
+      persp: viewportEngine.getPaneView('persp'),
+      top: viewportEngine.getPaneView('top'),
+      front: viewportEngine.getPaneView('front'),
+      right: viewportEngine.getPaneView('right'),
+    });
+    setCameraAxes({
+      persp: viewportEngine.getCameraAxes('persp') ?? undefined,
+      top: viewportEngine.getCameraAxes('top') ?? undefined,
+      front: viewportEngine.getCameraAxes('front') ?? undefined,
+      right: viewportEngine.getCameraAxes('right') ?? undefined,
+    });
   }, [workspace]);
 
   useEffect(() => {
@@ -75,7 +94,7 @@ export function Viewport({ session, workspace }: Props) {
         viewportEngine.attach(host, session, workspace, {
           onLayoutChange: syncUi,
           onCameraChange: (id, axes) => {
-            if (id === 'persp') setPerspectiveAxes(axes);
+            setCameraAxes((current) => ({ ...current, [id]: axes }));
           },
         });
         syncUi();
@@ -254,6 +273,20 @@ export function Viewport({ session, workspace }: Props) {
         syncUi();
         return;
       }
+      if (
+        e.key === 'Backspace' &&
+        tool instanceof CreateDoodleTool &&
+        tool.inputMode === 'pen' &&
+        tool.state.stage === 'drawing'
+      ) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        tool.popPoint(session.context());
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
       if (e.key === 'Enter' && tool instanceof CreateDoodleTool && tool.state.stage === 'drawing') {
         e.preventDefault();
         (e.target as HTMLElement)?.blur?.();
@@ -345,6 +378,29 @@ export function Viewport({ session, workspace }: Props) {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [workspace, session, syncUi]);
+
+  useEffect(() => {
+    if (!openViewMenu) return;
+    const close = () => setOpenViewMenu(null);
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const isInsideMenu = event.composedPath().some(
+        (node) =>
+          node instanceof HTMLElement &&
+          (node.classList.contains('viewport-label') ||
+            node.classList.contains('viewport-view-menu')),
+      );
+      if (!isInsideMenu) close();
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    window.addEventListener('pointerdown', closeOnOutsidePointer);
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      window.removeEventListener('pointerdown', closeOnOutsidePointer);
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [openViewMenu]);
 
   useEffect(() => {
     const track = (e: PointerEvent) => {
@@ -481,29 +537,72 @@ export function Viewport({ session, workspace }: Props) {
         <div ref={hostRef} className="modelling-canvas" />
 
         {!textureMode && (
-          <div className="viewport-chrome">
+          <div className={`viewport-chrome${openViewMenu ? ' is-menu-open' : ''}`}>
             {rects.map((r) => (
               <div key={r.id}>
-                <div
+                <button
+                  type="button"
                   className={`viewport-label${hovered === r.id ? ' is-hover' : ''}${
                     workspace.activeViewportId === r.id || mode === 'maximized' ? ' is-active' : ''
                   }`}
-                  style={{ left: r.x + 8, top: r.y + 8 }}
-                  aria-hidden
+                  style={{ left: r.x + 4, top: r.y + 7 }}
+                  aria-haspopup="menu"
+                  aria-expanded={openViewMenu === r.id}
+                  aria-label={`Change ${VIEW_PRESET_LABELS[paneViews[r.id]]} viewport view`}
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  }}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setOpenViewMenu((current) => (current === r.id ? null : r.id));
+                  }}
                 >
-                  <span className="viewport-name">{VIEW_LABELS[r.id]}</span>
-                  <span className="viewport-proj">
-                    {r.id === 'persp' ? 'Perspective' : 'Orthographic'}
+                  <span className="viewport-name">
+                    {VIEW_PRESET_LABELS[paneViews[r.id]]}
                   </span>
-                </div>
+                  <span className="viewport-proj">
+                    {paneViews[r.id] === 'perspective' ? 'Perspective' : 'Orthographic'}
+                  </span>
+                </button>
+                {openViewMenu === r.id && (
+                  <div
+                    className="viewport-view-menu"
+                    role="menu"
+                    aria-label="Viewport view"
+                    style={{ left: r.x + 4, top: r.y + 29 }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    {VIEW_PRESETS.map((view) => (
+                      <button
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={paneViews[r.id] === view}
+                        className={paneViews[r.id] === view ? 'is-selected' : ''}
+                        key={view}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          viewportEngine.setPaneView(r.id, view);
+                          setPaneViews((current) => ({ ...current, [r.id]: view }));
+                          setOpenViewMenu(null);
+                        }}
+                      >
+                        <span>{VIEW_PRESET_LABELS[view]}</span>
+                        {paneViews[r.id] === view && <span aria-hidden>✓</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <button
                   type="button"
                   className="viewport-maximize"
                   style={{ left: r.x + r.width - 30, top: r.y + 8 }}
                   aria-label={
                     mode === 'maximized'
-                      ? `Restore ${VIEW_LABELS[r.id]} viewport`
-                      : `Maximize ${VIEW_LABELS[r.id]} viewport`
+                      ? `Restore ${VIEW_PRESET_LABELS[paneViews[r.id]]} viewport`
+                      : `Maximize ${VIEW_PRESET_LABELS[paneViews[r.id]]} viewport`
                   }
                   title={mode === 'maximized' ? 'Restore quad view (Tab)' : 'Maximize viewport (Tab)'}
                   onPointerDown={(event) => {
@@ -528,14 +627,16 @@ export function Viewport({ session, workspace }: Props) {
                     </svg>
                   )}
                 </button>
-                {r.id === 'persp' && (
+                {paneViews[r.id] === 'perspective' && (
                   <PerspectiveOrientationWidget
-                    axes={perspectiveAxes}
+                    axes={cameraAxes[r.id] ?? null}
                     left={r.x + r.width - 80}
                     top={r.y + r.height - 80}
-                    onOrient={(axis, sign) => viewportEngine.orientPerspective(axis, sign)}
+                    onOrient={(axis, sign) =>
+                      viewportEngine.orientPerspective(axis, sign, r.id)
+                    }
                     onOrbit={(deltaX, deltaY) =>
-                      viewportEngine.orbitPerspective(deltaX, deltaY)
+                      viewportEngine.orbitPerspective(deltaX, deltaY, r.id)
                     }
                   />
                 )}

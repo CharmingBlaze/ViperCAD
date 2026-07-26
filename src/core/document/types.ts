@@ -63,6 +63,12 @@ export type TextureAsset = {
   imageAssetId: ImageId;
   filtering: 'nearest' | 'linear';
   wrapping: 'repeat' | 'clamp';
+  /** UV tile count. Optional for backward-compatible project loading. */
+  repeatU?: number;
+  repeatV?: number;
+  offsetU?: number;
+  offsetV?: number;
+  rotationDegrees?: number;
   colourSpace: 'srgb' | 'linear';
   generateMipmaps: boolean;
 };

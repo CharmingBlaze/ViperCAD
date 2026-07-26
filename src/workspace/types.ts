@@ -1,5 +1,14 @@
 export type ViewId = 'persp' | 'top' | 'front' | 'right';
 
+export type ViewPreset =
+  | 'perspective'
+  | 'top'
+  | 'bottom'
+  | 'left'
+  | 'right'
+  | 'front'
+  | 'back';
+
 export type LayoutMode = 'quad' | 'maximized';
 
 export type ProjectionType = 'perspective' | 'orthographic';
@@ -64,6 +73,33 @@ export const MIN_SPLIT = 0.15;
 export const MAX_SPLIT = 0.85;
 
 export const VIEW_ORDER: ViewId[] = ['persp', 'top', 'front', 'right'];
+
+export const VIEW_PRESETS: ViewPreset[] = [
+  'perspective',
+  'top',
+  'bottom',
+  'left',
+  'right',
+  'front',
+  'back',
+];
+
+export const DEFAULT_VIEW_PRESETS: Record<ViewId, ViewPreset> = {
+  persp: 'perspective',
+  top: 'top',
+  front: 'front',
+  right: 'right',
+};
+
+export const VIEW_PRESET_LABELS: Record<ViewPreset, string> = {
+  perspective: 'Perspective',
+  top: 'Top',
+  bottom: 'Bottom',
+  left: 'Left',
+  right: 'Right',
+  front: 'Front',
+  back: 'Back',
+};
 
 export const VIEW_LABELS: Record<ViewId, string> = {
   persp: 'User',

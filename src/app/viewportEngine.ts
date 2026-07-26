@@ -44,7 +44,7 @@ import type { ViewportGrid } from '@/renderer/ViewportGrid';
 import { faceVertexIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
 import type { ObjectId } from '@/core/document/types';
 import type { EditableMesh, EdgeId, FaceId, VertexId } from '@/core/mesh/types';
-import { v3 } from '@/core/math/Vec3';
+import { addVec3, dotVec3, scaleVec3, subVec3, v3, type Vec3 } from '@/core/math/Vec3';
 import { computePivot } from '@/core/transform/Pivot';
 import { buildOrientationBasis, type CameraAxes } from '@/core/transform/Orientation';
 import { selectionHasTransformTarget } from '@/core/transform/Targets';
@@ -53,7 +53,11 @@ import type { ViewportRect } from '@/workspace/SplitLayoutManager';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';
 import { sanitizeOrthoCamera, ORTHO_MIN_DISTANCE } from '@/workspace/orthoCameras';
 import { DEFAULT_CAMERAS } from '@/workspace/WorkspacePersistence';
-import type { ViewId } from '@/workspace/types';
+import {
+  DEFAULT_VIEW_PRESETS,
+  type ViewId,
+  type ViewPreset,
+} from '@/workspace/types';
 import { CreateDoodleTool } from '@/core/tools/CreateDoodleTool';
 import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
 import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
@@ -100,6 +104,16 @@ import { markUvSeams } from '@/core/uv/UvOperations';
 import { ViewportInteractionOverlay } from '@/app/viewport/ViewportInteractionOverlay';
 import { ViewportSceneSynchronizer } from '@/app/viewport/ViewportSceneSynchronizer';
 import { ModifierPreviewOverlay, type ModifierPreview } from '@/renderer/ModifierPreviewOverlay';
+import {
+  CurveControlOverlay,
+  type CurveControlTarget,
+} from '@/renderer/CurveControlOverlay';
+import {
+  evaluateCurveOperation,
+  readCurveOperation,
+  serializeCurveOperation,
+  type CurveOperation,
+} from '@/core/curves/CurveOperation';
 
 const PICK_TOLERANCE_PX = 12;
 
@@ -114,6 +128,7 @@ type MarqueeState = {
 
 type Pane = {
   id: ViewId;
+  view: ViewPreset;
   camera: Camera;
   controls: OrbitControls | null;
   /** Persistent orthographic view height in world units. */
@@ -160,6 +175,25 @@ export class ViewportEngine {
   private gizmo = new TransformGizmo();
   private terrainBrushPreview = createTerrainBrushPreview();
   private modifierPreview = new ModifierPreviewOverlay();
+  private curveControls = new CurveControlOverlay();
+  private curvePointDrag: {
+    paneId: ViewId;
+    pointerId: number;
+    objectId: ObjectId;
+    target: CurveControlTarget;
+    planeOrigin: Vec3;
+    planeNormal: Vec3;
+    beforeMesh: EditableMesh;
+    beforeMetadata: string;
+    operation: CurveOperation;
+  } | null = null;
+  private draftCurvePointDrag: {
+    paneId: ViewId;
+    pointerId: number;
+    target: CurveControlTarget;
+    planeOrigin: Vec3;
+    planeNormal: Vec3;
+  } | null = null;
   private modifierObjectId: ObjectId | null = null;
   private modifierSpecs: ModifierPreview[] = [];
   private modifierMesh: EditableMesh | null = null;
@@ -250,6 +284,8 @@ export class ViewportEngine {
     this.pendingTransformMove = null;
     this.pendingPrimitiveMove = null;
     this.pendingPaintMove = null;
+    this.curvePointDrag = null;
+    this.draftCurvePointDrag = null;
     this.interactionOverlay.detach();
     for (const pane of this.panes.values()) {
       pane.controls?.dispose();
@@ -401,6 +437,7 @@ export class ViewportEngine {
 
       this.panes.set(id, {
         id,
+        view: DEFAULT_VIEW_PRESETS[id],
         camera,
         controls: null,
         orthoHeight,
@@ -436,6 +473,57 @@ export class ViewportEngine {
     };
   }
 
+  getPaneView(viewId: ViewId): ViewPreset {
+    return this.panes.get(viewId)?.view ?? DEFAULT_VIEW_PRESETS[viewId];
+  }
+
+  setPaneView(viewId: ViewId, view: ViewPreset): void {
+    const pane = this.panes.get(viewId);
+    if (!pane || !this.workspace || pane.view === view) return;
+
+    const currentTarget =
+      pane.controls?.target.clone() ??
+      new Vector3().fromArray(this.workspace.getCamera(viewId).target);
+    const previousFov =
+      pane.camera instanceof PerspectiveCamera ? pane.camera.fov : DEFAULT_CAMERAS.persp.fov;
+
+    pane.controls?.dispose();
+    pane.controls = null;
+    pane.view = view;
+
+    if (view === 'perspective') {
+      const camera = new PerspectiveCamera(previousFov, 1, PERSP_NEAR, PERSP_FAR);
+      const defaultOffset = new Vector3().fromArray(DEFAULT_CAMERAS.persp.position);
+      camera.position.copy(currentTarget).add(defaultOffset);
+      camera.up.fromArray(DEFAULT_CAMERAS.persp.up);
+      camera.lookAt(currentTarget);
+      pane.camera = camera;
+    } else {
+      const camera = new OrthographicCamera(-1, 1, 1, -1, 0.01, 2000);
+      const snap = sanitizeOrthoCamera(view, {
+        ...this.workspace.getCamera(viewId),
+        position: pane.camera.position.toArray() as [number, number, number],
+        target: currentTarget.toArray() as [number, number, number],
+        up: pane.camera.up.toArray() as [number, number, number],
+        orthoHeight: pane.orthoHeight,
+        zoom: 1,
+      });
+      camera.position.fromArray(snap.position);
+      camera.up.fromArray(snap.up);
+      camera.lookAt(currentTarget);
+      pane.camera = camera;
+      pane.orthoHeight = clampOrthoHeight(snap.orthoHeight);
+    }
+
+    pane.camera.updateMatrixWorld(true);
+    this.applyCameraProjections(this.lastRects);
+    this.persistCameras();
+    this.rebindActiveControls();
+    this.notifyCameraChange(viewId);
+    this.invalidate();
+    this.onLayoutChange?.();
+  }
+
   frameSelection(viewId?: ViewId): boolean {
     if (!this.session) return false;
     const points = documentViewPoints(this.session.document, this.session.selection.state);
@@ -452,7 +540,15 @@ export class ViewportEngine {
     const id = viewId ?? this.workspace.hoveredViewportId ?? this.workspace.activeViewportId;
     const pane = this.panes.get(id);
     if (!pane) return;
-    const snap = DEFAULT_CAMERAS[id];
+    const snap =
+      pane.view === 'perspective'
+        ? DEFAULT_CAMERAS.persp
+        : sanitizeOrthoCamera(pane.view, {
+            ...DEFAULT_CAMERAS.top,
+            position: [...DEFAULT_CAMERAS.top.position],
+            target: [...DEFAULT_CAMERAS.top.target],
+            up: [...DEFAULT_CAMERAS.top.up],
+          });
     pane.camera.position.fromArray(snap.position);
     pane.camera.up.fromArray(snap.up);
     pane.orthoHeight = clampOrthoHeight(snap.orthoHeight);
@@ -466,14 +562,18 @@ export class ViewportEngine {
     this.invalidate();
   }
 
-  /** Align the Perspective camera to a world axis without changing projection mode. */
-  orientPerspective(axis: 'x' | 'y' | 'z', sign: 1 | -1 = 1): void {
-    const pane = this.panes.get('persp');
+  /** Align a Perspective camera to a world axis without changing projection mode. */
+  orientPerspective(
+    axis: 'x' | 'y' | 'z',
+    sign: 1 | -1 = 1,
+    viewId: ViewId = 'persp',
+  ): void {
+    const pane = this.panes.get(viewId);
     if (!pane || !(pane.camera instanceof PerspectiveCamera) || !this.workspace) return;
     this.rebindActiveControls();
     const target =
       pane.controls?.target ??
-      new Vector3().fromArray(this.workspace.getCamera('persp').target);
+      new Vector3().fromArray(this.workspace.getCamera(viewId).target);
     const distance = Math.max(
       ORBIT_MIN_DISTANCE,
       pane.camera.position.distanceTo(target),
@@ -494,16 +594,16 @@ export class ViewportEngine {
     pane.controls?.target.copy(target);
     pane.controls?.update();
     this.persistCameras();
-    this.notifyCameraChange('persp');
+    this.notifyCameraChange(viewId);
     this.invalidate();
   }
 
   /** Orbit Perspective from the on-screen orientation widget (CSS-pixel deltas). */
-  orbitPerspective(deltaX: number, deltaY: number): void {
-    const pane = this.panes.get('persp');
+  orbitPerspective(deltaX: number, deltaY: number, viewId: ViewId = 'persp'): void {
+    const pane = this.panes.get(viewId);
     if (!pane || !(pane.camera instanceof PerspectiveCamera) || !this.workspace) return;
     if (!pane.controls) {
-      this.workspace.setActiveViewport('persp');
+      this.workspace.setActiveViewport(viewId);
       this.rebindActiveControls();
     }
     const controls = pane.controls;
@@ -513,7 +613,7 @@ export class ViewportEngine {
     controls.rotateUp(deltaY * radiansPerPixel);
     controls.update();
     this.persistCameras();
-    this.notifyCameraChange('persp');
+    this.notifyCameraChange(viewId);
     this.invalidate();
   }
 
@@ -543,7 +643,7 @@ export class ViewportEngine {
     pane.controls?.target.copy(target);
     pane.camera.lookAt(target);
     pane.camera.updateMatrixWorld(true);
-    if (id !== 'persp') this.lockOrthoPane(pane);
+    if (pane.camera instanceof OrthographicCamera) this.lockOrthoPane(pane);
     this.applyCameraProjections(this.lastRects);
     this.persistCameras();
     this.notifyCameraChange(id);
@@ -565,6 +665,8 @@ export class ViewportEngine {
     const blockTransform =
       !!this.session?.transform.active ||
       this.gizmoDragging ||
+      !!this.curvePointDrag ||
+      !!this.draftCurvePointDrag ||
       !!this.marquee ||
       this.painting3D ||
       !!doodleDrawing ||
@@ -592,7 +694,7 @@ export class ViewportEngine {
       controls.screenSpacePanning = true;
       controls.minDistance = ORBIT_MIN_DISTANCE;
       controls.maxDistance = ORBIT_MAX_DISTANCE;
-      if (pane.id !== 'persp') {
+      if (pane.camera instanceof OrthographicCamera) {
         // Ortho must stay back from the focus plane or solids get near-clipped.
         controls.minDistance = ORTHO_MIN_DISTANCE;
       }
@@ -607,7 +709,7 @@ export class ViewportEngine {
         this.invalidate();
       });
       controls.addEventListener('end', () => {
-        if (pane.id !== 'persp') {
+        if (pane.camera instanceof OrthographicCamera) {
           this.lockOrthoPane(pane);
           this.absorbPaneOrthoZoom(pane);
         }
@@ -616,7 +718,7 @@ export class ViewportEngine {
         this.invalidate();
       });
       controls.addEventListener('change', () => {
-        if (pane.id !== 'persp') {
+        if (pane.camera instanceof OrthographicCamera) {
           this.lockOrthoPane(pane);
           this.absorbPaneOrthoZoom(pane);
         }
@@ -624,11 +726,11 @@ export class ViewportEngine {
         this.invalidate();
       });
       pane.controls = controls;
-      if (pane.id !== 'persp') this.lockOrthoPane(pane);
+      if (pane.camera instanceof OrthographicCamera) this.lockOrthoPane(pane);
     } else {
       pane.controls.maxDistance = ORBIT_MAX_DISTANCE;
       pane.controls.minDistance =
-        pane.id === 'persp' ? ORBIT_MIN_DISTANCE : ORTHO_MIN_DISTANCE;
+        pane.camera instanceof PerspectiveCamera ? ORBIT_MIN_DISTANCE : ORTHO_MIN_DISTANCE;
     }
 
     if (pane.controls) {
@@ -638,7 +740,7 @@ export class ViewportEngine {
       pane.controls.mouseButtons.MIDDLE = MOUSE.ROTATE;
       // RMB drags/pans the camera in every viewport; MMB remains perspective orbit.
       pane.controls.mouseButtons.RIGHT = MOUSE.PAN;
-      pane.controls.enableRotate = pane.id === 'persp';
+      pane.controls.enableRotate = pane.camera instanceof PerspectiveCamera;
       pane.controls.enablePan = true;
     }
 
@@ -660,7 +762,7 @@ export class ViewportEngine {
   private persistCameras(): void {
     if (!this.workspace) return;
     for (const pane of this.panes.values()) {
-      if (pane.id !== 'persp') {
+      if (pane.camera instanceof OrthographicCamera) {
         this.lockOrthoPane(pane);
         this.absorbPaneOrthoZoom(pane);
       }
@@ -676,7 +778,7 @@ export class ViewportEngine {
       };
       this.workspace.updateCameraState(
         pane.id,
-        pane.id === 'persp' ? raw : sanitizeOrthoCamera(pane.id, raw),
+        pane.camera instanceof PerspectiveCamera ? raw : sanitizeOrthoCamera(pane.view, raw),
       );
     }
   }
@@ -689,13 +791,13 @@ export class ViewportEngine {
   /** Keep orthographic cameras on their canonical axis (pan/zoom only). */
   private lockingOrtho = false;
   private lockOrthoPane(pane: Pane): void {
-    if (pane.id === 'persp' || !this.workspace || this.lockingOrtho) return;
+    if (!(pane.camera instanceof OrthographicCamera) || !this.workspace || this.lockingOrtho) return;
     this.lockingOrtho = true;
     try {
       const target =
         pane.controls?.target ??
         new Vector3().fromArray(this.workspace.getCamera(pane.id).target);
-      const snap = sanitizeOrthoCamera(pane.id, {
+      const snap = sanitizeOrthoCamera(pane.view, {
         position: pane.camera.position.toArray() as [number, number, number],
         target: target.toArray() as [number, number, number],
         up: pane.camera.up.toArray() as [number, number, number],
@@ -761,6 +863,15 @@ export class ViewportEngine {
       this.lastPointerSamples.set(id, this.toPointerSample(e, id));
     }
     if (!this.session?.transform.active) this.interactionOverlay.updateSnap(null, 'none');
+
+    if (this.curvePointDrag && (e.buttons & 1)) {
+      this.updateCurvePointDrag(e);
+      return;
+    }
+    if (this.draftCurvePointDrag && (e.buttons & 1)) {
+      this.updateDraftCurvePointDrag(e);
+      return;
+    }
 
     if (this.marquee) {
       this.marquee.currentX = x;
@@ -952,6 +1063,8 @@ export class ViewportEngine {
     this.workspace.setActiveViewport(id);
 
     const tool = this.session?.tools.getActive();
+    const curveTarget = this.pickCurveControl(e, id);
+    if (curveTarget && this.beginCurvePointDrag(e, id, curveTarget)) return;
 
     if (this.workspace.texture.seamPaintMode !== 'off') {
       e.preventDefault();
@@ -1017,7 +1130,9 @@ export class ViewportEngine {
 
     if (tool instanceof CreateDoodleTool) {
       e.preventDefault();
-      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      if (tool.inputMode === 'sketch') {
+        (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      }
       this.rebindActiveControls();
       const pane = this.panes.get(id);
       if (pane?.controls) {
@@ -1027,6 +1142,10 @@ export class ViewportEngine {
       this.workspace.input.begin('tool');
       this.syncOrbitEnabled();
       tool.begin(this.pointerInput(e, id), this.session!.context());
+      if (tool.inputMode === 'pen') {
+        this.workspace.input.end('tool');
+        this.syncOrbitEnabled();
+      }
       this.invalidate();
       return;
     }
@@ -1209,6 +1328,14 @@ export class ViewportEngine {
 
   private onPointerUp = (e: PointerEvent): void => {
     if (!this.session || !this.workspace) return;
+    if (this.curvePointDrag && e.button === 0) {
+      this.finishCurvePointDrag();
+      return;
+    }
+    if (this.draftCurvePointDrag && e.button === 0) {
+      this.finishDraftCurvePointDrag();
+      return;
+    }
     if (this.seamStroke && e.button === 0) {
       this.finishSeamStroke();
       return;
@@ -1227,7 +1354,12 @@ export class ViewportEngine {
       return;
     }
     const doodle = this.session.tools.getActive();
-    if (doodle instanceof CreateDoodleTool && doodle.state.stage === 'drawing' && e.button === 0) {
+    if (
+      doodle instanceof CreateDoodleTool &&
+      doodle.inputMode === 'sketch' &&
+      doodle.state.stage === 'drawing' &&
+      e.button === 0
+    ) {
       doodle.confirm(this.session.context());
       this.workspace.input.end('tool');
       this.syncOrbitEnabled();
@@ -1287,6 +1419,8 @@ export class ViewportEngine {
   };
 
   private onPointerCancel = (): void => {
+    if (this.curvePointDrag) this.finishCurvePointDrag();
+    if (this.draftCurvePointDrag) this.finishDraftCurvePointDrag();
     if (this.seamStroke) this.finishSeamStroke();
     if (this.painting3D) this.endPaint3D();
     const terrain = this.session?.tools.getActive();
@@ -2196,7 +2330,7 @@ export class ViewportEngine {
     if (!faceId) return null;
     const world = v3(intersection.point.x, intersection.point.y, intersection.point.z);
     return {
-      objectId,
+      objectId: object.id,
       faceId,
       localPoint: inverseTransformPointApprox(world, object.transform),
       transform: cloneTransform(object.transform),
@@ -2345,6 +2479,23 @@ export class ViewportEngine {
       },
       (ids) => expandGroupsToDescendants(doc, ids),
     );
+    const activeTool = this.session.tools.getActive();
+    const draft =
+      activeTool instanceof CreateDoodleTool
+        ? activeTool.getDraftOperation()
+        : null;
+    if (draft) {
+      this.curveControls.syncDraft(
+        this.scene,
+        draft,
+        activeTool instanceof CreateDoodleTool ? activeTool.state.previewPoint : null,
+      );
+      return;
+    }
+    const activeId = this.session.selection.state.activeObjectId;
+    const object = activeId ? doc.objects.get(activeId) ?? null : null;
+    const operation = readCurveOperation(object?.metadata.curveOperation);
+    this.curveControls.sync(activeId ? this.handles.get(activeId) ?? null : null, operation);
   }
 
   private bindPointer(): void {
@@ -2437,6 +2588,206 @@ export class ViewportEngine {
       ctrlKey: e.ctrlKey,
       camera: this.getCameraAxes(paneId)!,
     };
+  }
+
+  private pickCurveControl(e: PointerEvent, paneId: ViewId): CurveControlTarget | null {
+    if (!this.host || !this.session) return null;
+    if (this.session.selection.state.mode !== 'object') return null;
+    const tool = this.session.tools.getActive();
+    const draft =
+      tool instanceof CreateDoodleTool
+        ? tool.getDraftOperation()
+        : null;
+    if (!draft) {
+      const activeId = this.session.selection.state.activeObjectId;
+      const object = activeId ? this.session.document.objects.get(activeId) : null;
+      if (!object || !readCurveOperation(object.metadata.curveOperation)) return null;
+    }
+    const pane = this.panes.get(paneId);
+    const viewport = this.lastRects.find((rect) => rect.id === paneId);
+    if (!pane || !viewport) return null;
+    const hostRect = this.host.getBoundingClientRect();
+    const localX = e.clientX - hostRect.left - viewport.x;
+    const localY = e.clientY - hostRect.top - viewport.y;
+    const ndc = new Vector2(
+      localX / Math.max(1, viewport.width) * 2 - 1,
+      -(localY / Math.max(1, viewport.height)) * 2 + 1,
+    );
+    pane.camera.updateMatrixWorld(true);
+    this.curveControls.root.updateWorldMatrix(true, true);
+    const raycaster = new Raycaster();
+    raycaster.setFromCamera(ndc, pane.camera);
+    const threshold = (this.pointerInput(e, paneId).worldUnitsPerPixel ?? 0.01) * 12;
+    return this.curveControls.pick(raycaster, threshold);
+  }
+
+  private beginCurvePointDrag(
+    e: PointerEvent,
+    paneId: ViewId,
+    target: CurveControlTarget,
+  ): boolean {
+    if (!this.session || !this.workspace) return false;
+    const tool = this.session.tools.getActive();
+    const draft = tool instanceof CreateDoodleTool ? tool.getDraftOperation() : null;
+    if (draft && tool instanceof CreateDoodleTool) {
+      const point =
+        target.kind === 'anchor'
+          ? tool.state.points[target.index]
+          : target.kind === 'handle-in'
+            ? tool.state.handlesIn[target.index]
+            : tool.state.handlesOut[target.index];
+      const axes = this.getCameraAxes(paneId);
+      if (!point || !axes) return false;
+      this.draftCurvePointDrag = {
+        paneId,
+        pointerId: e.pointerId,
+        target,
+        planeOrigin: { ...point },
+        planeNormal: { ...axes.forward },
+      };
+      tool.state.previewPoint = null;
+      tool.state.revision += 1;
+      e.preventDefault();
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      this.workspace.input.begin('tool');
+      this.syncOrbitEnabled();
+      if (this.renderer) this.renderer.domElement.style.cursor = 'move';
+      return true;
+    }
+    const objectId = this.session.selection.state.activeObjectId;
+    const object = objectId ? this.session.document.objects.get(objectId) : null;
+    const mesh = object?.meshId ? this.session.document.meshes.get(object.meshId) : null;
+    const operation = readCurveOperation(object?.metadata.curveOperation);
+    const handle = objectId ? this.handles.get(objectId) : null;
+    if (!object || !mesh || !operation || !handle) return false;
+    const localPoint =
+      target.kind === 'anchor'
+        ? operation.points[target.index]
+        : target.kind === 'handle-in'
+          ? operation.handlesIn[target.index]
+          : operation.handlesOut[target.index];
+    const axes = this.getCameraAxes(paneId);
+    if (!localPoint || !axes) return false;
+    const world = handle.group.localToWorld(new Vector3(localPoint.x, localPoint.y, localPoint.z));
+    this.curvePointDrag = {
+      paneId,
+      pointerId: e.pointerId,
+      objectId: object.id,
+      target,
+      planeOrigin: v3(world.x, world.y, world.z),
+      planeNormal: { ...axes.forward },
+      beforeMesh: mesh,
+      beforeMetadata: object.metadata.curveOperation!,
+      operation,
+    };
+    e.preventDefault();
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    this.workspace.input.begin('tool');
+    this.syncOrbitEnabled();
+    if (this.renderer) this.renderer.domElement.style.cursor = 'move';
+    return true;
+  }
+
+  private updateDraftCurvePointDrag(e: PointerEvent): void {
+    const drag = this.draftCurvePointDrag;
+    const tool = this.session?.tools.getActive();
+    if (!drag || !this.session || !(tool instanceof CreateDoodleTool)) return;
+    const input = this.pointerInput(e, drag.paneId);
+    const denominator = dotVec3(input.rayDirection, drag.planeNormal);
+    if (Math.abs(denominator) < 1e-7) return;
+    const distance =
+      dotVec3(subVec3(drag.planeOrigin, input.rayOrigin), drag.planeNormal) / denominator;
+    if (!Number.isFinite(distance)) return;
+    const next = addVec3(input.rayOrigin, scaleVec3(input.rayDirection, distance));
+    tool.updateDraftControl(drag.target, next, this.session.context());
+    this.invalidate();
+  }
+
+  private finishDraftCurvePointDrag(): void {
+    if (!this.draftCurvePointDrag || !this.workspace) return;
+    this.draftCurvePointDrag = null;
+    this.workspace.input.end('tool');
+    this.syncOrbitEnabled();
+    if (this.renderer) this.renderer.domElement.style.cursor = '';
+    this.session?.requestRedraw();
+  }
+
+  private updateCurvePointDrag(e: PointerEvent): void {
+    const drag = this.curvePointDrag;
+    if (!drag || !this.session) return;
+    const object = this.session.document.objects.get(drag.objectId);
+    const handle = this.handles.get(drag.objectId);
+    if (!object?.meshId || !handle) return;
+    const input = this.pointerInput(e, drag.paneId);
+    const denominator = dotVec3(input.rayDirection, drag.planeNormal);
+    if (Math.abs(denominator) < 1e-7) return;
+    const distance =
+      dotVec3(subVec3(drag.planeOrigin, input.rayOrigin), drag.planeNormal) / denominator;
+    if (!Number.isFinite(distance)) return;
+    const world = addVec3(input.rayOrigin, scaleVec3(input.rayDirection, distance));
+    const local = handle.group.worldToLocal(new Vector3(world.x, world.y, world.z));
+    const next = v3(local.x, local.y, local.z);
+    const target = drag.target;
+    if (target.kind === 'anchor') {
+      const previous = drag.operation.points[target.index]!;
+      const delta = subVec3(next, previous);
+      drag.operation.points[target.index] = next;
+      drag.operation.handlesIn[target.index] = addVec3(
+        drag.operation.handlesIn[target.index]!,
+        delta,
+      );
+      drag.operation.handlesOut[target.index] = addVec3(
+        drag.operation.handlesOut[target.index]!,
+        delta,
+      );
+    } else if (target.kind === 'handle-in') {
+      drag.operation.handlesIn[target.index] = next;
+    } else {
+      drag.operation.handlesOut[target.index] = next;
+    }
+    const sourceObject = drag.operation.pathSourceObjectId
+      ? this.session.document.objects.get(drag.operation.pathSourceObjectId)
+      : null;
+    const sourceMesh = sourceObject?.meshId
+      ? this.session.document.meshes.get(sourceObject.meshId) ?? null
+      : null;
+    const mesh = evaluateCurveOperation(drag.operation, sourceMesh);
+    mesh.id = object.meshId;
+    this.session.document.meshes.set(mesh.id, mesh);
+    object.metadata.curveOperation = serializeCurveOperation(drag.operation);
+    this.session.document.dirty = true;
+    this.session.requestRedraw();
+  }
+
+  private finishCurvePointDrag(): void {
+    const drag = this.curvePointDrag;
+    if (!drag || !this.session || !this.workspace) return;
+    const object = this.session.document.objects.get(drag.objectId);
+    const afterMesh = object?.meshId ? this.session.document.meshes.get(object.meshId) : null;
+    const afterMetadata = object?.metadata.curveOperation;
+    this.curvePointDrag = null;
+    this.workspace.input.end('tool');
+    this.syncOrbitEnabled();
+    if (this.renderer) this.renderer.domElement.style.cursor = '';
+    if (!object || !afterMesh || !afterMetadata) return;
+    let applied = true;
+    this.session.history.execute({
+      name: drag.target.kind === 'anchor' ? 'Move Curve Point' : 'Move Bézier Handle',
+      execute: () => {
+        if (applied) return;
+        this.session!.document.meshes.set(afterMesh.id, afterMesh);
+        object.metadata.curveOperation = afterMetadata;
+        this.session!.document.dirty = true;
+        applied = true;
+      },
+      undo: () => {
+        this.session!.document.meshes.set(drag.beforeMesh.id, drag.beforeMesh);
+        object.metadata.curveOperation = drag.beforeMetadata;
+        this.session!.document.dirty = true;
+        applied = false;
+      },
+    });
+    this.session.requestRedraw();
   }
 
   private pickGizmo(e: PointerEvent, paneId: ViewId) {
@@ -2696,7 +3047,7 @@ export class ViewportEngine {
     const target =
       pane.controls?.target ??
       new Vector3().fromArray(this.workspace.getCamera(pane.id).target);
-    syncViewportGrid(pane.grid, pane.id, pane.camera, target);
+    syncViewportGrid(pane.grid, pane.view, pane.camera, target);
   }
 
   /** Sync orthoHeight from OrbitControls zoom changes on orthographic cameras. */
@@ -2717,7 +3068,7 @@ export class ViewportEngine {
       for (const pane of this.panes.values()) {
         if (pane.controls?.enabled) {
           pane.controls.update();
-          if (pane.id !== 'persp') this.lockOrthoPane(pane);
+          if (pane.camera instanceof OrthographicCamera) this.lockOrthoPane(pane);
         }
       }
       this.syncOrthoHeights();

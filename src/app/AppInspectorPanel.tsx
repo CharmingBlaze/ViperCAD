@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { MaterialEditor } from '@/app/MaterialEditor';
+import { SimpleTextureDialog } from '@/app/SimpleTextureDialog';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { runMeshTransaction } from '@/core/history/Transaction';
 import { pushToast } from '@/app/Toast';
@@ -52,6 +54,26 @@ import {
 import { gameReadiness } from '@/app/GameExportProfiles';
 import { PRIMITIVE_KINDS, PRIMITIVE_LABELS, type PrimitiveKind } from '@/core/primitives/PrimitiveFactory';
 import { PrimitiveOperationPanel } from '@/app/inspector/PrimitiveOperationPanel';
+import { CurveOperationPanel } from '@/app/inspector/CurveOperationPanel';
+import { ExactCoordinateInput } from '@/app/inspector/ExactCoordinateInput';
+import {
+  PathSettingsControls,
+  type PathSettingsValue,
+} from '@/app/inspector/PathSettingsControls';
+import {
+  curveOperationLabel,
+  evaluateCurveOperation,
+  isPathStyle,
+  readCurveOperation,
+  serializeCurveOperation,
+  type CurveOperation,
+  type CurveStyle,
+} from '@/core/curves/CurveOperation';
+import {
+  applySimpleTextureToObject,
+  readSimpleTextureSettings,
+  type SimpleTextureSettings,
+} from '@/core/curves/SimpleTexture';
 import { viewportEngine } from '@/app/viewportEngine';
 import {
   CreateDoodleTool,
@@ -61,9 +83,14 @@ import {
 import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
 import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
 import type { GizmoMode, TransformOrientation, TransformPivotMode } from '@/core/transform/types';
-import type { InspectorTab, WorkspaceController } from '@/workspace/WorkspaceController';
+import type {
+  InspectorSection,
+  InspectorTab,
+  WorkspaceController,
+} from '@/workspace/WorkspaceController';
 
 type CreateMode = 'primitive' | 'doodle' | 'draw';
+type SceneToolMode = 'construct' | 'modifiers' | 'output';
 
 type Props = {
   session: EditorSession;
@@ -78,9 +105,17 @@ type Props = {
 };
 
 const TABS: { id: InspectorTab; label: string }[] = [
-  { id: 'create', label: 'Create' },
-  { id: 'edit', label: 'Edit' },
-  { id: 'material', label: 'Mat' },
+  { id: 'create', label: 'Build' },
+  { id: 'edit', label: 'Model' },
+  { id: 'material', label: 'Material' },
+];
+
+const EDIT_SECTIONS: { id: InspectorSection; label: string; short: string }[] = [
+  { id: 'select', label: 'Select & Objects', short: 'Select' },
+  { id: 'transform', label: 'Transform', short: 'Xform' },
+  { id: 'geometry', label: 'Mesh Geometry', short: 'Mesh' },
+  { id: 'symmetry', label: 'Symmetry', short: 'Sym' },
+  { id: 'scene', label: 'Construct & Game', short: 'Game' },
 ];
 
 /**
@@ -99,6 +134,7 @@ export function AppInspectorPanel({
   setPivot,
 }: Props) {
   const tab = workspace.inspectorTab;
+  const editSection = workspace.inspectorSection;
   const sel = session.selection.state;
   const primitiveTool = session.tools.get('create-primitive') as CreatePrimitiveTool;
   const doodleTool = session.tools.get('create-doodle') as CreateDoodleTool;
@@ -124,6 +160,11 @@ export function AppInspectorPanel({
   const [constructionOffset, setConstructionOffset] = useState(0);
   const [exactPoint, setExactPoint] = useState({ x: 0, y: 0, z: 0 });
   const [drawAdvancedOpen, setDrawAdvancedOpen] = useState(false);
+  const [sceneToolMode, setSceneToolMode] = useState<SceneToolMode>('construct');
+  const [simpleTextureOpen, setSimpleTextureOpen] = useState(false);
+  const [draftCurvePoint, setDraftCurvePoint] = useState(0);
+  const [simpleTextureSettings, setSimpleTextureSettings] =
+    useState<SimpleTextureSettings>(() => doodleTool.simpleTextureSettings);
   const createMode: CreateMode = isDrawing
     ? 'draw'
     : isDoodling
@@ -165,6 +206,92 @@ export function AppInspectorPanel({
   const solidifyReady = !!activeMesh && activeMesh.faces.size > 0;
   const gameStats = gameReadiness(session.document);
   const symmetry = session.document.settings.symmetry;
+  const selectedSimpleTexture = activeObject?.metadata.simpleTexture;
+
+  useEffect(() => {
+    if (!selectedSimpleTexture) return;
+    const settings = readSimpleTextureSettings(selectedSimpleTexture);
+    setSimpleTextureSettings(settings);
+    doodleTool.simpleTextureSettings = settings;
+  }, [activeObject?.id, doodleTool, selectedSimpleTexture]);
+
+  const rebuildSelectedCurve = (patch: Partial<CurveOperation>) => {
+    if (!activeObject || !activeMesh) return;
+    const operation = readCurveOperation(activeObject.metadata.curveOperation);
+    if (!operation) return;
+    const next = { ...operation, ...patch };
+    const sourceObject = next.pathSourceObjectId
+      ? session.document.objects.get(next.pathSourceObjectId)
+      : null;
+    const sourceMesh = sourceObject?.meshId
+      ? session.document.meshes.get(sourceObject.meshId) ?? null
+      : null;
+    const rebuilt = evaluateCurveOperation(next, sourceMesh);
+    rebuilt.id = activeMesh.id;
+    session.document.meshes.set(activeMesh.id, rebuilt);
+    activeObject.metadata.curveOperation = serializeCurveOperation(next);
+    session.document.dirty = true;
+  };
+
+  const applySimpleTexture = (settings: SimpleTextureSettings) => {
+    setSimpleTextureSettings(settings);
+    doodleTool.setSimpleTextureSettings(settings, session.context());
+    if (activeObject && readCurveOperation(activeObject.metadata.curveOperation)) {
+      applySimpleTextureToObject(session.document, activeObject, settings);
+      rebuildSelectedCurve({ tipStyle: settings.tipStyle });
+    }
+    session.requestRedraw();
+    onRefresh();
+  };
+
+  const applyCurveStyle = (style: CurveStyle) => {
+    doodleTool.setStyle(style, session.context());
+    rebuildSelectedCurve({ style });
+    session.requestRedraw();
+    onRefresh();
+  };
+
+  const applyNewPathSettings = (patch: Partial<PathSettingsValue>) => {
+    const sourceId =
+      patch.pathSourceObjectId !== undefined
+        ? patch.pathSourceObjectId
+        : doodleTool.pathSourceObjectId;
+    const sourceObject = sourceId ? session.document.objects.get(sourceId) : null;
+    const sourceMesh = sourceObject?.meshId
+      ? session.document.meshes.get(sourceObject.meshId) ?? null
+      : null;
+    doodleTool.setPathSettings({
+      output: patch.pathOutput,
+      startCap: patch.pathStartCap,
+      endCap: patch.pathEndCap,
+      radiusScale: patch.pathRadiusScale,
+      radialSegments: patch.pathRadialSegments,
+      startScale: patch.startScale,
+      endScale: patch.endScale,
+      offset: patch.pathOffset,
+      twist: patch.twist,
+      spacing: patch.pathSpacing,
+      profile: patch.pathProfile,
+      profileWidth: patch.profileWidth,
+      profileHeight: patch.profileHeight,
+      chainAlternating: patch.pathChainAlternating,
+      cardCrossed: patch.pathCardCrossed,
+      distributionMode: patch.pathDistributionMode,
+      count: patch.pathCount,
+      startPadding: patch.pathStartPadding,
+      endPadding: patch.pathEndPadding,
+      randomScale: patch.pathRandomScale,
+      rotation: patch.pathRotation,
+      randomRotation: patch.pathRandomRotation,
+      alternateRotation: patch.pathAlternateRotation,
+      mirrorAlternate: patch.pathMirrorAlternate,
+      seed: patch.pathSeed,
+      keepInstances: patch.pathKeepInstances,
+      sourceObjectId: sourceId,
+      sourceMesh,
+    }, session.context());
+    onRefresh();
+  };
 
   useEffect(() => {
     viewportEngine.setModifierPreview(activeObject?.id ?? null, [
@@ -566,6 +693,39 @@ export function AppInspectorPanel({
         ))}
       </nav>
 
+      {tab === 'edit' && (
+        <div className="inspector-workflow-nav">
+          <label>
+            <span>Tool family</span>
+            <select
+              aria-label="Model tool family"
+              value={editSection}
+              onChange={(event) =>
+                workspace.setInspectorSection(event.target.value as InspectorSection)
+              }
+            >
+              {EDIT_SECTIONS.map((item) => (
+                <option key={item.id} value={item.id}>{item.label}</option>
+              ))}
+            </select>
+          </label>
+          <nav className="inspector-subtabs" aria-label="Model tool categories">
+            {EDIT_SECTIONS.map((item) => (
+              <button
+                type="button"
+                key={item.id}
+                className={editSection === item.id ? 'is-active' : ''}
+                aria-selected={editSection === item.id}
+                title={item.label}
+                onClick={() => workspace.setInspectorSection(item.id)}
+              >
+                {item.short}
+              </button>
+            ))}
+          </nav>
+        </div>
+      )}
+
       <div className="uv-panel-body">
         {tab === 'create' && (
           <>
@@ -596,7 +756,7 @@ export function AppInspectorPanel({
                     onRefresh();
                   }}
                 >
-                  Doodle
+                  Curves
                 </button>
                 <button
                   type="button"
@@ -615,115 +775,521 @@ export function AppInspectorPanel({
             </section>
 
             {createMode === 'doodle' && (
-              <section className="uv-section">
-                <h3 className="uv-section-title">3D Doodle</h3>
-                <div className="uv-btn-grid uv-btn-grid-3">
-                  {(
-                    [
-                      ['soft', 'Soft'],
-                      ['sharp', 'Sharp'],
-                      ['tube', 'Tube'],
-                    ] as [DoodleStyle, string][]
-                  ).map(([style, label]) => (
+              <>
+                <section className="uv-section">
+                  <h3 className="uv-section-title">Curve Input</h3>
+                  <div className="uv-btn-grid uv-btn-grid-2">
                     <button
-                      key={style}
                       type="button"
-                      className={`tool${doodleTool.style === style ? ' is-active' : ''}`}
-                      aria-pressed={doodleTool.style === style}
+                      className={`tool${doodleTool.inputMode === 'sketch' ? ' is-active' : ''}`}
+                      aria-pressed={doodleTool.inputMode === 'sketch'}
                       onClick={() => {
-                        doodleTool.setStyle(style, session.context());
+                        doodleTool.setInputMode('sketch', session.context());
                         onRefresh();
                       }}
                     >
-                      {label}
+                      Sketch · Freehand
                     </button>
-                  ))}
-                </div>
-                <label className="uv-check">
-                  <input
-                    type="checkbox"
-                    checked={doodleTool.smoothDrawing}
-                    onChange={(e) => {
-                      doodleTool.setSmoothDrawing(e.target.checked, session.context());
-                      onRefresh();
-                    }}
-                  />
-                  Smooth drawing
-                </label>
-                <label className="uv-field">
-                  <span>{doodleTool.style === 'tube' ? 'Brush radius' : 'Thickness'}</span>
-                  <input
-                    className="uv-text"
-                    type="number"
-                    min={0.01}
-                    max={2}
-                    step={0.01}
-                    value={Number(doodleTool.radius.toFixed(3))}
-                    onChange={(e) => {
-                      doodleTool.setRadius(Number(e.target.value), session.context());
-                      onRefresh();
-                    }}
-                  />
-                </label>
-                <label className="uv-field">
-                  <span>Poly</span>
-                  <select
-                    className="uv-select"
-                    aria-label="Doodle poly"
-                    value={doodleTool.preset}
-                    onChange={(e) => {
-                      doodleTool.setPreset(e.target.value as DoodlePolyPreset, session.context());
-                      onRefresh();
-                    }}
-                  >
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                  </select>
-                </label>
-                {isDoodling ? (
-                  <button
-                    type="button"
-                    className="tool uv-btn-block"
-                    onClick={() => {
-                      doodleTool.cancel(session.context());
-                      session.tools.setActive('select', session.context());
-                      onRefresh();
-                    }}
-                  >
-                    Cancel doodle
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="tool primary uv-btn-block"
-                    onClick={() => {
-                      cancelCreateTools();
-                      session.tools.setActive('create-doodle', session.context());
-                      onRefresh();
-                    }}
-                  >
-                    Start doodle
-                  </button>
-                )}
-                <p className="uv-meta">
-                  {isDoodling
-                    ? doodleTool.state.stage === 'drawing'
-                      ? doodleTool.state.closed
-                        ? `${doodleTool.style === 'soft' ? 'Soft fill' : 'Sharp fill'} · ${doodleTool.state.points.length} samples`
-                        : `Tube stroke · ${doodleTool.state.points.length} samples`
-                      : 'Armed · drag in the viewport'
-                    : doodleTool.style === 'soft'
-                      ? 'Rounded filled 3D shape'
-                      : doodleTool.style === 'sharp'
-                        ? 'Crisp extruded 3D shape'
-                        : 'Open 3D tube stroke'}
-                </p>
-                <p className="uv-hint">
-                  {doodleTool.style === 'tube'
-                    ? 'LMB drag an open path · release to commit · Esc cancel'
-                    : 'LMB draw any outline · release auto-closes and fills · Esc cancel'}
-                </p>
-              </section>
+                    <button
+                      type="button"
+                      className={`tool${doodleTool.inputMode === 'pen' ? ' is-active' : ''}`}
+                      aria-pressed={doodleTool.inputMode === 'pen'}
+                      onClick={() => {
+                        doodleTool.setInputMode('pen', session.context());
+                        onRefresh();
+                      }}
+                    >
+                      Vector Pen
+                    </button>
+                  </div>
+                  <p className="uv-hint">
+                    {doodleTool.inputMode === 'sketch'
+                      ? 'Press and draw a fluid path · release to create'
+                      : 'Click precise control points · Enter or Finish Curve to create'}
+                  </p>
+                </section>
+
+                <section className="uv-section">
+                  <h3 className="uv-section-title">Stroke Shapes</h3>
+                  <div className="uv-btn-grid uv-btn-grid-4">
+                    {(
+                      [
+                        ['sharp', 'Outline'],
+                        ['tube', 'Path'],
+                        ['soft', 'Blob'],
+                        ['capsule', 'Capsule'],
+                      ] as [DoodleStyle, string][]
+                    ).map(([style, label]) => (
+                      <button
+                        key={style}
+                        type="button"
+                        className={`tool${doodleTool.style === style && doodleTool.solidMode === 'extrude' ? ' is-active' : ''}`}
+                        aria-pressed={doodleTool.style === style && doodleTool.solidMode === 'extrude'}
+                        onClick={() => {
+                          doodleTool.setSolidMode('extrude', session.context());
+                          doodleTool.setStyle(style, session.context());
+                          onRefresh();
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <h3 className="uv-section-title">Hair</h3>
+                  <div className="uv-btn-grid uv-btn-grid-3">
+                    {(
+                      [
+                        ['hair', 'Hair Paths'],
+                        ['hair-strip', 'Hair Strips'],
+                        ['rounded-hair', 'Rounded Hair'],
+                      ] as [DoodleStyle, string][]
+                    ).map(([style, label]) => (
+                      <button
+                        key={style}
+                        type="button"
+                        className={`tool${doodleTool.style === style && doodleTool.solidMode === 'extrude' ? ' is-active' : ''}`}
+                        aria-pressed={doodleTool.style === style && doodleTool.solidMode === 'extrude'}
+                        onClick={() => {
+                          doodleTool.setSolidMode('extrude', session.context());
+                          doodleTool.setStyle(style, session.context());
+                          onRefresh();
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <h3 className="uv-section-title">Sweeps</h3>
+                  <div className="uv-btn-grid uv-btn-grid-2">
+                    {(
+                      [
+                        ['ribbon', 'Ribbon'],
+                        ['tapered-tube', 'Tapered Tube'],
+                        ['rope', 'Rope'],
+                        ['square-sweep', 'Profile Sweep'],
+                      ] as [DoodleStyle, string][]
+                    ).map(([style, label]) => (
+                      <button
+                        key={style}
+                        type="button"
+                        className={`tool${doodleTool.style === style && doodleTool.solidMode === 'extrude' ? ' is-active' : ''}`}
+                        aria-pressed={doodleTool.style === style && doodleTool.solidMode === 'extrude'}
+                        onClick={() => {
+                          doodleTool.setSolidMode('extrude', session.context());
+                          doodleTool.setStyle(style, session.context());
+                          onRefresh();
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  {doodleTool.style === 'tube' && doodleTool.solidMode === 'extrude' && (
+                    <PathSettingsControls
+                      document={session.document}
+                      value={{
+                        pathOutput: doodleTool.pathOutput,
+                        pathStartCap: doodleTool.pathStartCap,
+                        pathEndCap: doodleTool.pathEndCap,
+                        pathRadiusScale: doodleTool.pathRadiusScale,
+                        pathRadialSegments: doodleTool.pathRadialSegments,
+                        startScale: doodleTool.startScale,
+                        endScale: doodleTool.endScale,
+                        pathOffset: doodleTool.pathOffset,
+                        twist: doodleTool.twist,
+                        pathSpacing: doodleTool.pathSpacing,
+                        pathProfile: doodleTool.pathProfile,
+                        profileWidth: doodleTool.profileWidth,
+                        profileHeight: doodleTool.profileHeight,
+                        pathChainAlternating: doodleTool.pathChainAlternating,
+                        pathCardCrossed: doodleTool.pathCardCrossed,
+                        pathDistributionMode: doodleTool.pathDistributionMode,
+                        pathCount: doodleTool.pathCount,
+                        pathStartPadding: doodleTool.pathStartPadding,
+                        pathEndPadding: doodleTool.pathEndPadding,
+                        pathRandomScale: doodleTool.pathRandomScale,
+                        pathRotation: doodleTool.pathRotation,
+                        pathRandomRotation: doodleTool.pathRandomRotation,
+                        pathAlternateRotation: doodleTool.pathAlternateRotation,
+                        pathMirrorAlternate: doodleTool.pathMirrorAlternate,
+                        pathSeed: doodleTool.pathSeed,
+                        pathKeepInstances: doodleTool.pathKeepInstances,
+                        pathSourceObjectId: doodleTool.pathSourceObjectId,
+                      }}
+                      onChange={applyNewPathSettings}
+                    />
+                  )}
+                  {doodleTool.style === 'capsule' && doodleTool.solidMode === 'extrude' && (
+                    <div className="path-settings-panel capsule-settings-panel">
+                      <div className="simple-texture-card-heading">
+                        <strong>CAPSULE SETTINGS</strong>
+                        <span>True rounded ends</span>
+                      </div>
+                      <label className="uv-field">
+                        <span>Round sides · {doodleTool.pathRadialSegments}</span>
+                        <input
+                          aria-label="Capsule round sides"
+                          type="range"
+                          min={12}
+                          max={24}
+                          step={1}
+                          value={doodleTool.pathRadialSegments}
+                          onChange={(event) => {
+                            doodleTool.setPathSettings(
+                              { radialSegments: Number(event.target.value) },
+                              session.context(),
+                            );
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                      <p className="uv-hint">
+                        Open strokes receive hemispherical ends. Connected strokes become one seamless rounded loop.
+                      </p>
+                    </div>
+                  )}
+                  <label className="uv-field">
+                    <span>Curve type</span>
+                    <select
+                      className="uv-select"
+                      aria-label="New curve type"
+                      value={doodleTool.curveType}
+                      onChange={(event) => {
+                        doodleTool.setCurveType(
+                          event.target.value as 'polyline' | 'catmull-rom' | 'bezier',
+                          session.context(),
+                        );
+                        onRefresh();
+                      }}
+                    >
+                      <option value="polyline">Linear / Polyline</option>
+                      <option value="catmull-rom">Smooth Spline</option>
+                      <option value="bezier">Cubic Bézier</option>
+                    </select>
+                  </label>
+                  {doodleTool.solidMode === 'extrude' && isPathStyle(doodleTool.style) && (
+                    <label className="curve-option-toggle">
+                      <input
+                        type="checkbox"
+                        checked={doodleTool.autoConnect}
+                        onChange={(event) => {
+                          doodleTool.setAutoConnect(event.target.checked, session.context());
+                          onRefresh();
+                        }}
+                      />
+                      <span>
+                        <strong>Auto Connect</strong>
+                        Snap the finish exactly to the first point
+                      </span>
+                    </label>
+                  )}
+                  <label className="uv-field">
+                    <span>Radius / width</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={0.01}
+                      max={2}
+                      step={0.01}
+                      value={Number(doodleTool.radius.toFixed(3))}
+                      onChange={(e) => {
+                        doodleTool.setRadius(Number(e.target.value), session.context());
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                  <label className="uv-field">
+                    <span>Resolution</span>
+                    <select
+                      className="uv-select"
+                      aria-label="Curve resolution preset"
+                      value={doodleTool.preset}
+                      onChange={(e) => {
+                        doodleTool.setPreset(e.target.value as DoodlePolyPreset, session.context());
+                        onRefresh();
+                      }}
+                    >
+                      <option value="low">Low-poly</option>
+                      <option value="medium">Medium</option>
+                    </select>
+                  </label>
+                  <section className="simple-texture-card">
+                    <div className="simple-texture-card-heading">
+                      <strong>APPEARANCE</strong>
+                      <span>New strokes</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="simple-texture-open"
+                      onClick={() => setSimpleTextureOpen(true)}
+                    >
+                      Simple Texture · {
+                        simpleTextureSettings.mode === 'color'
+                          ? 'Use current color'
+                          : simpleTextureSettings.mode === 'gradient'
+                            ? 'Gradient'
+                            : 'Image'
+                      }
+                    </button>
+                    <div className="simple-texture-card-tips">
+                      {(['pointed', 'square'] as const).map((tip) => (
+                        <label key={tip}>
+                          <input
+                            type="radio"
+                            name="curve-tip-style"
+                            checked={simpleTextureSettings.tipStyle === tip}
+                            onChange={() => applySimpleTexture({ ...simpleTextureSettings, tipStyle: tip })}
+                          />
+                          <span>{tip === 'pointed' ? 'Pointed tips' : 'Square tips'}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <p>Draw in a viewport to create the stroke. Texture mapping and tip settings are saved on the new object.</p>
+                  </section>
+                  <h3 className="uv-section-title">3D Operation</h3>
+                  <div className="uv-btn-grid uv-btn-grid-2">
+                    <button
+                      type="button"
+                      className={`tool${doodleTool.solidMode === 'extrude' ? ' is-active' : ''}`}
+                      aria-pressed={doodleTool.solidMode === 'extrude'}
+                      onClick={() => {
+                        doodleTool.setSolidMode('extrude', session.context());
+                        onRefresh();
+                      }}
+                    >
+                      Extrude / Sweep
+                    </button>
+                    <button
+                      type="button"
+                      className={`tool${doodleTool.solidMode === 'lathe' ? ' is-active' : ''}`}
+                      aria-pressed={doodleTool.solidMode === 'lathe'}
+                      onClick={() => {
+                        doodleTool.setSolidMode('lathe', session.context());
+                        onRefresh();
+                      }}
+                    >
+                      Lathe
+                    </button>
+                  </div>
+                  {doodleTool.solidMode === 'lathe' && (
+                    <div className="curve-lathe-settings">
+                      <label className="uv-field">
+                        <span>Revolution axis</span>
+                        <select
+                          className="uv-select"
+                          aria-label="New lathe axis"
+                          value={doodleTool.latheAxis}
+                          onChange={(event) => {
+                            doodleTool.setLatheSettings(
+                              { axis: event.target.value as 'x' | 'y' | 'z' },
+                              session.context(),
+                            );
+                            onRefresh();
+                          }}
+                        >
+                          <option value="x">X axis</option>
+                          <option value="y">Y axis</option>
+                          <option value="z">Z axis</option>
+                        </select>
+                      </label>
+                      <label className="uv-field">
+                        <span>Round sides · {doodleTool.latheSegments}</span>
+                        <input
+                          className="uv-range"
+                          type="range"
+                          min={8}
+                          max={64}
+                          step={1}
+                          value={doodleTool.latheSegments}
+                          onChange={(event) => {
+                            doodleTool.setLatheSettings(
+                              { segments: Number(event.target.value) },
+                              session.context(),
+                            );
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                      <label className="uv-field">
+                        <span>Profile detail · {doodleTool.latheProfileRings}</span>
+                        <input
+                          className="uv-range"
+                          type="range"
+                          min={4}
+                          max={64}
+                          step={1}
+                          value={doodleTool.latheProfileRings}
+                          onChange={(event) => {
+                            doodleTool.setLatheSettings(
+                              { profileRings: Number(event.target.value) },
+                              session.context(),
+                            );
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                      <label className="uv-field">
+                        <span>Profile smoothing · {Math.round(doodleTool.latheSmoothing * 100)}%</span>
+                        <input
+                          className="uv-range"
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          value={doodleTool.latheSmoothing}
+                          onChange={(event) => {
+                            doodleTool.setLatheSettings(
+                              { smoothing: Number(event.target.value) },
+                              session.context(),
+                            );
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                      <label className="uv-field">
+                        <span>Revolution · {Math.round(doodleTool.latheAngle)}°</span>
+                        <input
+                          className="uv-range"
+                          type="range"
+                          min={15}
+                          max={360}
+                          step={5}
+                          value={doodleTool.latheAngle}
+                          onChange={(event) => {
+                            doodleTool.setLatheSettings(
+                              { angle: Number(event.target.value) },
+                              session.context(),
+                            );
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                      <label className="uv-check">
+                        <input
+                          type="checkbox"
+                          checked={doodleTool.latheCaps}
+                          onChange={(event) => {
+                            doodleTool.setLatheSettings(
+                              { caps: event.target.checked },
+                              session.context(),
+                            );
+                            onRefresh();
+                          }}
+                        />
+                        Cap profile ends
+                      </label>
+                      <p className="uv-hint">
+                        Draw one side of the profile from bottom to top. The nearest profile edge becomes the revolution axis.
+                      </p>
+                    </div>
+                  )}
+                  {doodleTool.inputMode === 'pen' && doodleTool.state.stage === 'drawing' ? (
+                    <>
+                      <div className="curve-draft-editor">
+                        <div className="simple-texture-card-heading">
+                          <strong>LIVE CURVE NODES</strong>
+                          <span>Editable before finish</span>
+                        </div>
+                        <label className="uv-field">
+                          <span>Active node</span>
+                          <select
+                            className="uv-select"
+                            aria-label="Draft curve node"
+                            value={Math.min(draftCurvePoint, doodleTool.state.points.length - 1)}
+                            onChange={(event) => setDraftCurvePoint(Number(event.target.value))}
+                          >
+                            {doodleTool.state.points.map((_point, index) => (
+                              <option key={index} value={index}>Node {index + 1}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <div className="uv-btn-grid uv-btn-grid-3">
+                          {(['x', 'y', 'z'] as const).map((axis) => {
+                            const index = Math.min(
+                              draftCurvePoint,
+                              doodleTool.state.points.length - 1,
+                            );
+                            const point = doodleTool.state.points[index]!;
+                            return (
+                              <label className="uv-field" key={`${index}-${axis}`}>
+                                <span>{axis.toUpperCase()}</span>
+                                <ExactCoordinateInput
+                                  ariaLabel={`Draft node ${axis.toUpperCase()}`}
+                                  value={point[axis]}
+                                  onValueChange={(value) => {
+                                    doodleTool.setDraftPointCoordinate(
+                                      index,
+                                      axis,
+                                      value,
+                                      session.context(),
+                                    );
+                                    onRefresh();
+                                  }}
+                                />
+                              </label>
+                            );
+                          })}
+                        </div>
+                        <p className="uv-hint">
+                          Drag orange nodes and Bézier handles directly in any viewport. The curve and 3D result rebuild immediately.
+                        </p>
+                      </div>
+                      <div className="uv-btn-grid uv-btn-grid-2">
+                        <button
+                          type="button"
+                          className="tool"
+                          onClick={() => {
+                            doodleTool.popPoint(session.context());
+                            setDraftCurvePoint((index) =>
+                              Math.max(0, Math.min(index, doodleTool.state.points.length - 1)),
+                            );
+                            onRefresh();
+                          }}
+                        >
+                          Undo Point
+                        </button>
+                        <button
+                          type="button"
+                          className="tool primary"
+                          disabled={doodleTool.state.points.length < 2}
+                          onClick={() => {
+                            doodleTool.confirm(session.context());
+                            onRefresh();
+                          }}
+                        >
+                          Finish Curve
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className={`tool uv-btn-block${isDoodling ? '' : ' primary'}`}
+                      onClick={() => {
+                        cancelCreateTools();
+                        session.tools.setActive('create-doodle', session.context());
+                        onRefresh();
+                      }}
+                    >
+                      {doodleTool.inputMode === 'pen' ? 'Start Vector Pen' : 'Start Sketch'}
+                    </button>
+                  )}
+                  <p className="uv-meta">
+                    {doodleTool.state.stage === 'drawing'
+                      ? `${doodleTool.state.points.length} control points${doodleTool.state.closed ? ' · closed' : ''}`
+                      : `${doodleTool.style.replace('-', ' ')} · ready`}
+                  </p>
+                  <p className="uv-hint">
+                    Every result stays procedural: switch output, taper, twist, resize, or convert to mesh later.
+                  </p>
+                </section>
+                <CurveOperationPanel
+                  session={session}
+                  object={activeObject ?? null}
+                  mesh={activeMesh ?? null}
+                  onRefresh={onRefresh}
+                />
+              </>
             )}
 
             {createMode === 'draw' && (
@@ -1299,7 +1865,7 @@ export function AppInspectorPanel({
 
         {tab === 'edit' && (
           <>
-            <section className="uv-section">
+            {editSection === 'select' && <section className="uv-section">
               <h3 className="uv-section-title">Mode</h3>
               <label className="uv-field">
                 <span>Selection</span>
@@ -1473,16 +2039,22 @@ export function AppInspectorPanel({
               <p className="uv-hint">
                 LMB pick · Shift add · Alt toggle · Ctrl+drag box (right=inside, left=crossing)
               </p>
-            </section>
+            </section>}
 
-            <PrimitiveOperationPanel
+            {editSection === 'geometry' && <PrimitiveOperationPanel
               session={session}
               object={activeObject ?? null}
               mesh={activeMesh ?? null}
               onRefresh={onRefresh}
-            />
+            />}
+            {editSection === 'geometry' && <CurveOperationPanel
+              session={session}
+              object={activeObject ?? null}
+              mesh={activeMesh ?? null}
+              onRefresh={onRefresh}
+            />}
 
-            {activeObject && sel.mode === 'object' && (
+            {editSection === 'transform' && activeObject && sel.mode === 'object' && (
               <section className="uv-section">
                 <h3 className="uv-section-title">
                   {session.transform.lastCompleted
@@ -1522,7 +2094,7 @@ export function AppInspectorPanel({
               </section>
             )}
 
-            <section className="uv-section">
+            {editSection === 'transform' && <section className="uv-section">
               <h3 className="uv-section-title">Gizmo</h3>
               <label className="uv-field">
                 <span>Tool</span>
@@ -1561,9 +2133,9 @@ export function AppInspectorPanel({
               <p className="uv-hint">
                 Move: drag selection freely · Select: drag selection to tweak · Gizmo axes constrain
               </p>
-            </section>
+            </section>}
 
-            <section className="uv-section">
+            {editSection === 'transform' && <section className="uv-section">
               <h3 className="uv-section-title">Space</h3>
               <div className="uv-field">
                 <span>Orientation</span>
@@ -1629,9 +2201,9 @@ export function AppInspectorPanel({
                 Default: Local + Origin — rotate on the object&apos;s own axes ·{' '}
                 <kbd>,</kbd> cycle pivot · <kbd>.</kbd> cycle orientation · Esc cancel
               </p>
-            </section>
+            </section>}
 
-            <section className="uv-section">
+            {editSection === 'symmetry' && <section className="uv-section">
               <h3 className="uv-section-title">Symmetry</h3>
               <div className="uv-field">
                 <span>Profile</span>
@@ -1759,9 +2331,9 @@ export function AppInspectorPanel({
                 Character profile starts with X symmetry. Live symmetry follows component moves and
                 sculpt-style vertex edits; duplication creates linked copies.
               </p>
-            </section>
+            </section>}
 
-            <section className="uv-section">
+            {editSection === 'geometry' && <section className="uv-section">
               <h3 className="uv-section-title">Faces</h3>
               <label className="uv-field">
                 <span>Operation</span>
@@ -1827,9 +2399,9 @@ export function AppInspectorPanel({
                   ? `${sel.selectedFaceIds.size} face${sel.selectedFaceIds.size === 1 ? '' : 's'} · E extrude · Flip reverses normals`
                   : `Face mode + pick faces${sel.selectBackfaces ? ' · back-face picking on' : ''}`}
               </p>
-            </section>
+            </section>}
 
-            <section className="uv-section">
+            {editSection === 'geometry' && <section className="uv-section">
               <h3 className="uv-section-title">Shading</h3>
               <div className="uv-btn-grid uv-btn-grid-2">
                 <button type="button" className="tool" disabled={!activeMesh} onClick={() => shadeSelection('smooth')}>
@@ -1848,9 +2420,9 @@ export function AppInspectorPanel({
               <p className="uv-hint">
                 Smooth/Flat uses faces · Sharp uses edges · empty selection applies to the whole mesh · Shift+Alt+S / F
               </p>
-            </section>
+            </section>}
 
-            <section className="uv-section">
+            {editSection === 'geometry' && <section className="uv-section">
               <h3 className="uv-section-title">Topology</h3>
               {topologyActions}
               <label className="uv-field">
@@ -1890,10 +2462,29 @@ export function AppInspectorPanel({
                   </p>
                 );
               })()}
-            </section>
+            </section>}
 
-            <section className="uv-section">
-              <h3 className="uv-section-title">Level Building</h3>
+            {editSection === 'scene' && <section className="uv-section">
+              <h3 className="uv-section-title">Construct &amp; Game</h3>
+              <div className="inspector-segmented" role="tablist" aria-label="Construct and game tools">
+                {([
+                  ['construct', 'Construct'],
+                  ['modifiers', 'Modifiers'],
+                  ['output', 'Game Output'],
+                ] as const).map(([mode, label]) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    key={mode}
+                    className={sceneToolMode === mode ? 'is-active' : ''}
+                    aria-selected={sceneToolMode === mode}
+                    onClick={() => setSceneToolMode(mode)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {sceneToolMode === 'construct' && <>
               <div className="uv-btn-grid uv-btn-grid-2">
                 {(['top', 'front', 'right'] as const).map((plane) => (
                   <button
@@ -2006,6 +2597,8 @@ export function AppInspectorPanel({
                 />
                 Enable snapping · Ctrl temporarily toggles
               </label>
+              </>}
+              {sceneToolMode === 'modifiers' && <>
               <h3 className="uv-section-title">Live Modifiers</h3>
               <div className="uv-btn-grid uv-btn-grid-2">
                 <label className="uv-check">
@@ -2196,6 +2789,9 @@ export function AppInspectorPanel({
                   Place on Ground
                 </button>
               </div>
+              </>}
+              {sceneToolMode === 'output' && <>
+              <h3 className="uv-section-title">Game Output</h3>
               <div className="uv-btn-grid uv-btn-grid-2">
                 <button
                   type="button"
@@ -2352,7 +2948,8 @@ export function AppInspectorPanel({
                 </p>
               )}
               <p className="uv-hint">Prefab groups and arrays preserve hierarchy · GLB exports UV2, transforms, collision roles, and game metadata</p>
-            </section>
+              </>}
+            </section>}
 
             <section className="uv-section">
               <h3 className="uv-section-title">History</h3>
@@ -2386,6 +2983,23 @@ export function AppInspectorPanel({
 
         {tab === 'material' && <MaterialEditor session={session} compact />}
       </div>
+      {simpleTextureOpen && createPortal(
+        <SimpleTextureDialog
+          session={session}
+          settings={simpleTextureSettings}
+          activeStyle={
+            readCurveOperation(activeObject?.metadata.curveOperation)?.style ?? doodleTool.style
+          }
+          selectionLabel={(() => {
+            const operation = readCurveOperation(activeObject?.metadata.curveOperation);
+            return operation ? curveOperationLabel(operation) : undefined;
+          })()}
+          onChange={applySimpleTexture}
+          onStyleChange={applyCurveStyle}
+          onClose={() => setSimpleTextureOpen(false)}
+        />,
+        document.body,
+      )}
     </aside>
   );
 }
