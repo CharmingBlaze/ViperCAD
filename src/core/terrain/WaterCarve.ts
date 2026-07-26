@@ -12,12 +12,13 @@ export function carveTerrainChannel(
   points: XZ[],
   width: number,
   depth: number,
-  options: { feather?: number } = {},
+  options: { feather?: number; waterLevel?: number } = {},
 ): number {
   if (points.length < 2 || depth <= 1e-6) return 0;
   const halfWidth = Math.max(0.05, width) * 0.5;
   const feather = Math.max(halfWidth * 0.35, options.feather ?? halfWidth * 0.55);
   const outer = halfWidth + feather;
+  const waterLevel = options.waterLevel;
   let affected = 0;
 
   for (const vertex of mesh.vertices.values()) {
@@ -29,8 +30,17 @@ export function carveTerrainChannel(
     if (weight <= 1e-4) continue;
     // U-shaped bed: stronger in the centre, soft shoulders.
     const bowl = weight * weight * (3 - 2 * weight);
-    vertex.position.y -= depth * bowl;
-    affected += 1;
+    if (waterLevel !== undefined) {
+      // Push toward a bed below a flat water plane (same idea as lake basins).
+      const bed = waterLevel - depth * bowl;
+      if (vertex.position.y > bed) {
+        vertex.position.y = bed + (vertex.position.y - bed) * (1 - Math.min(1, bowl * 0.92));
+        affected += 1;
+      }
+    } else {
+      vertex.position.y -= depth * bowl;
+      affected += 1;
+    }
   }
   if (affected > 0) bumpPositions(mesh);
   return affected;

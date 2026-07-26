@@ -15,6 +15,7 @@ import {
 } from '@/core/terrain/TerrainFeatures';
 import { createTerrain } from '@/core/terrain/Terrain';
 import { carveTerrainBasin, carveTerrainChannel } from '@/core/terrain/WaterCarve';
+import { terrainHeightAtLocalPoint } from '@/core/terrain/TerrainProps';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
 import type { ToolPointerInput } from '@/core/tools/Tool';
 
@@ -130,6 +131,45 @@ describe('terrain water and path features', () => {
     expect(session.document.objects.has(river!.id)).toBe(false);
     const undoneMin = Math.min(...[...mesh.vertices.values()].map((v) => v.position.y));
     expect(undoneMin).toBeCloseTo(beforeMin, 5);
+  });
+
+  it('river water sits on a single flat level across uneven terrain', () => {
+    const session = new EditorSession(createEmptyDocument());
+    const terrain = createTerrain(session, { size: 20, resolution: 16 });
+    const mesh = session.document.meshes.get(terrain.meshId)!;
+    for (const vertex of mesh.vertices.values()) {
+      // Rising ground so a terrain-following ribbon would step up.
+      vertex.position.y = 1 + vertex.position.x * 0.15 + Math.sin(vertex.position.z) * 0.4;
+    }
+
+    const river = commitRiverWithCarve(
+      session,
+      terrain.objectId,
+      [
+        { x: -5, y: 0, z: -1 },
+        { x: -1, y: 0, z: 0 },
+        { x: 2, y: 0, z: 1 },
+        { x: 5, y: 0, z: 0 },
+      ],
+      2.5,
+      { carve: true, carveDepth: 1.2, animated: true, surfaceOffset: 0.03, opacity: 0.7 },
+    );
+    expect(river).toBeTruthy();
+    const riverMesh = session.document.meshes.get(river!.meshId!)!;
+    const heights = [...riverMesh.vertices.values()].map((vertex) => vertex.position.y);
+    const minY = Math.min(...heights);
+    const maxY = Math.max(...heights);
+    expect(maxY - minY).toBeLessThan(0.02);
+
+    // Channel bed stays below the flat water plane along the stroke.
+    const sampleBeds = [
+      terrainHeightAtLocalPoint(session.document.objects.get(terrain.objectId)!, mesh, -5, -1),
+      terrainHeightAtLocalPoint(session.document.objects.get(terrain.objectId)!, mesh, 0, 0),
+      terrainHeightAtLocalPoint(session.document.objects.get(terrain.objectId)!, mesh, 5, 0),
+    ];
+    for (const bed of sampleBeds) {
+      expect(bed).toBeLessThan(minY);
+    }
   });
 
   it('lake carve creates a basin and fills it with water', () => {

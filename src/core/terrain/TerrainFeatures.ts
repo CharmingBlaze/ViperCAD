@@ -401,6 +401,14 @@ export function commitRibbonWithCarve(
     return { x: local.x, z: local.z };
   });
 
+  // Rivers keep a single water plane (like lakes). Paths still follow the trail.
+  const riverWaterLevel = kind === 'river'
+    ? localStroke.reduce(
+        (sum, point) => sum + terrainHeightAtLocalPoint(terrain, terrainMesh, point.x, point.z),
+        0,
+      ) / localStroke.length
+    : null;
+
   let carveUndo: TerrainCarveUndo | null = null;
   if (carveEnabled) {
     const before = snapshotTerrainHeights(terrainMesh);
@@ -411,7 +419,9 @@ export function commitRibbonWithCarve(
       localStroke,
       kind === 'path' ? width * 1.05 : width,
       depth,
-      kind === 'path' ? { feather: width * 0.45 } : undefined,
+      kind === 'path'
+        ? { feather: width * 0.45 }
+        : { waterLevel: riverWaterLevel ?? undefined },
     );
     reprojectTerrainPlacedObjects(session.document, terrainObjectId);
     carveUndo = {
@@ -426,10 +436,12 @@ export function commitRibbonWithCarve(
   const ribbonPoints = worldPoints.map((point) => {
     const local = inverseTransformPointApprox(point, terrain.transform);
     const bed = terrainHeightAtLocalPoint(terrain, terrainMesh, local.x, local.z);
-    // Rivers fill mid-channel; paths sit on the carved bed.
-    const fill = carveEnabled
-      ? bed + depth * (kind === 'path' ? 0.08 : 0.42)
-      : bed;
+    // Rivers share one flat fill height; paths sit on the carved bed.
+    const fill = riverWaterLevel !== null
+      ? riverWaterLevel
+      : carveEnabled
+        ? bed + depth * 0.08
+        : bed;
     const world = transformPoint(
       { x: local.x, y: fill + surfaceOffset, z: local.z },
       terrain.transform,
