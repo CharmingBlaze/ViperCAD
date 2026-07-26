@@ -649,14 +649,16 @@ export class ViewportEngine {
     const pane = this.ensurePaneControls(viewId);
     if (!pane?.controls) return;
     if (pane.camera instanceof OrthographicCamera) {
+      // Ortho views: drag down zooms out, drag up zooms in.
       const factor = Math.exp(deltaY * 0.008);
       pane.orthoHeight = clampOrthoHeight(pane.orthoHeight * factor);
       this.lockOrthoPane(pane);
       this.absorbPaneOrthoZoom(pane);
     } else {
-      const scale = 1 + deltaY * 0.012;
-      if (scale > 1) pane.controls.dollyOut(scale);
-      else pane.controls.dollyIn(1 / scale);
+      // Perspective magnifier — same delta sign as ortho, inverted dolly (drag up zooms in).
+      const factor = Math.exp(deltaY * 0.008);
+      if (factor >= 1) pane.controls.dollyIn(factor);
+      else pane.controls.dollyOut(1 / factor);
       pane.controls.update();
     }
     this.persistCameras();

@@ -18,11 +18,11 @@ export const GRID_BASE_DIVISIONS = 20;
 // Viper CAD viewport palette: blue-black field, cool structural lines, and
 // restrained conventional axis colours. Orange selection and lime UI accents
 // remain visually dominant.
-const GRID_MINOR = new Color(0x1a222c);
-const GRID_MAJOR = new Color(0x303b49);
-const AXIS_X = new Color(0x783b42);
-const AXIS_Y = new Color(0x477552);
-const AXIS_Z = new Color(0x3c567f);
+const GRID_MINOR = new Color(0x2a3542);
+const GRID_MAJOR = new Color(0x425264);
+const AXIS_X = new Color(0x8f4a52);
+const AXIS_Y = new Color(0x528a58);
+const AXIS_Z = new Color(0x466690);
 const PLANE_EPS = -0.0005;
 const MAJOR_EVERY = 10;
 /** Covers the largest supported ortho/perspective framing without losing float precision. */
@@ -37,7 +37,12 @@ export class ViewportGrid extends Group {
 
   constructor() {
     super();
-    const material = new LineBasicMaterial({ vertexColors: true, depthTest: true, depthWrite: false });
+    const material = new LineBasicMaterial({
+      vertexColors: true,
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false,
+    });
     this.lines = new LineSegments(this.geometry, material);
     this.lines.frustumCulled = false;
     this.lines.renderOrder = -10;
