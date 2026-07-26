@@ -17,7 +17,13 @@ export type DesktopMenuDefinition = {
   entries: DesktopMenuEntry[];
 };
 
-export function DesktopMenuBar({ menus }: { menus: DesktopMenuDefinition[] }) {
+export function DesktopMenuBar({
+  menus,
+  align = 'start',
+}: {
+  menus: DesktopMenuDefinition[];
+  align?: 'start' | 'end';
+}) {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -37,7 +43,11 @@ export function DesktopMenuBar({ menus }: { menus: DesktopMenuDefinition[] }) {
   }, []);
 
   return (
-    <nav className="desktop-menu-bar" aria-label="Application menu" ref={rootRef}>
+    <nav
+      className={`desktop-menu-bar${align === 'end' ? ' is-end' : ''}`}
+      aria-label="Application menu"
+      ref={rootRef}
+    >
       {menus.map((menu) => {
         const open = openMenu === menu.label;
         return (

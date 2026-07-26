@@ -49,6 +49,7 @@ export type ToolId =
   | 'knife'
   | 'loop-cut'
   | 'terrain-sculpt'
+  | 'mesh-sculpt'
   | 'terrain-object'
   | 'terrain-feature';
 

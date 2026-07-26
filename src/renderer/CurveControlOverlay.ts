@@ -20,12 +20,21 @@ export type CurveControlTarget = {
   index: number;
 };
 
+export type CurveControlSyncOptions = {
+  /** Show draggable anchors and handles. */
+  editNodes?: boolean;
+  /** Show the curve path without point handles (active sketch stroke). */
+  showDraftPath?: boolean;
+  selectedIndex?: number | null;
+};
+
 /** Viewport anchors and Bézier tangents for the selected procedural curve. */
 export class CurveControlOverlay {
   readonly root = new Group();
   private path = makeSegments(0x5de7ff, 1);
   private handles = makeSegments(0xffbd66, 0.72);
   private anchors = makePoints(0xff8f24, 11);
+  private anchorHighlight = makePoints(0xfff1d0, 14);
   private tangentPoints = makePoints(0xffd58a, 8);
   private operation: CurveOperation | null = null;
 
@@ -33,17 +42,27 @@ export class CurveControlOverlay {
     this.root.name = 'CurveControlOverlay';
     this.root.userData.nonSelectable = true;
     this.root.renderOrder = 120;
-    this.root.add(this.path, this.handles, this.anchors, this.tangentPoints);
+    this.root.add(
+      this.path,
+      this.handles,
+      this.anchors,
+      this.anchorHighlight,
+      this.tangentPoints,
+    );
     this.root.visible = false;
   }
 
-  sync(handle: ObjectRenderHandle | null, operation: CurveOperation | null): void {
-    if (!handle || !operation) {
+  sync(
+    handle: ObjectRenderHandle | null,
+    operation: CurveOperation | null,
+    options: CurveControlSyncOptions = {},
+  ): void {
+    if (!handle || !operation || !options.editNodes) {
       this.hide();
       return;
     }
     if (this.root.parent !== handle.group) handle.group.add(this.root);
-    this.syncOperation(operation);
+    this.syncOperation(operation, null, options);
   }
 
   /** Draft curve points already live in world space, so attach directly to the scene. */
@@ -51,31 +70,54 @@ export class CurveControlOverlay {
     parent: Object3D | null,
     operation: CurveOperation | null,
     previewPoint: { x: number; y: number; z: number } | null = null,
+    options: CurveControlSyncOptions = {},
   ): void {
-    if (!parent || !operation) {
+    if (!parent || !operation || (!options.editNodes && !options.showDraftPath)) {
       this.hide();
       return;
     }
     if (this.root.parent !== parent) parent.add(this.root);
-    this.syncOperation(operation, previewPoint);
+    this.syncOperation(operation, previewPoint, options);
   }
 
   private syncOperation(
     operation: CurveOperation,
     previewPoint: { x: number; y: number; z: number } | null = null,
+    options: CurveControlSyncOptions = {},
   ): void {
     this.operation = operation;
     this.root.visible = true;
+
+    const editNodes = !!options.editNodes;
+    const showDraftPath = !!options.showDraftPath;
+    const showAnchors = editNodes;
+    const showHandles =
+      editNodes && operation.curveType === 'bezier';
 
     const evaluated = evaluateCurvePath(operation);
     (this.path.material as LineBasicMaterial).color.setHex(
       operation.cyclic ? 0xa8d34f : 0x5de7ff,
     );
     setSegmentPath(this.path.geometry, evaluated, operation.cyclic, previewPoint);
+    this.path.visible = showDraftPath || editNodes;
     setPoints(this.anchors.geometry, operation.points);
-    this.anchors.visible = operation.inputMode === 'pen';
+    this.anchors.visible = showAnchors;
+    (this.anchors.material as PointsMaterial).size = operation.inputMode === 'sketch' ? 9 : 11;
 
-    if (operation.inputMode === 'pen' && operation.curveType === 'bezier') {
+    const selectedIndex = options.selectedIndex ?? null;
+    if (
+      showAnchors &&
+      selectedIndex != null &&
+      selectedIndex >= 0 &&
+      selectedIndex < operation.points.length
+    ) {
+      setPoints(this.anchorHighlight.geometry, [operation.points[selectedIndex]!]);
+      this.anchorHighlight.visible = true;
+    } else {
+      this.anchorHighlight.visible = false;
+    }
+
+    if (showHandles) {
       const segments = operation.points.flatMap((point, index) => [
         point,
         operation.handlesIn[index]!,
@@ -107,13 +149,25 @@ export class CurveControlOverlay {
   pick(raycaster: Raycaster, threshold: number): CurveControlTarget | null {
     if (!this.root.visible || !this.operation) return null;
     raycaster.params.Points = { threshold: Math.max(0.025, threshold) };
-    const anchorHit = raycaster.intersectObject(this.anchors, false)[0];
-    const tangentHit = this.operation.curveType === 'bezier'
-      ? raycaster.intersectObject(this.tangentPoints, false)[0]
+    const anchorHit = this.anchors.visible
+      ? raycaster.intersectObject(this.anchors, false)[0]
       : undefined;
-    if (!anchorHit && !tangentHit) return null;
-    if (anchorHit && (!tangentHit || anchorHit.distance <= tangentHit.distance)) {
-      return { kind: 'anchor', index: anchorHit.index ?? 0 };
+    const highlightHit = this.anchorHighlight.visible
+      ? raycaster.intersectObject(this.anchorHighlight, false)[0]
+      : undefined;
+    const tangentHit =
+      this.operation.curveType === 'bezier' && this.tangentPoints.visible
+        ? raycaster.intersectObject(this.tangentPoints, false)[0]
+        : undefined;
+    const bestAnchor =
+      anchorHit && highlightHit
+        ? anchorHit.distance <= highlightHit.distance
+          ? anchorHit
+          : highlightHit
+        : anchorHit ?? highlightHit;
+    if (!bestAnchor && !tangentHit) return null;
+    if (bestAnchor && (!tangentHit || bestAnchor.distance <= tangentHit.distance)) {
+      return { kind: 'anchor', index: bestAnchor.index ?? 0 };
     }
     const targetIndex = tangentHit?.index ?? 0;
     return {
@@ -124,7 +178,13 @@ export class CurveControlOverlay {
 
   dispose(): void {
     this.root.parent?.remove(this.root);
-    for (const object of [this.path, this.handles, this.anchors, this.tangentPoints]) {
+    for (const object of [
+      this.path,
+      this.handles,
+      this.anchors,
+      this.anchorHighlight,
+      this.tangentPoints,
+    ]) {
       object.geometry.dispose();
       disposeMaterial(object);
     }

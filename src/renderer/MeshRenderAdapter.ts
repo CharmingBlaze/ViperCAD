@@ -9,6 +9,7 @@ import {
   LineSegments,
   LinearFilter,
   LinearMipmapLinearFilter,
+  MeshPhysicalMaterial,
   NearestFilter,
   NoColorSpace,
   RepeatWrapping,
@@ -197,57 +198,138 @@ export function materialAssetToThree(
   mat: MaterialAsset,
   assets?: RenderAssetResolver,
   options: MaterialToThreeOptions = {},
-): MeshStandardMaterial | MeshBasicMaterial {
+): MeshStandardMaterial | MeshBasicMaterial | MeshPhysicalMaterial {
   const colour = new Color(mat.baseColour.x, mat.baseColour.y, mat.baseColour.z);
+  const emissive = new Color(
+    mat.emissive.x * mat.emissiveIntensity,
+    mat.emissive.y * mat.emissiveIntensity,
+    mat.emissive.z * mat.emissiveIntensity,
+  );
+  const usePhysical =
+    !mat.unlit &&
+    mat.shadingModel !== 'unlit' &&
+    (mat.shadingModel === 'physical' || mat.transmission > 0.01 || mat.clearcoat > 0.01);
+  const transparent = mat.alphaMode === 'blend' || mat.opacity < 0.999 || mat.transmission > 0.01;
   const common = {
     color: colour,
     opacity: mat.opacity,
-    transparent: mat.alphaMode !== 'opaque' || mat.opacity < 1,
+    transparent,
     side: mat.doubleSided ? DoubleSide : FrontSide,
     wireframe: false,
   };
-  const material = mat.unlit || mat.shadingModel === 'unlit'
-    ? new MeshBasicMaterial(common)
-    : new MeshStandardMaterial({
-        ...common,
-        roughness: mat.roughness,
-        metalness: mat.metallic,
-        flatShading: mat.flatShaded,
-        emissive: new Color(mat.emissive.x, mat.emissive.y, mat.emissive.z),
-      });
-  if (mat.baseColourTextureId && assets) {
-    const asset = assets.textures.get(mat.baseColourTextureId); const image = asset ? assets.images.get(asset.imageAssetId) : null;
-    if (asset && image) {
-      const forGltf = !!options.forGltfExport;
-      const pixels = forGltf
-        ? flipImagePixelsVertically(image.pixels, image.width, image.height)
-        : image.pixels;
-      const texture = new DataTexture(pixels, image.width, image.height, RGBAFormat);
-      // Viewport: flipY matches V-up UVs with top-first pixel buffers.
-      // glTF export: pixels are pre-flipped; flipY must stay false (exporter putImageData ignores transforms).
-      texture.flipY = !forGltf;
-      texture.colorSpace = asset.colourSpace === 'srgb' ? SRGBColorSpace : NoColorSpace;
-      texture.magFilter = asset.filtering === 'nearest' ? NearestFilter : LinearFilter;
-      texture.minFilter = asset.filtering === 'nearest' ? NearestFilter : asset.generateMipmaps ? LinearMipmapLinearFilter : LinearFilter;
-      texture.wrapS = texture.wrapT = asset.wrapping === 'repeat' ? RepeatWrapping : ClampToEdgeWrapping;
-      texture.repeat.set(asset.repeatU ?? 1, asset.repeatV ?? 1);
-      texture.offset.set(asset.offsetU ?? 0, asset.offsetV ?? 0);
-      texture.center.set(0.5, 0.5);
-      texture.rotation = (asset.rotationDegrees ?? 0) * Math.PI / 180;
-      texture.generateMipmaps = forGltf ? false : asset.generateMipmaps;
-      texture.needsUpdate = true;
-      material.map = texture;
-      if (!forGltf) patchMaterialForAtlasTileRepeat(material);
-    }
+
+  let material: MeshStandardMaterial | MeshBasicMaterial | MeshPhysicalMaterial;
+  if (mat.unlit || mat.shadingModel === 'unlit') {
+    material = new MeshBasicMaterial(common);
+  } else if (usePhysical) {
+    material = new MeshPhysicalMaterial({
+      ...common,
+      roughness: mat.roughness,
+      metalness: mat.metallic,
+      flatShading: mat.flatShaded,
+      emissive,
+      transmission: mat.transmission,
+      ior: mat.ior,
+      clearcoat: mat.clearcoat,
+      clearcoatRoughness: mat.clearcoatRoughness,
+      thickness: 0.5,
+    });
+  } else {
+    material = new MeshStandardMaterial({
+      ...common,
+      roughness: mat.roughness,
+      metalness: mat.metallic,
+      flatShading: mat.flatShaded,
+      emissive,
+    });
   }
+
+  if (mat.alphaMode === 'mask') {
+    material.transparent = false;
+    material.alphaTest = mat.alphaCutoff;
+  } else if (mat.alphaMode === 'blend' || mat.transmission > 0.01) {
+    material.transparent = true;
+    material.depthWrite = mat.opacity > 0.95 && mat.transmission < 0.05;
+  }
+
+  if (assets) {
+    bindMaterialTexture(material, 'map', mat.baseColourTextureId, mat, assets, options, 'srgb');
+    if (!mat.unlit && mat.shadingModel !== 'unlit') {
+      bindMaterialTexture(material, 'normalMap', mat.normalTextureId, mat, assets, options, 'linear');
+      bindMaterialTexture(material, 'roughnessMap', mat.roughnessTextureId, mat, assets, options, 'linear');
+      bindMaterialTexture(material, 'metalnessMap', mat.metallicTextureId, mat, assets, options, 'linear');
+      bindMaterialTexture(material, 'emissiveMap', mat.emissiveTextureId, mat, assets, options, 'srgb');
+    }
+    if (material.map && !options.forGltfExport) patchMaterialForAtlasTileRepeat(material);
+  }
+
   return material;
+}
+
+function bindMaterialTexture(
+  material: MeshStandardMaterial | MeshBasicMaterial | MeshPhysicalMaterial,
+  slot: 'map' | 'normalMap' | 'roughnessMap' | 'metalnessMap' | 'emissiveMap',
+  textureId: string | null,
+  mat: MaterialAsset,
+  assets: RenderAssetResolver,
+  options: MaterialToThreeOptions,
+  colourSpace: 'srgb' | 'linear',
+): void {
+  if (!textureId) return;
+  const asset = assets.textures.get(textureId);
+  const image = asset ? assets.images.get(asset.imageAssetId) : null;
+  if (!asset || !image) return;
+
+  const forGltf = !!options.forGltfExport;
+  const pixels = forGltf
+    ? flipImagePixelsVertically(image.pixels, image.width, image.height)
+    : image.pixels;
+  const texture = new DataTexture(pixels, image.width, image.height, RGBAFormat);
+  texture.flipY = !forGltf;
+  const useSrgb = colourSpace === 'srgb' || asset.colourSpace === 'srgb';
+  texture.colorSpace = useSrgb ? SRGBColorSpace : NoColorSpace;
+  const filtering = mat.textureFiltering ?? asset.filtering;
+  const wrapping = mat.textureWrapping ?? asset.wrapping;
+  texture.magFilter = filtering === 'nearest' ? NearestFilter : LinearFilter;
+  texture.minFilter =
+    filtering === 'nearest'
+      ? NearestFilter
+      : asset.generateMipmaps
+        ? LinearMipmapLinearFilter
+        : LinearFilter;
+  texture.wrapS = texture.wrapT = wrapping === 'repeat' ? RepeatWrapping : ClampToEdgeWrapping;
+  texture.repeat.set(asset.repeatU ?? 1, asset.repeatV ?? 1);
+  texture.offset.set(asset.offsetU ?? 0, asset.offsetV ?? 0);
+  texture.center.set(0.5, 0.5);
+  texture.rotation = ((asset.rotationDegrees ?? 0) * Math.PI) / 180;
+  texture.generateMipmaps = forGltf ? false : asset.generateMipmaps;
+  texture.needsUpdate = true;
+  if (slot === 'map') material.map = texture;
+  else if (slot === 'normalMap') {
+    if ('normalMap' in material) material.normalMap = texture;
+  } else if (slot === 'roughnessMap') {
+    if ('roughnessMap' in material) material.roughnessMap = texture;
+  } else if (slot === 'metalnessMap') {
+    if ('metalnessMap' in material) material.metalnessMap = texture;
+  } else if (slot === 'emissiveMap') {
+    if ('emissiveMap' in material) material.emissiveMap = texture;
+  }
+}
+
+function disposeThreeMaterialMaps(material: Material): void {
+  const maps = material as MeshStandardMaterial;
+  for (const key of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap'] as const) {
+    maps[key]?.dispose();
+  }
 }
 
 /**
  * Wrap expanded atlas UVs into the per-corner tile rect (no mesh subdivision).
  * Uses a local UV in the fragment shader — assigning to varyings breaks WebGL.
  */
-function patchMaterialForAtlasTileRepeat(material: MeshStandardMaterial | MeshBasicMaterial): void {
+function patchMaterialForAtlasTileRepeat(
+  material: MeshStandardMaterial | MeshBasicMaterial | MeshPhysicalMaterial,
+): void {
   material.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -374,7 +456,10 @@ export function updateObjectRenderHandle(
   if (materials) {
     const signature = renderMaterialSignature(materials, assets);
     if (signature !== handle.materialSignature) {
-      for (const old of handle.materials) { const map = (old as MeshStandardMaterial | MeshBasicMaterial).map; map?.dispose(); old.dispose(); }
+      for (const old of handle.materials) {
+        disposeThreeMaterialMaps(old);
+        old.dispose();
+      }
       handle.materials = materials.map((material) => materialAssetToThree(material, assets));
       handle.mesh.material = handle.materials.length === 1 ? handle.materials[0]! : handle.materials;
       handle.materialSignature = signature;
@@ -528,11 +613,53 @@ function markPartialUpdate(attribute: BufferAttribute, start: number, end: numbe
 }
 
 function renderMaterialSignature(materials: MaterialAsset[], assets?: RenderAssetResolver): string {
-  return materials.map((mat) => {
-    const texture = mat.baseColourTextureId && assets ? assets.textures.get(mat.baseColourTextureId) : null;
-    const image = texture && assets ? assets.images.get(texture.imageAssetId) : null;
-    return `${mat.id}:${mat.baseColour.x},${mat.baseColour.y},${mat.baseColour.z}:${mat.roughness}:${mat.metallic}:${mat.opacity}:${mat.flatShaded}:${mat.shadingModel}:${mat.unlit}:${texture?.id ?? ''}:${image?.revision ?? -1}:atlasWrap2`;
-  }).join('|');
+  const textureRevision = (textureId: string | null) => {
+    if (!textureId || !assets) return -1;
+    const texture = assets.textures.get(textureId);
+    const image = texture ? assets.images.get(texture.imageAssetId) : null;
+    return image?.revision ?? -1;
+  };
+  return materials
+    .map((mat) =>
+      [
+        mat.id,
+        mat.presetId ?? '',
+        mat.baseColour.x,
+        mat.baseColour.y,
+        mat.baseColour.z,
+        mat.roughness,
+        mat.metallic,
+        mat.emissive.x,
+        mat.emissive.y,
+        mat.emissive.z,
+        mat.emissiveIntensity,
+        mat.opacity,
+        mat.alphaMode,
+        mat.alphaCutoff,
+        mat.transmission,
+        mat.ior,
+        mat.clearcoat,
+        mat.clearcoatRoughness,
+        mat.flatShaded,
+        mat.shadingModel,
+        mat.unlit,
+        mat.doubleSided,
+        mat.textureFiltering,
+        mat.textureWrapping,
+        mat.baseColourTextureId ?? '',
+        mat.normalTextureId ?? '',
+        mat.roughnessTextureId ?? '',
+        mat.metallicTextureId ?? '',
+        mat.emissiveTextureId ?? '',
+        textureRevision(mat.baseColourTextureId),
+        textureRevision(mat.normalTextureId),
+        textureRevision(mat.roughnessTextureId),
+        textureRevision(mat.metallicTextureId),
+        textureRevision(mat.emissiveTextureId),
+        'pbr3',
+      ].join(':'),
+    )
+    .join('|');
 }
 
 /** Resolve a Three.js face index hit to a logical face id. */

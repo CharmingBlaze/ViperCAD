@@ -21,6 +21,8 @@ import { clampTextureSplit } from '@/workspace/TextureWorkspace';
 import type { CameraAxes } from '@/core/transform/Orientation';
 import { importPngAsImagePlane } from '@/core/editor/ImagePlane';
 import { pushToast } from '@/app/Toast';
+import { ViewportNavToolbar, viewportNavToolbarRightInset } from '@/app/ViewportNavToolbar';
+import type { ViewportNavMode } from '@/workspace/WorkspaceController';
 
 const UvPixelEditor = lazy(() =>
   import('@/app/UvPixelEditor').then((module) => ({ default: module.UvPixelEditor })),
@@ -291,6 +293,8 @@ export function Viewport({ session, workspace }: Props) {
         e.preventDefault();
         (e.target as HTMLElement)?.blur?.();
         tool.confirm(session.context());
+        workspace.setCurveNodeEditMode(false);
+        workspace.setSelectedCurvePointIndex(0);
         workspace.input.end('tool');
         viewportEngine.invalidate();
         syncUi();
@@ -539,13 +543,17 @@ export function Viewport({ session, workspace }: Props) {
         {!textureMode && (
           <div className={`viewport-chrome${openViewMenu ? ' is-menu-open' : ''}`}>
             {rects.map((r) => (
-              <div key={r.id}>
+              <div
+                key={r.id}
+                className="viewport-chrome-pane"
+                style={{ left: r.x, top: r.y, width: r.width, height: r.height }}
+              >
                 <button
                   type="button"
                   className={`viewport-label${hovered === r.id ? ' is-hover' : ''}${
                     workspace.activeViewportId === r.id || mode === 'maximized' ? ' is-active' : ''
                   }`}
-                  style={{ left: r.x + 4, top: r.y + 7 }}
+                  style={{ left: 4, top: 7 }}
                   aria-haspopup="menu"
                   aria-expanded={openViewMenu === r.id}
                   aria-label={`Change ${VIEW_PRESET_LABELS[paneViews[r.id]]} viewport view`}
@@ -571,7 +579,7 @@ export function Viewport({ session, workspace }: Props) {
                     className="viewport-view-menu"
                     role="menu"
                     aria-label="Viewport view"
-                    style={{ left: r.x + 4, top: r.y + 29 }}
+                    style={{ left: 4, top: 29 }}
                     onPointerDown={(event) => event.stopPropagation()}
                   >
                     {VIEW_PRESETS.map((view) => (
@@ -595,43 +603,41 @@ export function Viewport({ session, workspace }: Props) {
                     ))}
                   </div>
                 )}
-                <button
-                  type="button"
-                  className="viewport-maximize"
-                  style={{ left: r.x + r.width - 30, top: r.y + 8 }}
-                  aria-label={
-                    mode === 'maximized'
-                      ? `Restore ${VIEW_PRESET_LABELS[paneViews[r.id]]} viewport`
-                      : `Maximize ${VIEW_PRESET_LABELS[paneViews[r.id]]} viewport`
-                  }
-                  title={mode === 'maximized' ? 'Restore quad view (Tab)' : 'Maximize viewport (Tab)'}
-                  onPointerDown={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                  }}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    workspace.toggleViewportMaximize(r.id);
-                    viewportEngine.invalidate();
-                    syncUi();
-                  }}
-                >
-                  {mode === 'maximized' ? (
-                    <svg viewBox="0 0 16 16" aria-hidden>
-                      <path d="M3.5 6.5h6v6h-6zM6.5 3.5h6v6" />
-                    </svg>
-                  ) : (
-                    <svg viewBox="0 0 16 16" aria-hidden>
-                      <path d="M3.5 6V3.5H6M10 3.5h2.5V6M12.5 10v2.5H10M6 12.5H3.5V10" />
-                    </svg>
-                  )}
-                </button>
+                {workspace.viewportNavToolsVisible && (
+                  <ViewportNavToolbar
+                    viewId={r.id}
+                    right={viewportNavToolbarRightInset(r.id, mode)}
+                    top={8}
+                    isPerspective={paneViews[r.id] === 'perspective'}
+                    isMaximized={mode === 'maximized' && workspace.splits.state.maximizedViewportId === r.id}
+                    navMode={workspace.viewportNavMode}
+                    navViewId={workspace.viewportNavViewId}
+                    onSetNav={(nav: ViewportNavMode, viewId) => {
+                      workspace.setViewportNav(nav, nav === 'none' ? null : viewId);
+                      viewportEngine.invalidate();
+                      syncUi();
+                    }}
+                    onFrame={(viewId) => {
+                      workspace.setActiveViewport(viewId);
+                      viewportEngine.frameSelection(viewId);
+                      syncUi();
+                    }}
+                    onMaximize={(viewId) => {
+                      workspace.toggleViewportMaximize(viewId);
+                      viewportEngine.invalidate();
+                      syncUi();
+                    }}
+                    onDrag={(navMode, deltaX, deltaY, viewId) => {
+                      viewportEngine.applyViewportNavDrag(navMode, deltaX, deltaY, viewId);
+                      syncUi();
+                    }}
+                  />
+                )}
                 {paneViews[r.id] === 'perspective' && (
                   <PerspectiveOrientationWidget
                     axes={cameraAxes[r.id] ?? null}
-                    left={r.x + r.width - 80}
-                    top={r.y + r.height - 80}
+                    right={8}
+                    bottom={8}
                     onOrient={(axis, sign) =>
                       viewportEngine.orientPerspective(axis, sign, r.id)
                     }
@@ -646,10 +652,44 @@ export function Viewport({ session, workspace }: Props) {
         )}
 
         {textureMode && leftPct > 0 && (
-          <div className="viewport-chrome" aria-hidden>
+          <div className="viewport-chrome">
+            <div
+              className="viewport-chrome-pane"
+              style={{ left: 0, top: 0, width: '100%', height: '100%' }}
+            >
             <div className="viewport-label is-active" style={{ left: 8, top: 8 }}>
               <span className="viewport-name">User</span>
               <span className="viewport-proj">Perspective</span>
+            </div>
+            {workspace.viewportNavToolsVisible && (
+              <ViewportNavToolbar
+                viewId="persp"
+                right={viewportNavToolbarRightInset('persp', mode, true)}
+                top={8}
+                isPerspective
+                isMaximized={texMax === 'left'}
+                navMode={workspace.viewportNavMode}
+                navViewId={workspace.viewportNavViewId}
+                onSetNav={(nav, viewId) => {
+                  workspace.setViewportNav(nav, nav === 'none' ? null : viewId);
+                  viewportEngine.invalidate();
+                  syncUi();
+                }}
+                onFrame={() => {
+                  viewportEngine.frameSelection('persp');
+                  syncUi();
+                }}
+                onMaximize={() => {
+                  if (texMax === 'left') workspace.toggleTextureMaximize();
+                  else workspace.toggleTextureMaximize('left');
+                  syncUi();
+                }}
+                onDrag={(navMode, deltaX, deltaY, viewId) => {
+                  viewportEngine.applyViewportNavDrag(navMode, deltaX, deltaY, viewId);
+                  syncUi();
+                }}
+              />
+            )}
             </div>
           </div>
         )}
@@ -751,14 +791,14 @@ type OrientationAxis = 'x' | 'y' | 'z';
 
 function PerspectiveOrientationWidget({
   axes,
-  left,
-  top,
+  right,
+  bottom,
   onOrient,
   onOrbit,
 }: {
   axes: CameraAxes | null;
-  left: number;
-  top: number;
+  right: number;
+  bottom: number;
   onOrient: (axis: OrientationAxis, sign: 1 | -1) => void;
   onOrbit: (deltaX: number, deltaY: number) => void;
 }) {
@@ -826,7 +866,7 @@ function PerspectiveOrientationWidget({
   return (
     <div
       className="viewport-axis-gizmo"
-      style={{ left, top }}
+      style={{ right, bottom }}
       aria-label="Perspective viewport orientation"
       role="group"
       onPointerDown={beginOrbit}

@@ -50,6 +50,7 @@ export function defaultPreferences(): WorkspacePreferences {
   return {
     version: 2,
     layout,
+    viewportNavToolsVisible: true,
     viewports: {
       persp: {
         camera: { ...DEFAULT_CAMERAS.persp, position: [...DEFAULT_CAMERAS.persp.position] as [number, number, number], target: [0, 0, 0], up: [0, 1, 0] },
@@ -104,6 +105,7 @@ export function loadWorkspacePreferences(): WorkspacePreferences {
         mode: 'quad',
         maximizedViewportId: null,
       },
+      viewportNavToolsVisible: parsed.viewportNavToolsVisible ?? true,
       viewports: {
         persp: {
           ...base.viewports.persp,

@@ -220,11 +220,13 @@ function appendSweep(
     rings.push(ring);
   }
 
+  const arcFractions = ringArcFractions(frames.path);
+
   for (let index = 0; index < rings.length - 1; index++) {
     const current = rings[index]!;
     const next = rings[index + 1]!;
-    const v0 = index / Math.max(1, rings.length - 1);
-    const v1 = (index + 1) / Math.max(1, rings.length - 1);
+    const v0 = arcFractions[index]!;
+    const v1 = arcFractions[index + 1]!;
     for (let side = 0; side < count; side++) {
       const sideNext = (side + 1) % count;
       builder.quad(current[side]!, current[sideNext]!, next[sideNext]!, next[side]!, [
@@ -250,6 +252,18 @@ function appendSweep(
   ) {
     builder.ngon([...rings[rings.length - 1]!], profileCapUvs(profile, false));
   }
+}
+
+function ringArcFractions(path: Vec3[]): number[] {
+  if (path.length <= 1) return [0];
+  const lengths = [0];
+  for (let index = 1; index < path.length; index++) {
+    lengths.push(
+      lengths[index - 1]! + lengthVec3(subVec3(path[index]!, path[index - 1]!)),
+    );
+  }
+  const total = Math.max(1e-8, lengths[lengths.length - 1]!);
+  return lengths.map((length) => length / total);
 }
 
 function buildFrames(path: Vec3[]): PathFrames {

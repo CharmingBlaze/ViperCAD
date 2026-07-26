@@ -15,8 +15,11 @@ import {
 import { PathSettingsControls } from '@/app/inspector/PathSettingsControls';
 import { ExactCoordinateInput } from '@/app/inspector/ExactCoordinateInput';
 
+import type { WorkspaceController } from '@/workspace/WorkspaceController';
+
 type Props = {
   session: EditorSession;
+  workspace: WorkspaceController;
   object: SceneObject | null;
   mesh: EditableMesh | null;
   onRefresh: () => void;
@@ -30,7 +33,7 @@ type CurveHistoryMeta = {
   afterMetadata: string;
 };
 
-export function CurveOperationPanel({ session, object, mesh, onRefresh }: Props) {
+export function CurveOperationPanel({ session, workspace, object, mesh, onRefresh }: Props) {
   const operation = readCurveOperation(object?.metadata.curveOperation);
   const [radiusDraft, setRadiusDraft] = useState(operation ? String(Number(operation.radius.toFixed(3))) : '');
 
@@ -168,7 +171,7 @@ export function CurveOperationPanel({ session, object, mesh, onRefresh }: Props)
             const style = event.target.value as CurveOperation['style'];
             update('Change Curve Shape', {
               style,
-              cyclic: isPathStyle(style) ? operation.cyclic : true,
+              cyclic: operation.cyclic,
               twist: style === 'rope' && operation.twist === 0 ? 360 : operation.twist,
             });
           }}
@@ -224,6 +227,25 @@ export function CurveOperationPanel({ session, object, mesh, onRefresh }: Props)
           <option value="medium">Medium</option>
         </select>
       </label>
+      {operation.style === 'soft' && (
+        <label className="uv-field">
+          <span>Blob fullness · {Math.round(operation.blobInflation * 100)}%</span>
+          <input
+            className="uv-range"
+            aria-label="Blob inflation"
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={operation.blobInflation}
+            onChange={(event) =>
+              update('Change Blob Inflation', {
+                blobInflation: Number(event.target.value),
+              })
+            }
+          />
+        </label>
+      )}
       <label className="uv-field">
         <span>Curve type</span>
         <select
@@ -466,7 +488,13 @@ export function CurveOperationPanel({ session, object, mesh, onRefresh }: Props)
           )}
         </>
       )}
-      <CurvePointEditor operation={operation} update={update} />
+      <CurvePointEditor
+        operation={operation}
+        update={update}
+        workspace={workspace}
+        session={session}
+        onRefresh={onRefresh}
+      />
       <div className="uv-btn-grid uv-btn-grid-2">
         <button
           type="button"
@@ -491,13 +519,33 @@ export function CurveOperationPanel({ session, object, mesh, onRefresh }: Props)
 function CurvePointEditor({
   operation,
   update,
+  workspace,
+  session,
+  onRefresh,
 }: {
   operation: CurveOperation;
   update: (name: string, patch: Partial<CurveOperation>) => void;
+  workspace: WorkspaceController;
+  session: EditorSession;
+  onRefresh: () => void;
 }) {
-  const [selectedPoint, setSelectedPoint] = useState(0);
+  const selectedPoint = workspace.selectedCurvePointIndex;
+  const setSelectedPoint = (index: number) => workspace.setSelectedCurvePointIndex(index);
   const index = Math.min(selectedPoint, operation.points.length - 1);
   const point = operation.points[index]!;
+  const nodeEditActive = workspace.curveNodeEditMode;
+
+  const enterPointEdit = () => {
+    workspace.setCurveNodeEditMode(true);
+    session.requestRedraw();
+    onRefresh();
+  };
+
+  const exitPointEdit = () => {
+    workspace.setCurveNodeEditMode(false);
+    session.requestRedraw();
+    onRefresh();
+  };
 
   const setCoordinate = (axis: keyof Vec3, raw: string) => {
     const value = Number(raw);
@@ -544,8 +592,23 @@ function CurvePointEditor({
   return (
     <>
       <h3 className="uv-section-title">Control Points</h3>
+      <div className="uv-btn-grid uv-btn-grid-2">
+        <button
+          type="button"
+          className={`tool${nodeEditActive ? ' is-active primary' : ''}`}
+          onClick={() => (nodeEditActive ? exitPointEdit() : enterPointEdit())}
+          aria-pressed={nodeEditActive}
+        >
+          {nodeEditActive ? 'Done Editing Points' : 'Edit Points'}
+        </button>
+        <button type="button" className="tool" disabled={nodeEditActive} onClick={insertAfter}>
+          Insert Point
+        </button>
+      </div>
       <p className="uv-hint">
-        Orange anchors and Bézier handles can be dragged directly in the viewport.
+        {nodeEditActive
+          ? 'Drag orange points in the viewport. Exit point edit mode to move, rotate, or scale the whole curve.'
+          : 'Enter point edit mode to reshape the curve, or edit coordinates below.'}
       </p>
       <label className="uv-field">
         <span>Active point</span>
@@ -573,7 +636,6 @@ function CurvePointEditor({
         ))}
       </div>
       <div className="uv-btn-grid uv-btn-grid-2">
-        <button type="button" className="tool" onClick={insertAfter}>Insert After</button>
         <button
           type="button"
           className="tool"

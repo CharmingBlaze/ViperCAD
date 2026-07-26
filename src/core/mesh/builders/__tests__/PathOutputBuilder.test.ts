@@ -96,4 +96,40 @@ describe('PathOutputBuilder', () => {
     );
     expect(first.faces.size).toBe(30);
   });
+
+  it('builds upright tapered cards along a path', () => {
+    const mesh = buildPathOutput({
+      points: [v3(0, 0, 0), v3(4, 0.2, 0), v3(8, 0, 0)],
+      output: 'cards',
+      radius: 0.2,
+      radialSegments: 8,
+      startCap: 'flat',
+      endCap: 'flat',
+      startScale: 1,
+      endScale: 1,
+      offset: 0,
+      twist: 0,
+      spacing: 1,
+      profile: 'round',
+      profileWidth: 1,
+      profileHeight: 1.5,
+      chainAlternating: false,
+      cardCrossed: true,
+      distributionMode: 'count',
+      count: 4,
+      startPadding: 0,
+      endPadding: 0,
+      randomScale: 0,
+      rotation: 0,
+      randomRotation: 0,
+      alternateRotation: false,
+      mirrorAlternate: false,
+      seed: 1,
+      cyclic: false,
+    });
+    const ys = [...mesh.vertices.values()].map((vertex) => vertex.position.y);
+    expect(Math.max(...ys) - Math.min(...ys)).toBeGreaterThan(0.35);
+    expect(mesh.faces.size).toBeGreaterThan(16);
+    expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+  });
 });

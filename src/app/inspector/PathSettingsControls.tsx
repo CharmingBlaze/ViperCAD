@@ -75,9 +75,22 @@ export function PathSettingsControls({
           value={value.pathOutput}
           onChange={(event) => {
             const pathOutput = event.target.value as PathSettingsValue['pathOutput'];
-            onChange(pathOutput === 'rope' && value.twist === 0
-              ? { pathOutput, twist: 360 }
-              : { pathOutput });
+            if (pathOutput === 'rope' && value.twist === 0) {
+              onChange({ pathOutput, twist: 360 });
+              return;
+            }
+            if (pathOutput === 'cards') {
+              onChange({
+                pathOutput,
+                pathCardCrossed: true,
+                profileWidth: value.profileWidth === 1 ? 0.75 : value.profileWidth,
+                profileHeight: value.profileHeight === 1 ? 1.6 : value.profileHeight,
+                pathSpacing: value.pathSpacing > 1.2 ? 0.65 : value.pathSpacing,
+                pathRadialSegments: Math.max(value.pathRadialSegments, 6),
+              });
+              return;
+            }
+            onChange({ pathOutput });
           }}
         >
           <option value="tube">Tube</option>
@@ -150,7 +163,11 @@ export function PathSettingsControls({
         <>
           <Check label="Crossed foliage cards" checked={value.pathCardCrossed} onChange={(pathCardCrossed) => onChange({ pathCardCrossed })} />
           <Range label="Card width" display={`${Math.round(value.profileWidth * 100)}%`} value={value.profileWidth} min={0.25} max={4} step={0.05} onChange={(profileWidth) => onChange({ profileWidth })} />
-          <Range label="Card length" display={`${Math.round(value.profileHeight * 100)}%`} value={value.profileHeight} min={0.25} max={4} step={0.05} onChange={(profileHeight) => onChange({ profileHeight })} />
+          <Range label="Card height" display={`${Math.round(value.profileHeight * 100)}%`} value={value.profileHeight} min={0.25} max={4} step={0.05} onChange={(profileHeight) => onChange({ profileHeight })} />
+          <Range label="Vertical detail" display={String(Math.max(1, Math.round(value.pathRadialSegments / 2)))} value={value.pathRadialSegments} min={2} max={12} step={1} onChange={(pathRadialSegments) => onChange({ pathRadialSegments })} />
+          <p className="uv-hint">
+            Upright tapered cards follow the path with pinched tips. Crossed mode builds an X-shaped foliage cluster at each point. Use a double-sided material for backface visibility.
+          </p>
         </>
       )}
       {value.pathOutput === 'object-array' && (

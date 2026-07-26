@@ -89,10 +89,26 @@ export function handleTransformHotkey(
     return false;
   }
   if (activeTool instanceof CreateDoodleTool && activeTool.state.stage === 'drawing') {
-    return false;
+    if (activeTool.inputMode === 'pen') return false;
+    if (activeTool.inputMode === 'sketch' && !activeTool.state.strokeLocked) return false;
+    if (workspace.curveNodeEditMode) return false;
   }
   if (activeTool instanceof DrawPolyTool && activeTool.state.chain.length > 0) {
     return false;
+  }
+  if (
+    activeTool instanceof DrawPolyTool &&
+    activeTool.state.chain.length === 0 &&
+    (key === 'g' || key === 'G' || key === 'r' || key === 'R' || key === 's' || key === 'S') &&
+    !e.ctrlKey &&
+    !e.metaKey &&
+    !e.altKey
+  ) {
+    const drawObjectId = activeTool.state.meshObjectId;
+    if (drawObjectId && session.selection.state.mode !== 'object') {
+      session.selection.setMode('object');
+      session.selection.selectObjects([drawObjectId], 'replace');
+    }
   }
   if (activeTool instanceof KnifeTool && activeTool.state.dragging) {
     return false;

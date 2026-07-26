@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { viewportEngine } from '@/app/viewportEngine';
 import { AppInspectorPanel } from '@/app/AppInspectorPanel';
 import { TerrainPanel } from '@/app/TerrainPanel';
+import { SculptPanel } from '@/app/SculptPanel';
 import { FloatingTerrainObjects } from '@/app/FloatingTerrainObjects';
 import { Viewport } from '@/app/Viewport';
 import { FloatingOutliner } from '@/app/FloatingOutliner';
@@ -21,8 +22,10 @@ import { CreateDoodleTool } from '@/core/tools/CreateDoodleTool';
 import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
 import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
 import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
+import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
 import { activeTerrain } from '@/core/terrain/Terrain';
+import { sculptableObjects } from '@/core/sculpt/MeshSculptTarget';
 import type { GizmoMode, TransformOrientation, TransformPivotMode } from '@/core/transform/types';
 import { WorkspaceController } from '@/workspace/WorkspaceController';
 import { VIEW_LABELS } from '@/workspace/types';
@@ -352,12 +355,14 @@ export default function App() {
   const doodleTool = session.tools.get('create-doodle') as CreateDoodleTool;
   const drawTool = session.tools.get('draw-poly') as DrawPolyTool;
   const terrainTool = session.tools.get('terrain-sculpt') as TerrainSculptTool;
+  const meshSculptTool = session.tools.get('mesh-sculpt') as MeshSculptTool;
   const terrainObjectTool = session.tools.get('terrain-object') as TerrainObjectTool;
   const activeTool = session.tools.getActive();
   const isCreating = activeTool === primitiveTool;
   const isDoodling = activeTool === doodleTool;
   const isDrawing = activeTool === drawTool;
   const isSculptingTerrain = activeTool === terrainTool;
+  const isSculptingMesh = activeTool === meshSculptTool;
   const isPaintingObjects = activeTool === terrainObjectTool;
   const dimensions = primitiveTool.getDimensions();
   const activeObject = session.selection.state.activeObjectId
@@ -457,10 +462,13 @@ export default function App() {
   };
 
   const transformActive = session.transform.active;
+  const gizmoMode = session.transform.prefs.gizmoMode;
   const transformStatus = transformActive ? session.transform.statusLine() : '';
   const viewHint =
     workspace.shellMode === 'terrain'
       ? 'Terrain · single view'
+      : workspace.shellMode === 'sculpt'
+        ? 'Sculpt · single view'
       : workspace.layoutMode === 'maximized'
       ? `${VIEW_LABELS[workspace.splits.state.maximizedViewportId ?? 'persp']} · Tab restore`
       : 'Tab maximize';
@@ -492,7 +500,7 @@ export default function App() {
           ? 'hover object'
           : '';
 
-  const setShell = (mode: 'model' | 'terrain' | 'texture') => {
+  const setShell = (mode: 'model' | 'sculpt' | 'terrain' | 'texture') => {
     if (mode === 'texture') {
       session.tools.setActive('select', session.context());
       const objectId = session.selection.state.activeObjectId;
@@ -527,6 +535,14 @@ export default function App() {
       }
       session.tools.setActive('terrain-sculpt', session.context());
       if (terrain) session.requestRedraw();
+    } else if (mode === 'sculpt') {
+      session.selection.setMode('object');
+      const targets = sculptableObjects(session.document);
+      if (targets.length && !targets.some((object) => object.id === session.selection.state.activeObjectId)) {
+        session.selection.selectObjects([targets[0]!.id], 'replace');
+      }
+      session.tools.setActive('mesh-sculpt', session.context());
+      session.requestRedraw();
     } else {
       session.tools.setActive('select', session.context());
     }
@@ -724,6 +740,12 @@ export default function App() {
         },
         {
           kind: 'command',
+          label: 'Sculpt Workspace',
+          checked: workspace.shellMode === 'sculpt',
+          action: () => setShell('sculpt'),
+        },
+        {
+          kind: 'command',
           label: 'Terrain Workspace',
           checked: workspace.shellMode === 'terrain',
           action: () => setShell('terrain'),
@@ -735,6 +757,15 @@ export default function App() {
           action: () => setShell('texture'),
         },
         { kind: 'separator' },
+        {
+          kind: 'command',
+          label: 'Navigation Tools',
+          checked: workspace.viewportNavToolsVisible,
+          action: () => {
+            workspace.toggleViewportNavToolsVisible();
+            refresh();
+          },
+        },
         {
           kind: 'command',
           label: 'Frame Selection',
@@ -958,11 +989,16 @@ export default function App() {
     },
   ];
 
+  const leftMenus = menus.slice(0, 5);
+  const rightMenus = menus.slice(5);
+
   return (
     <div className="app">
       <header className="bar bar-slim">
         <div className="bar-left">
           <span className="mark">Viper</span>
+          <DesktopMenuBar menus={leftMenus} />
+          <span className="bar-sep" aria-hidden />
           <div className="shell-switch" role="group" aria-label="Workspace">
             <button
               type="button"
@@ -971,6 +1007,15 @@ export default function App() {
               aria-pressed={workspace.shellMode === 'model'}
             >
               Model
+            </button>
+            <button
+              type="button"
+              className={`tool${workspace.shellMode === 'sculpt' ? ' is-active' : ''}`}
+              onClick={() => setShell('sculpt')}
+              aria-pressed={workspace.shellMode === 'sculpt'}
+              title="Sculpt mesh objects with brushes"
+            >
+              Sculpt
             </button>
             <button
               type="button"
@@ -992,9 +1037,57 @@ export default function App() {
             </button>
           </div>
           <span className="bar-sep" aria-hidden />
-          <DesktopMenuBar menus={menus} />
+          <div className="shell-switch selection-switch" role="group" aria-label="Selection mode">
+            {(['object', 'vertex', 'edge', 'face'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={`tool${sel.mode === mode ? ' is-active' : ''}`}
+                onClick={() => chooseMode(mode)}
+                aria-pressed={sel.mode === mode}
+                title={`${mode[0]!.toUpperCase() + mode.slice(1)} selection`}
+              >
+                {mode === 'object'
+                  ? 'Object'
+                  : mode === 'vertex'
+                    ? 'Vertex'
+                    : mode === 'edge'
+                      ? 'Edge'
+                      : 'Face'}
+              </button>
+            ))}
+          </div>
+          <span className="bar-sep" aria-hidden />
+          <div className="shell-switch gizmo-switch" role="group" aria-label="Transform gizmo">
+            {([
+              ['select', 'Select'],
+              ['move', 'Move'],
+              ['rotate', 'Rotate'],
+              ['scale', 'Scale'],
+            ] as const).map(([mode, label]) => (
+              <button
+                key={mode}
+                type="button"
+                className={`tool${gizmoMode === mode ? ' is-active' : ''}`}
+                onClick={() => setGizmoMode(mode)}
+                aria-pressed={gizmoMode === mode}
+                title={
+                  mode === 'select'
+                    ? 'Select tool'
+                    : mode === 'move'
+                      ? 'Move gizmo (G)'
+                      : mode === 'rotate'
+                        ? 'Rotate gizmo (R)'
+                        : 'Scale gizmo (S)'
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="bar-right">
+          <DesktopMenuBar menus={rightMenus} align="end" />
           <span className="meta dim">{viewHint}</span>
         </div>
       </header>
@@ -1014,6 +1107,12 @@ export default function App() {
             setGizmoMode={setGizmoMode}
             setOrientation={setOrientation}
             setPivot={setPivot}
+          />
+        )}
+        {workspace.shellMode === 'sculpt' && (
+          <SculptPanel
+            session={session}
+            onRefresh={refresh}
           />
         )}
         {workspace.shellMode === 'terrain' && (
@@ -1049,7 +1148,7 @@ export default function App() {
             ? VIEW_LABELS[workspace.hoveredViewportId]
             : VIEW_LABELS[workspace.activeViewportId]}
         </span>
-        {!isCreating && !isDoodling && !isDrawing && !isSculptingTerrain && !isPaintingObjects && !transformActive && (
+        {!isCreating && !isDoodling && !isDrawing && !isSculptingTerrain && !isSculptingMesh && !isPaintingObjects && !transformActive && (
           <span>
             {sel.mode}
             {sel.xRay ? ' · x-ray' : ' · visible'}
@@ -1063,9 +1162,15 @@ export default function App() {
           <span className="transform-status">
             {isDrawing
               ? drawTool.statusLine()
-              : doodleTool.inputMode === 'pen'
-                ? `Vector Pen · ${doodleTool.style.replace('-', ' ')} · ${doodleTool.state.points.length} points`
-                : `Curve Sketch · ${doodleTool.style.replace('-', ' ')} · drag to draw`}
+              : doodleTool.state.strokeLocked
+                ? workspace.curveNodeEditMode
+                  ? `Point Edit · ${doodleTool.state.points.length} points · ${doodleTool.style.replace('-', ' ')}`
+                  : `Curve Review · ${doodleTool.state.points.length} points`
+                : doodleTool.inputMode === 'pen'
+                  ? `Vector Pen · ${doodleTool.style.replace('-', ' ')} · ${doodleTool.state.points.length} points`
+                  : doodleTool.state.stage === 'drawing'
+                    ? `Curve Sketch · ${doodleTool.style.replace('-', ' ')} · drawing`
+                    : `Curve Sketch · ${doodleTool.style.replace('-', ' ')} · ready`}
           </span>
         )}
         {workspace.shellMode === 'terrain' && (
@@ -1088,10 +1193,20 @@ export default function App() {
                 : 'Click place · orange = new · green = close · Enter finish · Shift axis · Esc clear'
               : isDoodling
                 ? doodleTool.inputMode === 'pen'
-                  ? 'LMB place point · Enter finish · Backspace undo point · Esc cancel'
-                  : 'LMB draw · release create · Esc cancel'
+                  ? doodleTool.state.stage === 'drawing'
+                    ? 'LMB place point · drag nodes · Enter finish · Backspace delete node · Esc cancel'
+                    : 'Select curve objects · G/R/S transform · LMB place points on empty space for next curve · Esc exit'
+                  : doodleTool.state.strokeLocked
+                    ? workspace.curveNodeEditMode
+                      ? 'Drag points · Done Editing Points to use G/R/S · Finish Curve when ready · Esc cancel'
+                      : 'Edit Points to reshape · Finish Curve · Esc cancel'
+                    : doodleTool.state.stage === 'drawing'
+                      ? 'LMB drag to sketch · release to review stroke'
+                      : 'Select curve objects · G/R/S transform · LMB drag empty space for next curve · Esc exit'
                 : transformActive
                   ? 'Enter/LMB confirm · Esc/RMB cancel · X/Y/Z · Shift+axis · Ctrl toggle snap'
+                  : workspace.shellMode === 'sculpt'
+                    ? 'LMB sculpt · Shift invert · wheel brush size · Alt sample flatten plane · RMB orbit · Ctrl+Z undo'
                   : workspace.shellMode === 'terrain'
                     ? activeTool === terrainObjectTool
                       ? terrainObjectTool.mode === 'place'

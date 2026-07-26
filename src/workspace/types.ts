@@ -54,13 +54,15 @@ export type ViewportLayoutState = {
   hoveredViewportId: ViewId | null;
 };
 
-/** Top-level application shell: modelling, terrain, or UV/Pixel authoring. */
-export type AppShellMode = 'model' | 'terrain' | 'texture';
+/** Top-level application shell: modelling, sculpt, terrain, or UV/Pixel authoring. */
+export type AppShellMode = 'model' | 'sculpt' | 'terrain' | 'texture';
 
 export type WorkspacePreferences = {
   version: 2;
   layout: ViewportLayoutState;
   viewports: Record<ViewId, Pick<ViewportState, 'camera' | 'shadingMode' | 'gridVisible' | 'xRay'>>;
+  /** Per-viewport nav toolbar (center, pan, rotate, zoom, maximize). */
+  viewportNavToolsVisible: boolean;
 };
 
 export const DEFAULT_SPLITS: QuadSplitRatios = {

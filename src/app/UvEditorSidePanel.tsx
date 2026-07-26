@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { MaterialEditor } from '@/app/MaterialEditor';
+import { IMAGE_FILES, openNativeFile } from '@/app/platform/FileDialogs';
+import { createMaterial } from '@/core/document/ModelDocument';
 import type { EditorSession } from '@/core/editor/EditorSession';
+import { importImageFile } from '@/core/image/ImageImport';
+import { resolveActiveTexture } from '@/core/texture/resolveActiveTexture';
 import { boundsOfUvs, cornersForFaces, resolveUvLayerId, snapshotUvs } from '@/core/uv/UvEdit';
 import type { UvUnwrapMode } from '@/core/uv/UvOperations';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';
@@ -703,6 +707,8 @@ export function AtlasTilePanel({
   const atlasPan = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
   const [atlasView, setAtlasView] = useState({ zoom: 1, panX: 8, panY: 8 });
   const [atlasPanMode, setAtlasPanMode] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importNote, setImportNote] = useState<string | null>(null);
   const tex = workspace.texture;
   const image = tex.activeImageId ? session.document.images.get(tex.activeImageId) : null;
   const tileWidth = Math.min(image?.width ?? tex.atlasTileWidth, tex.atlasTileWidth);
@@ -856,6 +862,63 @@ export function AtlasTilePanel({
     workspace.patchTexture({ atlasTileX: nextX, atlasTileY: nextY });
   };
 
+  const importAtlasImage = async (file: File) => {
+    const doc = session.document;
+    const selection = session.selection.state;
+    setImportBusy(true);
+    setImportNote(null);
+    try {
+      const result = await importImageFile(doc, file);
+      let materialId = tex.activeMaterialId ?? resolveActiveTexture(doc, selection).materialId;
+      let material = materialId ? doc.materials.get(materialId) : null;
+      if (!material) {
+        const created = createMaterial(doc, {
+          name: 'Atlas Material',
+          assignToObjectId: selection.activeObjectId ?? undefined,
+        });
+        materialId = created.id;
+        material = created;
+      }
+      const texture = doc.textures.get(result.textureId);
+      if (texture) {
+        texture.filtering = 'nearest';
+        texture.wrapping = 'clamp';
+        texture.generateMipmaps = false;
+      }
+      material.baseColourTextureId = result.textureId;
+      material.textureFiltering = 'nearest';
+      material.textureWrapping = 'clamp';
+      material.presetId = null;
+      workspace.patchTexture({
+        activeImageId: result.imageId,
+        activeTextureId: result.textureId,
+        activeMaterialId: materialId,
+        atlasTileX: tex.atlasOffsetX,
+        atlasTileY: tex.atlasOffsetY,
+      });
+      doc.dirty = true;
+      session.requestRedraw();
+      setImportNote(
+        result.scaled
+          ? `Imported ${result.sourceWidth}×${result.sourceHeight} → ${result.width}×${result.height}`
+          : `Imported ${result.width}×${result.height}`,
+      );
+    } catch (err) {
+      setImportNote(err instanceof Error ? err.message : 'Import failed');
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const chooseAtlasImage = async () => {
+    try {
+      const selected = await openNativeFile({ types: IMAGE_FILES });
+      if (selected) await importAtlasImage(selected.file);
+    } catch (error) {
+      setImportNote(error instanceof Error ? error.message : 'Could not open image');
+    }
+  };
+
   return (
     <>
       <section className="uv-section">
@@ -893,6 +956,10 @@ export function AtlasTilePanel({
             applyGridPreset(remaining[0]!.id);
           }}>Delete</button>
         </div>
+        <button type="button" className="tool primary uv-btn-block" disabled={importBusy} onClick={chooseAtlasImage}>
+          {importBusy ? 'Importing…' : image ? 'Replace atlas image…' : 'Import atlas image…'}
+        </button>
+        {importNote && <p className="uv-meta">{importNote}</p>}
         {image ? (
           <div className="atlas-navigator">
             <div className="atlas-navigator-toolbar">
@@ -948,7 +1015,7 @@ export function AtlasTilePanel({
               />
             </div>
           </div>
-        ) : <p className="uv-meta">Add a texture to the active material first.</p>}
+        ) : <p className="uv-meta">Import an image to use as the sprite atlas, or add a texture via the Material tab.</p>}
         <p className="uv-meta">
           {image ? `${columns} × ${rows} tiles · selected ${Math.floor((tex.atlasTileX - offsetX) / stepX) + 1}, ${Math.floor((tex.atlasTileY - offsetY) / stepY) + 1} · wheel zoom · MMB / Alt drag pan` : 'No atlas'}
         </p>

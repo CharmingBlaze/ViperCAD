@@ -229,6 +229,42 @@ describe('CreateDoodleTool', () => {
     expect(committed.handlesOut[0]).toEqual(movedHandle);
   });
 
+  it('can begin another stroke after confirm while the doodle tool stays active', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-doodle') as CreateDoodleTool;
+    session.tools.setActive('create-doodle', session.context());
+    tool.setDepthHint(4);
+    tool.begin(pointer({ x: 0, y: 2, z: 4 }, { x: 0, y: 0, z: -1 }, 40, 40), session.context());
+    tool.update(pointer({ x: 0, y: 2, z: 4 }, { x: 0.4, y: 0.1, z: -1 }, 120, 50), session.context());
+    tool.confirm(session.context());
+    expect(tool.state.stage).toBe('idle');
+    expect(session.document.objects.size).toBe(1);
+    expect(session.tools.getActive()).toBe(tool);
+
+    tool.begin(pointer({ x: 1, y: 2, z: 4 }, { x: 0, y: 0, z: -1 }, 40, 40), session.context());
+    expect(tool.state.stage).toBe('drawing');
+    expect(tool.state.points.length).toBe(1);
+  });
+
+  it('lets locked sketch strokes edit points before finish', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-doodle') as CreateDoodleTool;
+    session.tools.setActive('create-doodle', session.context());
+    tool.setInputMode('sketch', session.context());
+    const origin = { x: 0, y: 0, z: 4 };
+
+    tool.begin(pointer(origin, { x: 0, y: 0, z: -1 }), session.context());
+    tool.update(pointer(origin, { x: 0.5, y: 0, z: -1 }), session.context());
+    tool.update(pointer(origin, { x: 1, y: 0.2, z: -1 }), session.context());
+    tool.lockSketchStroke(session.context());
+
+    expect(tool.state.strokeLocked).toBe(true);
+    expect(tool.isSketchStrokeLocked()).toBe(true);
+    expect(tool.isDraftNodeEditing()).toBe(false);
+    tool.setDraftPointCoordinate(1, 'y', 0.75, session.context());
+    expect(tool.state.points[1]!.y).toBe(0.75);
+  });
+
   it('snaps a Vector Pen Capsule exactly to its first point when Auto Connect is enabled', () => {
     const session = new EditorSession();
     const tool = session.tools.get('create-doodle') as CreateDoodleTool;

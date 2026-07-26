@@ -11,6 +11,7 @@ import { SelectTool } from '@/core/tools/SelectTool';
 import { KnifeTool } from '@/core/tools/KnifeTool';
 import { LoopCutTool } from '@/core/tools/LoopCutTool';
 import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
+import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
 import { ToolController } from '@/core/tools/ToolController';
@@ -73,6 +74,7 @@ export class EditorSession {
     this.tools.register(new KnifeTool());
     this.tools.register(new LoopCutTool());
     this.tools.register(new TerrainSculptTool());
+    this.tools.register(new MeshSculptTool());
     this.tools.register(new TerrainObjectTool());
     this.tools.register(new TerrainFeatureTool());
     this.tools.setActive('create-primitive', this.context());

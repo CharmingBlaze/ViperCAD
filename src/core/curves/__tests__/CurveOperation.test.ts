@@ -132,6 +132,56 @@ describe('CurveOperation', () => {
     expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
   });
 
+  it('fills a closed capsule outline into a low-poly solid', () => {
+    const ring = [
+      v3(1, 0, 0),
+      v3(0, 1, 0),
+      v3(-1, 0, 0),
+      v3(0, -1, 0),
+      v3(1, 0.001, 0),
+    ];
+    const operation = curveOperationFromStroke({
+      style: 'capsule',
+      points: ring,
+      radius: 0.12,
+      resolution: 'low',
+      smooth: false,
+      cyclic: true,
+      inputMode: 'pen',
+      curveType: 'polyline',
+      pathRadialSegments: 12,
+    });
+    const mesh = evaluateCurveOperation(operation);
+    expect(mesh.vertices.size).toBeGreaterThan(24);
+    expect(mesh.faces.size).toBeGreaterThan(24);
+    expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+  });
+
+  it('fills closed outline and blob curves into soft-inflate domes', () => {
+    const points = [v3(1, 0, 0), v3(0, 1, 0), v3(-1, 0, 0), v3(0, -1, 0), v3(1, 0.001, 0)];
+    const outline = evaluateCurveOperation(curveOperationFromStroke({
+      style: 'sharp',
+      points,
+      radius: 0.1,
+      resolution: 'low',
+      smooth: false,
+      cyclic: true,
+    }));
+    const blob = evaluateCurveOperation(curveOperationFromStroke({
+      style: 'soft',
+      points,
+      radius: 0.1,
+      resolution: 'low',
+      smooth: false,
+      cyclic: true,
+    }));
+    expect(blob.vertices.size).toBeGreaterThan(outline.vertices.size);
+    for (const mesh of [outline, blob]) {
+      expect(mesh.vertices.size).toBeGreaterThan(20);
+      expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+    }
+  });
+
   it('stores a drawn lathe profile and rebuilds it at different precision', () => {
     const operation = curveOperationFromStroke({
       style: 'sharp',

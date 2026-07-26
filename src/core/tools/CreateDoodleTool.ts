@@ -58,6 +58,8 @@ export type DoodleToolState = {
   previewPoint: Vec3 | null;
   handlesIn: Vec3[];
   handlesOut: Vec3[];
+  /** Sketch stroke finished — nodes editable before commit. */
+  strokeLocked: boolean;
 };
 
 const RADIAL: Record<DoodlePolyPreset, number> = { low: 6, medium: 10 };
@@ -289,7 +291,7 @@ export class CreateDoodleTool implements Tool {
   }
 
   popPoint(context: ModellingContext): void {
-    if (this.inputMode !== 'pen' || this.state.stage !== 'drawing') return;
+    if (!this.canEditDraftPoints()) return;
     this.state.points.pop();
     this.state.handlesIn.pop();
     this.state.handlesOut.pop();
@@ -343,6 +345,7 @@ export class CreateDoodleTool implements Tool {
       previewPoint: null,
       handlesIn: [{ ...point }],
       handlesOut: [{ ...point }],
+      strokeLocked: false,
     };
     context.requestRedraw();
   }
@@ -356,6 +359,15 @@ export class CreateDoodleTool implements Tool {
       this.state.closed = this.shouldFill([...this.state.points, previewPoint]);
       this.state.revision += 1;
       context.requestRedraw();
+      return;
+    }
+    if (this.state.strokeLocked) {
+      const closed = this.shouldFill([...this.state.points, point]);
+      if (closed !== this.state.closed) {
+        this.state.closed = closed;
+        this.state.revision += 1;
+        context.requestRedraw();
+      }
       return;
     }
     const minSpacing = this.radius * 0.55;
@@ -374,6 +386,36 @@ export class CreateDoodleTool implements Tool {
         context.requestRedraw();
       }
     }
+  }
+
+  /** Sketch: stop adding points and enter node-edit review. */
+  lockSketchStroke(context: ModellingContext): void {
+    if (this.inputMode !== 'sketch' || this.state.stage !== 'drawing' || this.state.strokeLocked) return;
+    if (this.state.points.length < 2) return;
+    this.state.strokeLocked = true;
+    this.state.previewPoint = null;
+    this.refreshDraftHandles();
+    this.state.closed = this.shouldFill(this.state.points);
+    this.state.revision += 1;
+    context.requestRedraw();
+  }
+
+  /** Vector pen is always in point-placement mode while drawing. */
+  isDraftNodeEditing(): boolean {
+    return this.state.stage === 'drawing' && this.inputMode === 'pen';
+  }
+
+  /** Sketch stroke finished; ready for point edit or commit. */
+  isSketchStrokeLocked(): boolean {
+    return (
+      this.state.stage === 'drawing' &&
+      this.inputMode === 'sketch' &&
+      this.state.strokeLocked
+    );
+  }
+
+  canEditDraftPoints(): boolean {
+    return this.isDraftNodeEditing() || this.isSketchStrokeLocked();
   }
 
   preview(_context: ModellingContext): void {}
@@ -534,7 +576,7 @@ export class CreateDoodleTool implements Tool {
     point: Vec3,
     context: ModellingContext,
   ): void {
-    if (this.inputMode !== 'pen' || this.state.stage !== 'drawing') return;
+    if (!this.canEditDraftPoints()) return;
     if (!this.state.points[target.index]) return;
     if (target.kind === 'anchor') {
       const previous = this.state.points[target.index]!;
@@ -683,6 +725,7 @@ export class CreateDoodleTool implements Tool {
       previewPoint: null,
       handlesIn: [],
       handlesOut: [],
+      strokeLocked: false,
     };
   }
 

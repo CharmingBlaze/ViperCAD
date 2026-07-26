@@ -2,6 +2,7 @@ import { createId } from '@/core/ids/IdService';
 import { defaultTransform, cloneTransform } from '@/core/math/Transform';
 import { v3 } from '@/core/math/Vec3';
 import { cloneMeshPreserveIds } from '@/core/mesh/EditableMesh';
+import { normalizeMaterialAsset } from '@/core/material/MaterialPresets';
 import type { EditableMesh, MeshId } from '@/core/mesh/types';
 import {
   DEFAULT_PROJECT_SETTINGS,
@@ -15,10 +16,11 @@ import {
 } from './types';
 
 export function createDefaultMaterial(name = 'Material'): MaterialAsset {
-  return {
+  return normalizeMaterialAsset({
     id: createId('mat'),
     name,
     shadingModel: 'lit',
+    presetId: 'default',
     baseColour: v3(0.75, 0.75, 0.78),
     baseColourTextureId: null,
     normalTextureId: null,
@@ -27,17 +29,22 @@ export function createDefaultMaterial(name = 'Material'): MaterialAsset {
     metallic: 0,
     metallicTextureId: null,
     emissive: v3(0, 0, 0),
+    emissiveIntensity: 1,
     emissiveTextureId: null,
     opacity: 1,
     alphaMode: 'opaque',
     alphaCutoff: 0.5,
+    transmission: 0,
+    ior: 1.5,
+    clearcoat: 0,
+    clearcoatRoughness: 0.03,
     doubleSided: false,
     unlit: false,
     flatShaded: true,
     textureFiltering: 'nearest',
     textureWrapping: 'repeat',
     uvLayerIndex: 0,
-  };
+  });
 }
 
 /** Small nearest-neighbour checker so selection overlays can be verified over real textures. */

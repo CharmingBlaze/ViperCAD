@@ -22,10 +22,14 @@ export type SceneObject = {
   metadata: Record<string, string>;
 };
 
+export type MaterialShadingModel = 'lit' | 'unlit' | 'physical';
+
 export type MaterialAsset = {
   id: MaterialId;
   name: string;
-  shadingModel: 'lit' | 'unlit';
+  shadingModel: MaterialShadingModel;
+  /** Last applied preset id, or null when hand-edited. */
+  presetId: string | null;
   baseColour: Vec3;
   baseColourTextureId: TextureId | null;
   normalTextureId: TextureId | null;
@@ -34,10 +38,17 @@ export type MaterialAsset = {
   metallic: number;
   metallicTextureId: TextureId | null;
   emissive: Vec3;
+  emissiveIntensity: number;
   emissiveTextureId: TextureId | null;
   opacity: number;
   alphaMode: 'opaque' | 'mask' | 'blend';
   alphaCutoff: number;
+  /** Glass / physical transmission (0 = opaque). */
+  transmission: number;
+  /** Index of refraction for glass and physical materials. */
+  ior: number;
+  clearcoat: number;
+  clearcoatRoughness: number;
   doubleSided: boolean;
   unlit: boolean;
   flatShaded: boolean;

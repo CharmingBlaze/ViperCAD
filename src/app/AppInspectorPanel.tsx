@@ -162,7 +162,6 @@ export function AppInspectorPanel({
   const [drawAdvancedOpen, setDrawAdvancedOpen] = useState(false);
   const [sceneToolMode, setSceneToolMode] = useState<SceneToolMode>('construct');
   const [simpleTextureOpen, setSimpleTextureOpen] = useState(false);
-  const [draftCurvePoint, setDraftCurvePoint] = useState(0);
   const [simpleTextureSettings, setSimpleTextureSettings] =
     useState<SimpleTextureSettings>(() => doodleTool.simpleTextureSettings);
   const createMode: CreateMode = isDrawing
@@ -349,6 +348,14 @@ export function AppInspectorPanel({
     primitiveTool.cancel(session.context());
     doodleTool.cancel(session.context());
     drawTool.cancel(session.context());
+  };
+
+  const finishDoodleCurve = () => {
+    doodleTool.confirm(session.context());
+    workspace.setCurveNodeEditMode(false);
+    workspace.setSelectedCurvePointIndex(0);
+    workspace.input.end('tool');
+    onRefresh();
   };
 
   const setTab = (next: InspectorTab) => {
@@ -835,6 +842,19 @@ export function AppInspectorPanel({
                       </button>
                     ))}
                   </div>
+                  {(doodleTool.style === 'sharp' || doodleTool.style === 'soft') &&
+                    doodleTool.solidMode === 'extrude' && (
+                    <p className="uv-hint">
+                      {doodleTool.style === 'sharp'
+                        ? 'Draw a closed loop for a flat-shoulder outline dome, or an open stroke for a ribbon extrusion.'
+                        : 'Draw a closed loop for a soft pillow blob, or an open stroke for a rounded tube.'}
+                    </p>
+                  )}
+                  {doodleTool.style === 'capsule' && doodleTool.solidMode === 'extrude' && (
+                    <p className="uv-hint">
+                      Draw a closed side-view outline and connect back to the start to fill a standing low-poly vertical capsule in that shape.
+                    </p>
+                  )}
                   <h3 className="uv-section-title">Hair</h3>
                   <div className="uv-btn-grid uv-btn-grid-3">
                     {(
@@ -944,7 +964,7 @@ export function AppInspectorPanel({
                         />
                       </label>
                       <p className="uv-hint">
-                        Open strokes receive hemispherical ends. Connected strokes become one seamless rounded loop.
+                        Open strokes become rounded tubes. Close the outline to fill a standing vertical capsule solid in that silhouette.
                       </p>
                     </div>
                   )}
@@ -979,7 +999,7 @@ export function AppInspectorPanel({
                       />
                       <span>
                         <strong>Auto Connect</strong>
-                        Snap the finish exactly to the first point
+                        Snap to the first point and fill a capsule solid when the outline closes
                       </span>
                     </label>
                   )}
@@ -1183,30 +1203,42 @@ export function AppInspectorPanel({
                       </p>
                     </div>
                   )}
-                  {doodleTool.inputMode === 'pen' && doodleTool.state.stage === 'drawing' ? (
+                  {doodleTool.state.stage === 'drawing' ? (
+                    doodleTool.isDraftNodeEditing() ||
+                    (doodleTool.isSketchStrokeLocked() && workspace.curveNodeEditMode) ? (
                     <>
                       <div className="curve-draft-editor">
                         <div className="simple-texture-card-heading">
-                          <strong>LIVE CURVE NODES</strong>
-                          <span>Editable before finish</span>
+                          <strong>POINT EDIT MODE</strong>
+                          <span>
+                            {doodleTool.inputMode === 'pen'
+                              ? 'Vector pen · click to add'
+                              : 'Sketch · drag nodes to reshape'}
+                          </span>
                         </div>
                         <label className="uv-field">
-                          <span>Active node</span>
+                          <span>Active point</span>
                           <select
                             className="uv-select"
-                            aria-label="Draft curve node"
-                            value={Math.min(draftCurvePoint, doodleTool.state.points.length - 1)}
-                            onChange={(event) => setDraftCurvePoint(Number(event.target.value))}
+                            aria-label="Draft curve point"
+                            value={Math.min(
+                              workspace.selectedCurvePointIndex,
+                              doodleTool.state.points.length - 1,
+                            )}
+                            onChange={(event) => {
+                              workspace.setSelectedCurvePointIndex(Number(event.target.value));
+                              onRefresh();
+                            }}
                           >
                             {doodleTool.state.points.map((_point, index) => (
-                              <option key={index} value={index}>Node {index + 1}</option>
+                              <option key={index} value={index}>Point {index + 1}</option>
                             ))}
                           </select>
                         </label>
                         <div className="uv-btn-grid uv-btn-grid-3">
                           {(['x', 'y', 'z'] as const).map((axis) => {
                             const index = Math.min(
-                              draftCurvePoint,
+                              workspace.selectedCurvePointIndex,
                               doodleTool.state.points.length - 1,
                             );
                             const point = doodleTool.state.points[index]!;
@@ -1214,7 +1246,7 @@ export function AppInspectorPanel({
                               <label className="uv-field" key={`${index}-${axis}`}>
                                 <span>{axis.toUpperCase()}</span>
                                 <ExactCoordinateInput
-                                  ariaLabel={`Draft node ${axis.toUpperCase()}`}
+                                  ariaLabel={`Draft point ${axis.toUpperCase()}`}
                                   value={point[axis]}
                                   onValueChange={(value) => {
                                     doodleTool.setDraftPointCoordinate(
@@ -1231,30 +1263,77 @@ export function AppInspectorPanel({
                           })}
                         </div>
                         <p className="uv-hint">
-                          Drag orange nodes and Bézier handles directly in any viewport. The curve and 3D result rebuild immediately.
+                          Drag orange points in the viewport. Exit point edit mode to move, rotate, or scale the whole curve with G/R/S.
                         </p>
                       </div>
                       <div className="uv-btn-grid uv-btn-grid-2">
+                        {doodleTool.isSketchStrokeLocked() && (
+                          <button
+                            type="button"
+                            className="tool is-active"
+                            onClick={() => {
+                              workspace.setCurveNodeEditMode(false);
+                              onRefresh();
+                            }}
+                          >
+                            Done Editing Points
+                          </button>
+                        )}
                         <button
                           type="button"
                           className="tool"
                           onClick={() => {
                             doodleTool.popPoint(session.context());
-                            setDraftCurvePoint((index) =>
-                              Math.max(0, Math.min(index, doodleTool.state.points.length - 1)),
+                            workspace.setSelectedCurvePointIndex(
+                              Math.max(
+                                0,
+                                Math.min(
+                                  workspace.selectedCurvePointIndex,
+                                  doodleTool.state.points.length - 1,
+                                ),
+                              ),
                             );
                             onRefresh();
                           }}
                         >
-                          Undo Point
+                          Delete Point
                         </button>
+                        {doodleTool.isSketchStrokeLocked() && (
+                          <button
+                            type="button"
+                            className="tool primary"
+                            disabled={doodleTool.state.points.length < 2}
+                            onClick={() => {
+                              finishDoodleCurve();
+                            }}
+                          >
+                            Finish Curve
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  ) : doodleTool.isSketchStrokeLocked() ? (
+                    <>
+                      <p className="uv-hint">
+                        Stroke complete · {doodleTool.state.points.length} points. Edit individual points or finish the curve.
+                      </p>
+                      <div className="uv-btn-grid uv-btn-grid-2">
                         <button
                           type="button"
                           className="tool primary"
+                          onClick={() => {
+                            workspace.setCurveNodeEditMode(true);
+                            onRefresh();
+                          }}
+                        >
+                          Edit Points
+                        </button>
+                        <button
+                          type="button"
+                          className="tool"
                           disabled={doodleTool.state.points.length < 2}
                           onClick={() => {
-                            doodleTool.confirm(session.context());
-                            onRefresh();
+                            finishDoodleCurve();
                           }}
                         >
                           Finish Curve
@@ -1262,21 +1341,26 @@ export function AppInspectorPanel({
                       </div>
                     </>
                   ) : (
-                    <button
-                      type="button"
-                      className={`tool uv-btn-block${isDoodling ? '' : ' primary'}`}
-                      onClick={() => {
-                        cancelCreateTools();
-                        session.tools.setActive('create-doodle', session.context());
-                        onRefresh();
-                      }}
-                    >
-                      {doodleTool.inputMode === 'pen' ? 'Start Vector Pen' : 'Start Sketch'}
-                    </button>
+                    <p className="uv-hint">
+                      {doodleTool.inputMode === 'sketch'
+                        ? 'LMB drag to sketch · release to finish stroke'
+                        : 'LMB place points · Enter to finish'}
+                    </p>
+                  )
+                  ) : (
+                    <p className="uv-hint">
+                      {doodleTool.inputMode === 'sketch'
+                        ? 'Select curve objects and use G/R/S · LMB drag empty space to sketch another curve'
+                        : 'Select curve objects and use G/R/S · LMB place points on empty space for the next curve'}
+                    </p>
                   )}
                   <p className="uv-meta">
                     {doodleTool.state.stage === 'drawing'
-                      ? `${doodleTool.state.points.length} control points${doodleTool.state.closed ? ' · closed' : ''}`
+                      ? doodleTool.state.strokeLocked
+                        ? workspace.curveNodeEditMode
+                          ? `${doodleTool.state.points.length} points · point edit`
+                          : `${doodleTool.state.points.length} points · ready to finish`
+                        : `${doodleTool.state.points.length} control points${doodleTool.state.closed ? ' · closed' : ''}`
                       : `${doodleTool.style.replace('-', ' ')} · ready`}
                   </p>
                   <p className="uv-hint">
@@ -1285,6 +1369,7 @@ export function AppInspectorPanel({
                 </section>
                 <CurveOperationPanel
                   session={session}
+                  workspace={workspace}
                   object={activeObject ?? null}
                   mesh={activeMesh ?? null}
                   onRefresh={onRefresh}
@@ -1618,7 +1703,8 @@ export function AppInspectorPanel({
 
                     <p className="uv-hint">
                       Click to place · click an old vertex to reuse it · Shift locks an axis · Ctrl temporarily
-                      toggles snapping · Backspace removes the last point.
+                      toggles snapping · Backspace removes the last point · between strokes press R or use the
+                      rotate gizmo to reorient the whole draw object.
                     </p>
 
                     <button
@@ -1627,9 +1713,16 @@ export function AppInspectorPanel({
                       onClick={() => {
                         if (canCommitDraw) drawTool.confirm(session.context());
                         else if (chainLen) drawTool.cancel(session.context());
+                        const drawObjectId =
+                          drawTool.state.meshObjectId ?? session.selection.state.activeObjectId;
                         session.tools.setActive('select', session.context());
                         setTab('edit');
-                        chooseMode(drawTool.buildMode === 'faces' ? 'face' : 'vertex');
+                        if (drawObjectId) {
+                          session.selection.setMode('object');
+                          session.selection.selectObjects([drawObjectId], 'replace');
+                        } else {
+                          chooseMode(drawTool.buildMode === 'faces' ? 'face' : 'vertex');
+                        }
                         onRefresh();
                       }}
                     >
@@ -2049,6 +2142,7 @@ export function AppInspectorPanel({
             />}
             {editSection === 'geometry' && <CurveOperationPanel
               session={session}
+              workspace={workspace}
               object={activeObject ?? null}
               mesh={activeMesh ?? null}
               onRefresh={onRefresh}

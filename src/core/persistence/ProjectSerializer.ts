@@ -1,4 +1,5 @@
 import { reserveExistingIds } from '@/core/ids/IdService';
+import { normalizeMaterialAsset } from '@/core/material/MaterialPresets';
 import { emptyDirtyFlags, type EditableMesh, type FaceCorner } from '@/core/mesh/types';
 import { validateMeshFull } from '@/core/mesh/Validation';
 import type { ModelDocument } from '@/core/document/types';
@@ -68,7 +69,9 @@ export function deserializeProject(text: string): ModelDocument {
       },
     },
     dirty: false,
-    objects: new Map(d.objects.map((o) => [o.id, o])), meshes: new Map(), materials: new Map(d.materials.map((m) => [m.id, m])),
+    objects: new Map(d.objects.map((o) => [o.id, o])),
+    meshes: new Map(),
+    materials: new Map(d.materials.map((m) => [m.id, normalizeMaterialAsset(m)])),
     textures: new Map(d.textures.map((t) => [t.id, t])),
     images: new Map(d.images.map((i) => [i.id, { ...i, pixels: new Uint8ClampedArray(i.pixels) }])),
   };

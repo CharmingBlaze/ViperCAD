@@ -2,6 +2,7 @@ import { v2 } from '@/core/math/Vec2';
 import {
   addVec3,
   crossVec3,
+  dotVec3,
   lengthVec3,
   normalizeVec3,
   scaleVec3,
@@ -73,6 +74,18 @@ type PathSample = {
   t: number;
 };
 
+type PathFrames = {
+  path: Vec3[];
+  tangents: Vec3[];
+  normals: Vec3[];
+  binormals: Vec3[];
+};
+
+type CardFrame = {
+  up: Vec3;
+  side: Vec3;
+};
+
 export function buildPathOutput(options: PathOutputOptions): EditableMesh {
   const radius = Math.max(0.001, options.radius);
   const common = {
@@ -135,22 +148,27 @@ export function buildPathOutput(options: PathOutputOptions): EditableMesh {
         options.chainAlternating && index % 2 === 1 ? Math.PI / 2 : 0,
       );
     } else if (options.output === 'cards') {
+      const cardHeight = radius * 3.4 * options.profileHeight * scale;
+      const cardWidth = radius * 1.5 * options.profileWidth * scale;
+      const verticalSegments = Math.max(1, Math.min(6, Math.round(options.radialSegments / 2)));
       appendCard(
         builder,
         sample,
-        radius * 4 * options.profileHeight * scale,
-        radius * 2 * options.profileWidth * scale,
+        cardHeight,
+        cardWidth,
         roll,
         mirror,
+        verticalSegments,
       );
       if (options.cardCrossed) {
         appendCard(
           builder,
           sample,
-          radius * 4 * options.profileHeight * scale,
-          radius * 2 * options.profileWidth * scale,
+          cardHeight,
+          cardWidth,
           roll + Math.PI / 2,
           mirror,
+          verticalSegments,
         );
       }
     } else if (options.sourceMesh) {
@@ -165,6 +183,7 @@ export function buildPathOutput(options: PathOutputOptions): EditableMesh {
 function samplePath(options: PathOutputOptions): PathSample[] {
   const points = options.points;
   if (points.length < 2) return [];
+  const frames = buildPathFrames(points);
   const lengths = [0];
   for (let index = 1; index < points.length; index++) {
     lengths.push(lengths[index - 1]! + lengthVec3(subVec3(points[index]!, points[index - 1]!)));
@@ -184,49 +203,161 @@ function samplePath(options: PathOutputOptions): PathSample[] {
   for (let sampleIndex = 0; sampleIndex < count; sampleIndex++) {
     const distance =
       count === 1 ? start + usable * 0.5 : start + usable * sampleIndex / (count - 1);
-    let segment = 1;
-    while (segment < lengths.length - 1 && lengths[segment]! < distance) segment++;
-    const a = points[segment - 1]!;
-    const b = points[segment]!;
-    const span = Math.max(1e-8, lengths[segment]! - lengths[segment - 1]!);
-    const t = Math.max(0, Math.min(1, (distance - lengths[segment - 1]!) / span));
-    const tangent = normalizeVec3(subVec3(b, a));
-    let normal = normalizeVec3(crossVec3(tangent, v3(0, 1, 0)));
-    if (lengthVec3(normal) < 1e-6) normal = normalizeVec3(crossVec3(tangent, v3(1, 0, 0)));
-    const binormal = normalizeVec3(crossVec3(tangent, normal));
-    samples.push({
-      position: addVec3(
-        addVec3(a, scaleVec3(subVec3(b, a), t)),
-        scaleVec3(normal, options.offset),
-      ),
-      tangent,
-      normal,
-      binormal,
-      t: total > 0 ? distance / total : 0,
-    });
+    const sample = interpolatePathSample(frames, lengths, distance, total, options.offset);
+    if (sample) samples.push(sample);
   }
   return samples;
+}
+
+function interpolatePathSample(
+  frames: PathFrames,
+  lengths: number[],
+  distance: number,
+  total: number,
+  offset: number,
+): PathSample | null {
+  if (frames.path.length < 2) return null;
+  let segment = 1;
+  while (segment < lengths.length - 1 && lengths[segment]! < distance) segment++;
+  const span = Math.max(1e-8, lengths[segment]! - lengths[segment - 1]!);
+  const t = Math.max(0, Math.min(1, (distance - lengths[segment - 1]!) / span));
+  const index = segment - 1;
+  const next = Math.min(index + 1, frames.path.length - 1);
+  const position = addVec3(
+    addVec3(frames.path[index]!, scaleVec3(subVec3(frames.path[next]!, frames.path[index]!), t)),
+    scaleVec3(
+      normalizeVec3(addVec3(
+        scaleVec3(frames.normals[index]!, 1 - t),
+        scaleVec3(frames.normals[next]!, t),
+      )),
+      offset,
+    ),
+  );
+  let tangent = normalizeVec3(addVec3(
+    scaleVec3(frames.tangents[index]!, 1 - t),
+    scaleVec3(frames.tangents[next]!, t),
+  ));
+  if (lengthVec3(tangent) < 1e-8) tangent = frames.tangents[index]!;
+  let normal = normalizeVec3(addVec3(
+    scaleVec3(frames.normals[index]!, 1 - t),
+    scaleVec3(frames.normals[next]!, t),
+  ));
+  normal = normalizeVec3(subVec3(normal, scaleVec3(tangent, dotVec3(normal, tangent))));
+  if (lengthVec3(normal) < 1e-8) normal = frames.normals[index]!;
+  const binormal = normalizeVec3(crossVec3(tangent, normal));
+  return {
+    position,
+    tangent,
+    normal,
+    binormal,
+    t: total > 0 ? distance / total : 0,
+  };
+}
+
+function buildPathFrames(path: Vec3[]): PathFrames {
+  const tangents = path.map((_point, index) => {
+    const tangent =
+      index === 0
+        ? subVec3(path[1]!, path[0]!)
+        : index === path.length - 1
+          ? subVec3(path[index]!, path[index - 1]!)
+          : subVec3(path[index + 1]!, path[index - 1]!);
+    return lengthVec3(tangent) > 1e-8 ? normalizeVec3(tangent) : v3(0, 1, 0);
+  });
+  const normals: Vec3[] = [];
+  const binormals: Vec3[] = [];
+  const tangent0 = tangents[0]!;
+  let firstNormal =
+    Math.abs(dotVec3(tangent0, v3(0, 1, 0))) < 0.9
+      ? normalizeVec3(crossVec3(tangent0, v3(0, 1, 0)))
+      : normalizeVec3(crossVec3(tangent0, v3(1, 0, 0)));
+  if (lengthVec3(firstNormal) < 1e-8) firstNormal = v3(1, 0, 0);
+  normals.push(firstNormal);
+  binormals.push(normalizeVec3(crossVec3(tangent0, firstNormal)));
+  for (let index = 1; index < path.length; index++) {
+    const tangent = tangents[index]!;
+    let normal = normals[index - 1]!;
+    const axis = crossVec3(tangents[index - 1]!, tangent);
+    const axisLength = lengthVec3(axis);
+    if (axisLength > 1e-8) {
+      normal = rotateAroundAxis(
+        normal,
+        normalizeVec3(axis),
+        Math.atan2(axisLength, Math.max(-1, Math.min(1, dotVec3(tangents[index - 1]!, tangent)))),
+      );
+    }
+    normal = normalizeVec3(subVec3(normal, scaleVec3(tangent, dotVec3(normal, tangent))));
+    if (lengthVec3(normal) < 1e-8) normal = normals[index - 1]!;
+    normals.push(normal);
+    binormals.push(normalizeVec3(crossVec3(tangent, normal)));
+  }
+  return { path, tangents, normals, binormals };
 }
 
 function appendCard(
   builder: MeshBuilder,
   sample: PathSample,
-  length: number,
+  height: number,
   width: number,
   roll: number,
   mirror: boolean,
+  verticalSegments: number,
 ): void {
-  const side = rotatedSide(sample, roll, mirror);
-  const along = sample.tangent;
-  const corners = [
-    addVec3(sample.position, addVec3(scaleVec3(along, -length / 2), scaleVec3(side, -width / 2))),
-    addVec3(sample.position, addVec3(scaleVec3(along, length / 2), scaleVec3(side, -width / 2))),
-    addVec3(sample.position, addVec3(scaleVec3(along, length / 2), scaleVec3(side, width / 2))),
-    addVec3(sample.position, addVec3(scaleVec3(along, -length / 2), scaleVec3(side, width / 2))),
-  ].map((point) => builder.vertex(point));
-  builder.quad(corners[0]!, corners[1]!, corners[2]!, corners[3]!, [
-    v2(0, 0), v2(1, 0), v2(1, 1), v2(0, 1),
-  ]);
+  const frame = computeVerticalCardFrame(sample, roll, mirror);
+  const { up, side } = frame;
+  const base = addVec3(sample.position, scaleVec3(up, -height * 0.08));
+  const leanAxis = normalizeVec3(addVec3(
+    scaleVec3(sample.normal, 0.65),
+    scaleVec3(sample.binormal, 0.35),
+  ));
+  const rows: VertexId[][] = [];
+
+  for (let row = 0; row <= verticalSegments; row++) {
+    const t = row / verticalSegments;
+    const ease = t * t;
+    const widthScale = 1 - ease * 0.42;
+    const topPinch = t > 0.72 ? 1 - (t - 0.72) / 0.28 * 0.55 : 1;
+    const halfW = width * widthScale * topPinch * 0.5;
+    const centre = addVec3(
+      base,
+      addVec3(scaleVec3(up, height * t), scaleVec3(leanAxis, ease * width * 0.12)),
+    );
+    rows.push([
+      builder.vertex(addVec3(centre, scaleVec3(side, -halfW))),
+      builder.vertex(addVec3(centre, scaleVec3(side, halfW))),
+    ]);
+  }
+
+  for (let row = 0; row < verticalSegments; row++) {
+    const v0 = row / verticalSegments;
+    const v1 = (row + 1) / verticalSegments;
+    const bl = rows[row]![0]!;
+    const br = rows[row]![1]!;
+    const tl = rows[row + 1]![0]!;
+    const tr = rows[row + 1]![1]!;
+    builder.quad(bl, br, tr, tl, [v2(0, v0), v2(1, v0), v2(1, v1), v2(0, v1)]);
+  }
+}
+
+function computeVerticalCardFrame(sample: PathSample, roll: number, mirror: boolean): CardFrame {
+  const worldUp = v3(0, 1, 0);
+  let up = subVec3(worldUp, scaleVec3(sample.tangent, dotVec3(worldUp, sample.tangent)));
+  if (lengthVec3(up) < 1e-6) up = normalizeVec3(sample.normal);
+  else up = normalizeVec3(up);
+  let side = normalizeVec3(crossVec3(up, sample.tangent));
+  if (lengthVec3(side) < 1e-6) side = normalizeVec3(sample.binormal);
+  if (mirror) side = scaleVec3(side, -1);
+  const rotated = rotateAroundAxis(side, up, roll);
+  return { up, side: normalizeVec3(rotated) };
+}
+
+function rotateAroundAxis(value: Vec3, axis: Vec3, angle: number): Vec3 {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return addVec3(
+    addVec3(scaleVec3(value, c), scaleVec3(crossVec3(axis, value), s)),
+    scaleVec3(axis, dotVec3(axis, value) * (1 - c)),
+  );
 }
 
 function appendBox(

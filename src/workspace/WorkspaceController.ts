@@ -15,6 +15,7 @@ import type { AppShellMode, ViewId, WorkspacePreferences } from './types';
 
 export type InspectorTab = 'create' | 'edit' | 'material';
 export type InspectorSection = 'select' | 'transform' | 'geometry' | 'symmetry' | 'scene';
+export type ViewportNavMode = 'none' | 'pan' | 'orbit' | 'zoom';
 
 type Listener = () => void;
 
@@ -33,6 +34,12 @@ export class WorkspaceController {
   inspectorTab: InspectorTab = 'create';
   /** Focused workflow inside the Edit tab. */
   inspectorSection: InspectorSection = 'select';
+  /** Viewport node editing for procedural curves. */
+  curveNodeEditMode = false;
+  selectedCurvePointIndex = 0;
+  /** LightWave-style viewport navigation tool (per viewport). */
+  viewportNavMode: ViewportNavMode = 'none';
+  viewportNavViewId: ViewId | null = null;
   private listeners = new Set<Listener>();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private texturePersistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -88,6 +95,7 @@ export class WorkspaceController {
       return true;
     }
     if (this.shellMode === 'terrain') return true;
+    if (this.shellMode === 'sculpt') return true;
     // Prefer hovered pane, else the last active one (never maximize with a null id).
     this.splits.toggleMaximize(
       this.splits.state.hoveredViewportId ?? this.splits.state.lastActiveViewportId,
@@ -108,7 +116,7 @@ export class WorkspaceController {
     if (this.shellMode === mode) return;
     this.shellMode = mode;
     this.texture.open = mode === 'texture';
-    if (mode === 'texture' || mode === 'terrain') {
+    if (this.shellMode === 'texture' || this.shellMode === 'terrain' || this.shellMode === 'sculpt') {
       this.splits.setActive('persp');
       this.splits.setHovered('persp');
     }
@@ -130,6 +138,50 @@ export class WorkspaceController {
     this.inspectorSection = section;
     this.inspectorTab = 'edit';
     if (changed) this.notify();
+  }
+
+  setCurveNodeEditMode(enabled: boolean): void {
+    if (this.curveNodeEditMode === enabled) return;
+    this.curveNodeEditMode = enabled;
+    this.notify();
+  }
+
+  setSelectedCurvePointIndex(index: number): void {
+    const next = Math.max(0, Math.round(index));
+    if (this.selectedCurvePointIndex === next) return;
+    this.selectedCurvePointIndex = next;
+    this.notify();
+  }
+
+  setViewportNav(mode: ViewportNavMode, viewId: ViewId | null): void {
+    const changed = this.viewportNavMode !== mode || this.viewportNavViewId !== viewId;
+    this.viewportNavMode = mode;
+    this.viewportNavViewId = mode === 'none' ? null : viewId;
+    if (changed) this.notify();
+  }
+
+  toggleViewportNav(mode: Exclude<ViewportNavMode, 'none'>, viewId: ViewId): void {
+    if (this.viewportNavMode === mode && this.viewportNavViewId === viewId) {
+      this.setViewportNav('none', null);
+    } else {
+      this.setViewportNav(mode, viewId);
+    }
+  }
+
+  get viewportNavToolsVisible(): boolean {
+    return this.preferences.viewportNavToolsVisible;
+  }
+
+  setViewportNavToolsVisible(visible: boolean): void {
+    if (this.preferences.viewportNavToolsVisible === visible) return;
+    this.preferences.viewportNavToolsVisible = visible;
+    if (!visible) this.setViewportNav('none', null);
+    this.notify();
+    this.schedulePersist();
+  }
+
+  toggleViewportNavToolsVisible(): void {
+    this.setViewportNavToolsVisible(!this.preferences.viewportNavToolsVisible);
   }
 
   setTextureSplit(ratio: number): void {
@@ -157,7 +209,7 @@ export class WorkspaceController {
 
   /** Viewport rects for the WebGL host (full host in texture shell = Perspective only). */
   computeViewportRects(width: number, height: number) {
-    if (this.shellMode === 'texture' || this.shellMode === 'terrain') {
+    if (this.shellMode === 'texture' || this.shellMode === 'terrain' || this.shellMode === 'sculpt') {
       return this.splits.computeSinglePersp(width, height);
     }
     return this.splits.computeRects(width, height);

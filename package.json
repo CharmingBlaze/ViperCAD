@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:exe": "npm run build && node scripts/prepare-desktop.mjs && cd desktop && go build -ldflags=\"-H windowsgui\" -o ../ViperCAD.exe .",
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "vitest run",

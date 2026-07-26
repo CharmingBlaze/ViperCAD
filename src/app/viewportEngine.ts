@@ -1,9 +1,11 @@
 import {
+  ACESFilmicToneMapping,
   AmbientLight,
   BufferGeometry,
   Color,
   DirectionalLight,
   DoubleSide,
+  HemisphereLight,
   MOUSE,
   LineBasicMaterial,
   LineLoop,
@@ -13,6 +15,7 @@ import {
   Scene,
   Vector2,
   Vector3,
+  SRGBColorSpace,
   WebGLRenderer,
   type Camera,
   type Material,
@@ -65,6 +68,8 @@ import { KnifeTool } from '@/core/tools/KnifeTool';
 import { LoopCutTool } from '@/core/tools/LoopCutTool';
 import { TileDrawTool } from '@/core/tools/TileDrawTool';
 import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
+import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
+import { raycastSculptTarget } from '@/core/sculpt/MeshSculptTarget';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
 import type { ToolPointerInput } from '@/core/tools/Tool';
@@ -217,6 +222,13 @@ export class ViewportEngine {
     startY: number;
     pointerId: number;
   } | null = null;
+  /** Active LightWave-style viewport navigation drag. */
+  private viewportNavDrag: {
+    paneId: ViewId;
+    mode: 'pan' | 'orbit' | 'zoom';
+    lastX: number;
+    lastY: number;
+  } | null = null;
   /** Double-click a grouped mesh to select its parent group. */
   private lastObjectPick: { objectId: ObjectId; time: number } | null = null;
 
@@ -362,8 +374,9 @@ export class ViewportEngine {
 
     // Pixel ratio is for sharpness only. Layout/viewport/scissor stay in CSS pixels.
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.setScissorTest(true);
-    renderer.autoClear = false;
+    renderer.toneMapping = ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    renderer.outputColorSpace = SRGBColorSpace;
     host.appendChild(renderer.domElement);
     renderer.domElement.style.display = 'block';
     renderer.domElement.style.width = '100%';
@@ -387,10 +400,17 @@ export class ViewportEngine {
       false,
     );
 
-    scene.add(new AmbientLight(0xffffff, 0.5));
-    const key = new DirectionalLight(0xffffff, 0.85);
+    scene.add(new HemisphereLight(0xd8e4f8, 0x282830, 0.42));
+    scene.add(new AmbientLight(0xffffff, 0.28));
+    const key = new DirectionalLight(0xffffff, 0.95);
     key.position.set(6, 10, 4);
     scene.add(key);
+    const fill = new DirectionalLight(0xc8d4ff, 0.42);
+    fill.position.set(-5, 4, -7);
+    scene.add(fill);
+    const rim = new DirectionalLight(0xffe8cc, 0.28);
+    rim.position.set(-2, 3, 8);
+    scene.add(rim);
 
     const ids: ViewId[] = ['persp', 'top', 'front', 'right'];
     for (const id of ids) {
@@ -600,6 +620,62 @@ export class ViewportEngine {
 
   /** Orbit Perspective from the on-screen orientation widget (CSS-pixel deltas). */
   orbitPerspective(deltaX: number, deltaY: number, viewId: ViewId = 'persp'): void {
+    this.applyViewportOrbit(deltaX, deltaY, viewId);
+  }
+
+  /** Pan the viewport by screen-pixel deltas (LightWave nav toolbar / pen-friendly). */
+  panViewportByPixels(deltaX: number, deltaY: number, viewId: ViewId): void {
+    const pane = this.ensurePaneControls(viewId);
+    if (!pane?.controls) return;
+    if (pane.camera instanceof OrthographicCamera) {
+      // Ortho views: match OrbitControls / RMB pan (drag right → view moves right).
+      pane.controls.pan(deltaX, deltaY);
+    } else {
+      // Perspective nav: same pixel convention as ortho (OrbitControls pan sign).
+      pane.controls.pan(deltaX, deltaY);
+    }
+    pane.controls.update();
+    if (pane.camera instanceof OrthographicCamera) {
+      this.lockOrthoPane(pane);
+      this.absorbPaneOrthoZoom(pane);
+    }
+    this.persistCameras();
+    this.notifyCameraChange(viewId);
+    this.invalidate();
+  }
+
+  /** Zoom the viewport by vertical screen-pixel delta. */
+  zoomViewportByPixels(deltaY: number, viewId: ViewId): void {
+    const pane = this.ensurePaneControls(viewId);
+    if (!pane?.controls) return;
+    if (pane.camera instanceof OrthographicCamera) {
+      const factor = Math.exp(deltaY * 0.008);
+      pane.orthoHeight = clampOrthoHeight(pane.orthoHeight * factor);
+      this.lockOrthoPane(pane);
+      this.absorbPaneOrthoZoom(pane);
+    } else {
+      const scale = 1 + deltaY * 0.012;
+      if (scale > 1) pane.controls.dollyOut(scale);
+      else pane.controls.dollyIn(1 / scale);
+      pane.controls.update();
+    }
+    this.persistCameras();
+    this.notifyCameraChange(viewId);
+    this.invalidate();
+  }
+
+  applyViewportNavDrag(
+    mode: 'pan' | 'orbit' | 'zoom',
+    deltaX: number,
+    deltaY: number,
+    viewId: ViewId,
+  ): void {
+    if (mode === 'pan') this.panViewportByPixels(deltaX, deltaY, viewId);
+    else if (mode === 'orbit') this.applyViewportOrbit(deltaX, deltaY, viewId);
+    else this.zoomViewportByPixels(deltaY, viewId);
+  }
+
+  private applyViewportOrbit(deltaX: number, deltaY: number, viewId: ViewId): void {
     const pane = this.panes.get(viewId);
     if (!pane || !(pane.camera instanceof PerspectiveCamera) || !this.workspace) return;
     if (!pane.controls) {
@@ -615,6 +691,32 @@ export class ViewportEngine {
     this.persistCameras();
     this.notifyCameraChange(viewId);
     this.invalidate();
+  }
+
+  private ensurePaneControls(viewId: ViewId): Pane | null {
+    if (!this.workspace) return null;
+    this.workspace.setActiveViewport(viewId);
+    this.rebindActiveControls();
+    return this.panes.get(viewId) ?? null;
+  }
+
+  private tryBeginViewportNav(e: PointerEvent, paneId: ViewId): boolean {
+    if (!this.workspace || e.button !== 0) return false;
+    const { viewportNavMode, viewportNavViewId } = this.workspace;
+    if (viewportNavMode === 'none' || viewportNavViewId !== paneId) return false;
+    if (viewportNavMode === 'orbit' && !(this.panes.get(paneId)?.camera instanceof PerspectiveCamera)) {
+      return false;
+    }
+    e.preventDefault();
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    this.viewportNavDrag = {
+      paneId,
+      mode: viewportNavMode,
+      lastX: e.clientX,
+      lastY: e.clientY,
+    };
+    this.rebindActiveControls();
+    return true;
   }
 
   private framePoints(points: ReturnType<typeof documentViewPoints>, viewId?: ViewId): boolean {
@@ -655,11 +757,18 @@ export class ViewportEngine {
     if (!this.renderer || !this.workspace) return;
     const activeTool = this.session?.tools.getActive();
     const doodleDrawing =
-      activeTool instanceof CreateDoodleTool && activeTool.state.stage === 'drawing';
+      activeTool instanceof CreateDoodleTool &&
+      activeTool.state.stage === 'drawing' &&
+      ((activeTool.inputMode === 'sketch' && !activeTool.state.strokeLocked) ||
+        activeTool.inputMode === 'pen' ||
+        (activeTool.inputMode === 'sketch' &&
+          activeTool.state.strokeLocked &&
+          this.workspace.curveNodeEditMode));
     const modalMeshTool =
       (activeTool instanceof KnifeTool && activeTool.state.dragging) ||
       activeTool instanceof LoopCutTool ||
       (activeTool instanceof TerrainSculptTool && activeTool.dragging) ||
+      (activeTool instanceof MeshSculptTool && activeTool.dragging) ||
       (activeTool instanceof TerrainObjectTool && activeTool.dragging) ||
       (activeTool instanceof TerrainFeatureTool && activeTool.dragging);
     const blockTransform =
@@ -862,6 +971,23 @@ export class ViewportEngine {
       this.workspace.setHoveredViewport(id);
       this.lastPointerSamples.set(id, this.toPointerSample(e, id));
     }
+    if (this.viewportNavDrag && (e.buttons & 1)) {
+      e.preventDefault();
+      const drag = this.viewportNavDrag;
+      const deltaX = e.clientX - drag.lastX;
+      const deltaY = e.clientY - drag.lastY;
+      drag.lastX = e.clientX;
+      drag.lastY = e.clientY;
+      if (deltaX !== 0 || deltaY !== 0) {
+        this.applyViewportNavDrag(drag.mode, deltaX, deltaY, drag.paneId);
+      }
+      if (this.renderer) {
+        this.renderer.domElement.style.cursor =
+          drag.mode === 'pan' ? 'move' : drag.mode === 'zoom' ? 'zoom-in' : 'grab';
+      }
+      this.invalidate();
+      return;
+    }
     if (!this.session?.transform.active) this.interactionOverlay.updateSnap(null, 'none');
 
     if (this.curvePointDrag && (e.buttons & 1)) {
@@ -918,6 +1044,7 @@ export class ViewportEngine {
     const tool = this.session?.tools.getActive();
     if (
       !(tool instanceof TerrainSculptTool) &&
+      !(tool instanceof MeshSculptTool) &&
       !(tool instanceof TerrainObjectTool) &&
       !(tool instanceof TerrainFeatureTool)
     ) {
@@ -934,6 +1061,19 @@ export class ViewportEngine {
       return;
     }
     if (id && tool instanceof DrawPolyTool) {
+      if (tool.state.chain.length === 0 && this.session) {
+        const gizmoHit = this.isTextureFaceEditing() ? null : this.pickGizmo(e, id);
+        if (gizmoHit) {
+          if (this.renderer) this.renderer.domElement.style.cursor = 'grab';
+          this.gizmo.setHovered(gizmoHit.handleId);
+          this.session.selection.clearHover();
+          this.syncGizmo();
+          this.invalidate();
+          return;
+        }
+        if (this.renderer) this.renderer.domElement.style.cursor = '';
+        this.gizmo.setHovered(null);
+      }
       tool.update(this.pointerInput(e, id), this.session!.context());
       this.interactionOverlay.updateSnap(e, tool.state.snapLabel);
       this.invalidate();
@@ -968,6 +1108,18 @@ export class ViewportEngine {
       this.invalidate();
       return;
     }
+    if (id && tool instanceof MeshSculptTool) {
+      const input = this.meshSculptPointerInput(e, id);
+      tool.updatePreview(input, this.session!.context());
+      if (tool.dragging && (e.buttons & 1)) {
+        tool.update(input, this.session!.context());
+      }
+      this.updateMeshSculptBrushPreview(tool);
+      this.interactionOverlay.updateTransform(e, tool.statusLine());
+      if (this.renderer) this.renderer.domElement.style.cursor = 'crosshair';
+      this.invalidate();
+      return;
+    }
     if (id && tool instanceof TerrainObjectTool) {
       const input = this.terrainPointerInput(e, id);
       if (tool.dragging && (e.buttons & 1)) {
@@ -991,16 +1143,25 @@ export class ViewportEngine {
       return;
     }
 
+    const doodleTool = tool instanceof CreateDoodleTool ? tool : null;
+    const doodleBlocksHover =
+      doodleTool &&
+      doodleTool.state.stage === 'drawing' &&
+      (doodleTool.inputMode === 'pen' ||
+        (doodleTool.inputMode === 'sketch' && !doodleTool.state.strokeLocked) ||
+        (doodleTool.isSketchStrokeLocked() && this.workspace.curveNodeEditMode));
+
     if (
       id &&
       this.session &&
       !(tool instanceof CreatePrimitiveTool) &&
-      !(tool instanceof CreateDoodleTool) &&
+      !doodleBlocksHover &&
       !(tool instanceof DrawPolyTool)
       && !(tool instanceof TileDrawTool)
       && !(tool instanceof KnifeTool)
       && !(tool instanceof LoopCutTool)
       && !(tool instanceof TerrainSculptTool)
+      && !(tool instanceof MeshSculptTool)
       && !(tool instanceof TerrainObjectTool)
       && !(tool instanceof TerrainFeatureTool)
     ) {
@@ -1062,8 +1223,14 @@ export class ViewportEngine {
 
     this.workspace.setActiveViewport(id);
 
+    if (this.tryBeginViewportNav(e, id)) return;
+
     const tool = this.session?.tools.getActive();
-    const curveTarget = this.pickCurveControl(e, id);
+    if (!this.workspace.curveNodeEditMode && this.tryStartGizmoTransform(e, id)) {
+      this.invalidate();
+      return;
+    }
+    const curveTarget = this.workspace.curveNodeEditMode ? this.pickCurveControl(e, id) : null;
     if (curveTarget && this.beginCurvePointDrag(e, id, curveTarget)) return;
 
     if (this.workspace.texture.seamPaintMode !== 'off') {
@@ -1086,6 +1253,7 @@ export class ViewportEngine {
       !(tool instanceof KnifeTool) &&
       !(tool instanceof LoopCutTool) &&
       !(tool instanceof TerrainSculptTool) &&
+      !(tool instanceof MeshSculptTool) &&
       !(tool instanceof TerrainObjectTool) &&
       !(tool instanceof TerrainFeatureTool) &&
       !transform?.active
@@ -1129,28 +1297,77 @@ export class ViewportEngine {
     }
 
     if (tool instanceof CreateDoodleTool) {
-      e.preventDefault();
-      if (tool.inputMode === 'sketch') {
-        (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-      }
-      this.rebindActiveControls();
-      const pane = this.panes.get(id);
-      if (pane?.controls) {
-        const depth = pane.camera.position.distanceTo(pane.controls.target);
-        tool.setDepthHint(depth);
-      }
-      this.workspace.input.begin('tool');
-      this.syncOrbitEnabled();
-      tool.begin(this.pointerInput(e, id), this.session!.context());
-      if (tool.inputMode === 'pen') {
-        this.workspace.input.end('tool');
+      const sketching =
+        tool.inputMode === 'sketch' &&
+        tool.state.stage === 'drawing' &&
+        !tool.state.strokeLocked;
+      const penDrawing = tool.inputMode === 'pen' && tool.state.stage === 'drawing';
+      const strokeLocked = tool.isSketchStrokeLocked();
+
+      if (strokeLocked && !this.workspace.curveNodeEditMode) {
+        if (this.tryStartGizmoTransform(e, id)) {
+          this.invalidate();
+          return;
+        }
+      } else if (sketching || penDrawing) {
+        e.preventDefault();
+        if (tool.inputMode === 'sketch') {
+          (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+        }
+        this.rebindActiveControls();
+        const pane = this.panes.get(id);
+        if (pane?.controls) {
+          const depth = pane.camera.position.distanceTo(pane.controls.target);
+          tool.setDepthHint(depth);
+        }
+        this.workspace.input.begin('tool');
         this.syncOrbitEnabled();
+        tool.begin(this.pointerInput(e, id), this.session!.context());
+        if (tool.inputMode === 'pen') {
+          this.workspace.input.end('tool');
+          this.syncOrbitEnabled();
+        }
+        this.invalidate();
+        return;
+      } else if (tool.state.stage === 'idle') {
+        if (this.tryStartGizmoTransform(e, id)) {
+          this.invalidate();
+          return;
+        }
+        const hit = this.resolvePointerHit(e, id);
+        if (hit) {
+          this.pickSelection(e, id);
+          if (this.workspace.curveNodeEditMode) {
+            this.workspace.setCurveNodeEditMode(false);
+          }
+          this.syncGizmo();
+          this.invalidate();
+          return;
+        }
+        e.preventDefault();
+        if (tool.inputMode === 'sketch') {
+          (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+        }
+        this.rebindActiveControls();
+        const pane = this.panes.get(id);
+        if (pane?.controls) {
+          const depth = pane.camera.position.distanceTo(pane.controls.target);
+          tool.setDepthHint(depth);
+        }
+        this.workspace.input.begin('tool');
+        this.syncOrbitEnabled();
+        tool.begin(this.pointerInput(e, id), this.session!.context());
+        this.syncOrbitEnabled();
+        this.invalidate();
+        return;
       }
-      this.invalidate();
-      return;
     }
 
     if (tool instanceof DrawPolyTool) {
+      if (this.tryStartGizmoTransform(e, id)) {
+        this.invalidate();
+        return;
+      }
       e.preventDefault();
       this.rebindActiveControls();
       if (tool.state.createdInChain.length === 0) {
@@ -1227,6 +1444,21 @@ export class ViewportEngine {
       return;
     }
 
+    if (tool instanceof MeshSculptTool) {
+      const input = this.meshSculptPointerInput(e, id);
+      e.preventDefault();
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      this.rebindActiveControls();
+      this.workspace.input.begin('tool');
+      this.syncOrbitEnabled();
+      tool.updatePreview(input, this.session!.context());
+      tool.begin(input, this.session!.context());
+      this.updateMeshSculptBrushPreview(tool);
+      this.interactionOverlay.updateTransform(e, tool.statusLine());
+      this.invalidate();
+      return;
+    }
+
     if (tool instanceof TerrainObjectTool) {
       const input = this.terrainPointerInput(e, id);
       if (!input.worldPosition) return;
@@ -1267,33 +1499,7 @@ export class ViewportEngine {
       return;
     }
 
-    const gizmoHit = this.pickGizmo(e, id);
-    if (gizmoHit && this.session) {
-      e.preventDefault();
-      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-      const started = transform?.begin({
-        type: gizmoHit.type,
-        source: 'gizmo',
-        viewportId: id,
-        pointer: this.toPointerSample(e, id),
-        constraint: gizmoHit.constraint,
-        camera: this.getCameraAxes(id),
-      }) ?? false;
-      if (!started) {
-        this.gizmoDragging = false;
-        this.gizmo.setActiveHandle(null);
-        this.workspace.input.end('transform');
-        this.syncOrbitEnabled();
-        this.syncGizmo();
-        this.invalidate();
-        return;
-      }
-      this.gizmoDragging = true;
-      this.modifierPreview.root.visible = false;
-      if (this.renderer) this.renderer.domElement.style.cursor = 'grabbing';
-      this.gizmo.setActiveHandle(gizmoHit.handleId);
-      this.workspace.input.begin('transform');
-      this.syncOrbitEnabled();
+    if (this.tryStartGizmoTransform(e, id)) {
       this.invalidate();
       return;
     }
@@ -1328,6 +1534,12 @@ export class ViewportEngine {
 
   private onPointerUp = (e: PointerEvent): void => {
     if (!this.session || !this.workspace) return;
+    if (this.viewportNavDrag && e.button === 0) {
+      this.viewportNavDrag = null;
+      if (this.renderer) this.renderer.domElement.style.cursor = '';
+      this.invalidate();
+      return;
+    }
     if (this.curvePointDrag && e.button === 0) {
       this.finishCurvePointDrag();
       return;
@@ -1358,9 +1570,10 @@ export class ViewportEngine {
       doodle instanceof CreateDoodleTool &&
       doodle.inputMode === 'sketch' &&
       doodle.state.stage === 'drawing' &&
+      !doodle.state.strokeLocked &&
       e.button === 0
     ) {
-      doodle.confirm(this.session.context());
+      doodle.lockSketchStroke(this.session.context());
       this.workspace.input.end('tool');
       this.syncOrbitEnabled();
       this.invalidate();
@@ -1374,6 +1587,14 @@ export class ViewportEngine {
       return;
     }
     if (doodle instanceof TerrainSculptTool && doodle.dragging && e.button === 0) {
+      doodle.endStroke(this.session.context());
+      this.workspace.input.end('tool');
+      this.interactionOverlay.updateTransform(null, '');
+      this.syncOrbitEnabled();
+      this.invalidate();
+      return;
+    }
+    if (doodle instanceof MeshSculptTool && doodle.dragging && e.button === 0) {
       doodle.endStroke(this.session.context());
       this.workspace.input.end('tool');
       this.interactionOverlay.updateTransform(null, '');
@@ -1419,12 +1640,22 @@ export class ViewportEngine {
   };
 
   private onPointerCancel = (): void => {
+    if (this.viewportNavDrag) {
+      this.viewportNavDrag = null;
+      if (this.renderer) this.renderer.domElement.style.cursor = '';
+    }
     if (this.curvePointDrag) this.finishCurvePointDrag();
     if (this.draftCurvePointDrag) this.finishDraftCurvePointDrag();
     if (this.seamStroke) this.finishSeamStroke();
     if (this.painting3D) this.endPaint3D();
     const terrain = this.session?.tools.getActive();
     if (terrain instanceof TerrainSculptTool && terrain.dragging && this.session && this.workspace) {
+      terrain.cancel(this.session.context());
+      this.workspace.input.end('tool');
+      this.interactionOverlay.updateTransform(null, '');
+      this.syncOrbitEnabled();
+    }
+    if (terrain instanceof MeshSculptTool && terrain.dragging && this.session && this.workspace) {
       terrain.cancel(this.session.context());
       this.workspace.input.end('tool');
       this.interactionOverlay.updateTransform(null, '');
@@ -1975,6 +2206,50 @@ export class ViewportEngine {
     };
   }
 
+  private meshSculptPointerInput(e: PointerEvent, paneId: ViewId) {
+    const input = this.pointerInput(e, paneId);
+    if (!this.session) return input;
+    const hit = raycastSculptTarget(
+      this.session.document,
+      this.session.selection.state.activeObjectId,
+      input.rayOrigin,
+      input.rayDirection,
+    );
+    return {
+      ...input,
+      worldPosition: hit?.worldPosition ?? null,
+    };
+  }
+
+  private updateMeshSculptBrushPreview(tool: MeshSculptTool): void {
+    const hit = tool.previewHit;
+    if (!hit) {
+      this.terrainBrushPreview.visible = false;
+      return;
+    }
+    this.terrainBrushPreview.visible = true;
+    const offset = 0.01;
+    this.terrainBrushPreview.position.set(
+      hit.position.x + hit.normal.x * offset,
+      hit.position.y + hit.normal.y * offset,
+      hit.position.z + hit.normal.z * offset,
+    );
+    this.terrainBrushPreview.scale.setScalar(tool.radius);
+    const up = new Vector3(0, 1, 0);
+    const normal = new Vector3(hit.normal.x, hit.normal.y, hit.normal.z);
+    this.terrainBrushPreview.quaternion.setFromUnitVectors(up, normal.normalize());
+    const material = this.terrainBrushPreview.material as LineBasicMaterial;
+    material.color.setHex(
+      tool.mode === 'grab' ? 0x6eb5ff
+        : tool.mode === 'smooth' ? 0x74d68b
+          : tool.mode === 'flatten' ? 0xffc45c
+            : tool.mode === 'pinch' ? 0xff7eb6
+              : tool.mode === 'crease' ? 0xd9a066
+                : tool.mode === 'noise' ? 0xb18cff
+                  : 0xff8c28,
+    );
+  }
+
   private updateTerrainBrushPreview(
     input: ReturnType<ViewportEngine['pointerInput']>,
     tool: TerrainSculptTool,
@@ -2450,6 +2725,7 @@ export class ViewportEngine {
     if (
       (
         !(terrain instanceof TerrainSculptTool) &&
+        !(terrain instanceof MeshSculptTool) &&
         !(terrain instanceof TerrainObjectTool) &&
         !(terrain instanceof TerrainFeatureTool)
       ) ||
@@ -2468,7 +2744,7 @@ export class ViewportEngine {
   };
 
   private syncOverlays(): void {
-    if (!this.session) return;
+    if (!this.session || !this.workspace) return;
     const doc = this.session.document;
     this.overlays.sync(
       this.session.selection.state,
@@ -2484,18 +2760,41 @@ export class ViewportEngine {
       activeTool instanceof CreateDoodleTool
         ? activeTool.getDraftOperation()
         : null;
+    const doodle =
+      activeTool instanceof CreateDoodleTool ? activeTool : null;
+    const penDrawing = doodle?.inputMode === 'pen' && doodle.state.stage === 'drawing';
+    const sketchDrawing =
+      doodle?.inputMode === 'sketch' &&
+      doodle.state.stage === 'drawing' &&
+      !doodle.state.strokeLocked;
+    const sketchLocked = doodle?.isSketchStrokeLocked() ?? false;
+    const pointEditMode = this.workspace.curveNodeEditMode;
+    const activeId = this.session.selection.state.activeObjectId;
+    const object = activeId ? doc.objects.get(activeId) ?? null : null;
+    const hasCommittedCurve = !!object && !!readCurveOperation(object.metadata.curveOperation);
+    const editNodes =
+      penDrawing || (pointEditMode && (sketchLocked || hasCommittedCurve));
+    const showDraftPath = sketchDrawing || penDrawing || (pointEditMode && sketchLocked);
+    const curveOptions = {
+      editNodes,
+      showDraftPath,
+      selectedIndex: this.workspace.selectedCurvePointIndex,
+    };
     if (draft) {
       this.curveControls.syncDraft(
         this.scene,
         draft,
-        activeTool instanceof CreateDoodleTool ? activeTool.state.previewPoint : null,
+        doodle?.state.previewPoint ?? null,
+        curveOptions,
       );
       return;
     }
-    const activeId = this.session.selection.state.activeObjectId;
-    const object = activeId ? doc.objects.get(activeId) ?? null : null;
     const operation = readCurveOperation(object?.metadata.curveOperation);
-    this.curveControls.sync(activeId ? this.handles.get(activeId) ?? null : null, operation);
+    this.curveControls.sync(
+      activeId ? this.handles.get(activeId) ?? null : null,
+      operation,
+      curveOptions,
+    );
   }
 
   private bindPointer(): void {
@@ -2537,6 +2836,13 @@ export class ViewportEngine {
       return;
     }
     if (tool instanceof TerrainSculptTool && this.session) {
+      e.preventDefault();
+      tool.setRadius(tool.radius * (e.deltaY < 0 ? 1.12 : 0.89), this.session.context());
+      this.interactionOverlay.updateTransform(e, tool.statusLine());
+      this.invalidate();
+      return;
+    }
+    if (tool instanceof MeshSculptTool && this.session) {
       e.preventDefault();
       tool.setRadius(tool.radius * (e.deltaY < 0 ? 1.12 : 0.89), this.session.context());
       this.interactionOverlay.updateTransform(e, tool.statusLine());
@@ -2591,18 +2897,21 @@ export class ViewportEngine {
   }
 
   private pickCurveControl(e: PointerEvent, paneId: ViewId): CurveControlTarget | null {
-    if (!this.host || !this.session) return null;
-    if (this.session.selection.state.mode !== 'object') return null;
+    if (!this.host || !this.session || !this.workspace) return null;
     const tool = this.session.tools.getActive();
-    const draft =
-      tool instanceof CreateDoodleTool
-        ? tool.getDraftOperation()
-        : null;
-    if (!draft) {
-      const activeId = this.session.selection.state.activeObjectId;
-      const object = activeId ? this.session.document.objects.get(activeId) : null;
-      if (!object || !readCurveOperation(object.metadata.curveOperation)) return null;
-    }
+    const doodle = tool instanceof CreateDoodleTool ? tool : null;
+    const penDrawing = doodle?.inputMode === 'pen' && doodle.state.stage === 'drawing';
+    const sketchLocked = doodle?.isSketchStrokeLocked() ?? false;
+    const canEditDraft =
+      penDrawing || (this.workspace.curveNodeEditMode && sketchLocked);
+    const activeId = this.session.selection.state.activeObjectId;
+    const object = activeId ? this.session.document.objects.get(activeId) : null;
+    const hasCommittedCurve = !!object && !!readCurveOperation(object.metadata.curveOperation);
+    const canEditCommitted =
+      this.workspace.curveNodeEditMode &&
+      this.session.selection.state.mode === 'object' &&
+      hasCommittedCurve;
+    if (!canEditDraft && !canEditCommitted) return null;
     const pane = this.panes.get(paneId);
     const viewport = this.lastRects.find((rect) => rect.id === paneId);
     if (!pane || !viewport) return null;
@@ -2638,6 +2947,7 @@ export class ViewportEngine {
             : tool.state.handlesOut[target.index];
       const axes = this.getCameraAxes(paneId);
       if (!point || !axes) return false;
+      this.workspace.setSelectedCurvePointIndex(target.index);
       this.draftCurvePointDrag = {
         paneId,
         pointerId: e.pointerId,
@@ -2669,6 +2979,7 @@ export class ViewportEngine {
     const axes = this.getCameraAxes(paneId);
     if (!localPoint || !axes) return false;
     const world = handle.group.localToWorld(new Vector3(localPoint.x, localPoint.y, localPoint.z));
+    this.workspace.setSelectedCurvePointIndex(target.index);
     this.curvePointDrag = {
       paneId,
       pointerId: e.pointerId,
@@ -2790,6 +3101,38 @@ export class ViewportEngine {
     this.session.requestRedraw();
   }
 
+  private tryStartGizmoTransform(e: PointerEvent, paneId: ViewId): boolean {
+    if (!this.host || !this.session || !this.workspace || this.isTextureFaceEditing()) return false;
+    const gizmoHit = this.pickGizmo(e, paneId);
+    if (!gizmoHit) return false;
+    e.preventDefault();
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    const started =
+      this.session.transform.begin({
+        type: gizmoHit.type,
+        source: 'gizmo',
+        viewportId: paneId,
+        pointer: this.toPointerSample(e, paneId),
+        constraint: gizmoHit.constraint,
+        camera: this.getCameraAxes(paneId),
+      }) ?? false;
+    if (!started) {
+      this.gizmoDragging = false;
+      this.gizmo.setActiveHandle(null);
+      this.workspace.input.end('transform');
+      this.syncOrbitEnabled();
+      this.syncGizmo();
+      return false;
+    }
+    this.gizmoDragging = true;
+    this.modifierPreview.root.visible = false;
+    if (this.renderer) this.renderer.domElement.style.cursor = 'grabbing';
+    this.gizmo.setActiveHandle(gizmoHit.handleId);
+    this.workspace.input.begin('transform');
+    this.syncOrbitEnabled();
+    return true;
+  }
+
   private pickGizmo(e: PointerEvent, paneId: ViewId) {
     if (!this.host || !this.session) return null;
     if (this.session.transform.prefs.gizmoMode === 'select') return null;
@@ -2901,6 +3244,7 @@ export class ViewportEngine {
     const activeTool = this.session.tools.getActive();
     const terrainEditing =
       activeTool instanceof TerrainSculptTool ||
+      activeTool instanceof MeshSculptTool ||
       activeTool instanceof TerrainObjectTool ||
       activeTool instanceof TerrainFeatureTool;
     const show =

@@ -30,14 +30,20 @@ describe('StrokeInflateBuilder', () => {
       points: circlePoints(20, 1),
       thickness: 0.1,
       outlineSegments: 16,
+      profile: 'sharp',
     });
     expect(mesh.faces.size).toBeGreaterThan(16);
-    expect(mesh.vertices.size).toBe(32); // front + back rings
+    expect(mesh.vertices.size).toBeGreaterThan(24);
     const report = validateMeshFull(mesh);
     expect(report.issues.filter((i) => i.severity === 'error')).toEqual([]);
     for (const v of mesh.vertices.values()) {
       expect(Number.isFinite(v.position.x)).toBe(true);
     }
+    const sidesByFace = new Map<string, number>();
+    for (const corner of mesh.faceCorners.values()) {
+      sidesByFace.set(corner.faceId, (sidesByFace.get(corner.faceId) ?? 0) + 1);
+    }
+    expect([...sidesByFace.values()].some((count) => count === 4)).toBe(true);
   });
 
   it('uses more outline verts for medium poly', () => {
@@ -47,16 +53,29 @@ describe('StrokeInflateBuilder', () => {
     expect(mid.vertices.size).toBeGreaterThan(low.vertices.size);
   });
 
-  it('builds a valid beveled soft shape with controlled topology', () => {
+  it('builds a valid soft blob dome with quad rings and cap transitions', () => {
+    const outline = buildInflatedDoodle({
+      points: circlePoints(30, 1),
+      thickness: 0.12,
+      outlineSegments: 16,
+      profile: 'sharp',
+    });
     const mesh = buildInflatedDoodle({
       points: circlePoints(30, 1),
       thickness: 0.12,
       outlineSegments: 16,
       profile: 'soft',
     });
-    expect(mesh.vertices.size).toBe(64); // four clean outline rings
+    expect(mesh.vertices.size).toBeGreaterThan(outline.vertices.size);
     expect(mesh.faces.size).toBeGreaterThan(50);
     expect(validateMeshFull(mesh).issues.filter((i) => i.severity === 'error')).toEqual([]);
+    const sidesByFace = new Map<string, number>();
+    for (const corner of mesh.faceCorners.values()) {
+      sidesByFace.set(corner.faceId, (sidesByFace.get(corner.faceId) ?? 0) + 1);
+    }
+    const sideCounts = [...sidesByFace.values()];
+    expect(sideCounts.some((count) => count === 4)).toBe(true);
+    expect(sideCounts.some((count) => count === 3)).toBe(true);
     const layerId = mesh.defaultUvLayerId!;
     const uvs = [...mesh.faceCorners.values()]
       .map((corner) => corner.uvs.get(layerId))
@@ -67,5 +86,19 @@ describe('StrokeInflateBuilder', () => {
     expect(Math.max(...uvs.map((uv) => uv.y))).toBeCloseTo(1);
     expect(new Set(uvs.map((uv) => `${uv.x.toFixed(5)}:${uv.y.toFixed(5)}`)).size)
       .toBeLessThan(uvs.length / 2);
+  });
+
+  it('builds a closed outline into a rounded capsule solid', () => {
+    const mesh = buildInflatedDoodle({
+      points: circlePoints(24, 1),
+      thickness: 0.15,
+      outlineSegments: 16,
+      profile: 'capsule',
+    });
+    expect(mesh.vertices.size).toBeGreaterThan(32);
+    expect(mesh.faces.size).toBeGreaterThan(32);
+    expect(validateMeshFull(mesh).issues.filter((i) => i.severity === 'error')).toEqual([]);
+    const zs = [...mesh.vertices.values()].map((vertex) => vertex.position.z);
+    expect(Math.max(...zs) - Math.min(...zs)).toBeGreaterThan(0.2);
   });
 });

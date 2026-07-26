@@ -31,6 +31,7 @@ import {
   type PathProfile,
 } from '@/core/mesh/builders/PathOutputBuilder';
 import type { CurveSweepCapStyle } from '@/core/mesh/builders/CurveSweepBuilder';
+import { finalizeCurveMeshUvs } from '@/core/mesh/builders/CurveMeshUv';
 
 export type CurveStyle =
   | 'soft'
@@ -97,6 +98,8 @@ export type CurveOperation = {
   pathSeed: number;
   pathKeepInstances: boolean;
   pathSourceObjectId: string | null;
+  /** Blob shoulder fullness 0–1 (blocky3D default 0.65). */
+  blobInflation: number;
 };
 
 const RADIAL_SEGMENTS: Record<CurveResolution, number> = { low: 6, medium: 10 };
@@ -148,6 +151,7 @@ export function curveOperationFromStroke(options: {
   pathSeed?: number;
   pathKeepInstances?: boolean;
   pathSourceObjectId?: string | null;
+  blobInflation?: number;
 }): CurveOperation {
   const radius = clampRadius(options.radius);
   let points = options.points.map((point) => ({ ...point }));
@@ -169,9 +173,7 @@ export function curveOperationFromStroke(options: {
     cyclic:
       options.solidMode === 'lathe'
         ? false
-        : isPathStyle(options.style)
-          ? options.cyclic
-          : true,
+        : options.cyclic,
     inputMode: options.inputMode ?? 'sketch',
     startScale: clampScale(options.startScale ?? 1),
     endScale: clampScale(options.endScale ?? 1),
@@ -220,6 +222,7 @@ export function curveOperationFromStroke(options: {
     pathKeepInstances: options.pathKeepInstances !== false,
     pathSourceObjectId:
       typeof options.pathSourceObjectId === 'string' ? options.pathSourceObjectId : null,
+    blobInflation: clampRange(options.blobInflation, 0, 1, 0.65),
   };
 }
 
@@ -231,9 +234,7 @@ export function evaluateCurveOperation(
   const cyclic =
     operation.solidMode === 'lathe'
       ? false
-      : isPathStyle(operation.style)
-        ? operation.cyclic
-        : true;
+      : operation.cyclic;
   let points = evaluateCurvePath(operation);
   if (points.length < 2) {
     const point = points[0] ?? v3();
@@ -246,8 +247,9 @@ export function evaluateCurveOperation(
       operation.resolution === 'medium' ? 2 : 1,
     );
   }
+  let mesh: EditableMesh;
   if (operation.solidMode === 'lathe') {
-    return buildLathe({
+    mesh = buildLathe({
       points,
       axis: operation.latheAxis,
       radialSegments: operation.latheSegments,
@@ -258,9 +260,8 @@ export function evaluateCurveOperation(
       capEnd: operation.latheCaps,
       name: curveOperationLabel(operation),
     });
-  }
-  if (operation.style === 'tube') {
-    return buildPathOutput({
+  } else if (operation.style === 'tube') {
+    mesh = buildPathOutput({
       points,
       output: operation.pathOutput,
       radius: radius * operation.pathRadiusScale,
@@ -291,21 +292,28 @@ export function evaluateCurveOperation(
       sourceMesh: pathSourceMesh,
       name: curveOperationLabel(operation),
     });
-  }
-  if (operation.style === 'capsule') {
-    return buildCurveCapsule({
-      points,
-      radius,
-      radialSegments: Math.max(12, operation.pathRadialSegments),
-      profile: 'round',
-      cyclic,
-      capStart: true,
-      capEnd: true,
-      pathSpacingScale: operation.resolution === 'medium' ? 0.7 : 1,
-      name: curveOperationLabel(operation),
-    });
-  }
-  if (isSweepStyle(operation.style)) {
+  } else if (operation.style === 'capsule') {
+    mesh = operation.cyclic
+      ? buildInflatedDoodle({
+          points,
+          thickness: radius,
+          outlineSegments: OUTLINE_SEGMENTS[operation.resolution],
+          profile: 'capsule',
+          radialSegments: Math.max(12, operation.pathRadialSegments),
+          name: 'Capsule Outline',
+        })
+      : buildCurveCapsule({
+          points,
+          radius,
+          radialSegments: Math.max(12, operation.pathRadialSegments),
+          profile: 'round',
+          cyclic,
+          capStart: true,
+          capEnd: true,
+          pathSpacingScale: operation.resolution === 'medium' ? 0.7 : 1,
+          name: curveOperationLabel(operation),
+        });
+  } else if (isSweepStyle(operation.style)) {
     const common = {
       points,
       radius,
@@ -329,15 +337,28 @@ export function evaluateCurveOperation(
             : 1,
       name: curveOperationLabel(operation),
     } as const;
-    return operation.style === 'rope' ? buildCurveRope(common) : buildCurveSweep(common);
+    mesh = operation.style === 'rope' ? buildCurveRope(common) : buildCurveSweep(common);
+  } else {
+    const isBlob = operation.style === 'soft';
+    mesh = buildInflatedDoodle({
+      points,
+      thickness: isBlob ? radius * 1.35 : radius,
+      outlineSegments: OUTLINE_SEGMENTS[operation.resolution],
+      profile: isBlob ? 'soft' : 'sharp',
+      inflation: isBlob ? operation.blobInflation : 0,
+      radialSegments: Math.max(12, operation.pathRadialSegments),
+      closed: cyclic,
+      name:
+        isBlob
+          ? 'Soft Curve Profile'
+          : operation.style === 'sharp'
+            ? 'Sharp Curve Profile'
+            : curveOperationLabel(operation),
+    });
   }
-  return buildInflatedDoodle({
-    points,
-    thickness: operation.style === 'soft' ? radius * 1.35 : radius,
-    outlineSegments: OUTLINE_SEGMENTS[operation.resolution],
-    profile: operation.style === 'soft' ? 'soft' : 'sharp',
-    name: operation.style === 'soft' ? 'Soft Curve Profile' : 'Sharp Curve Profile',
-  });
+
+  finalizeCurveMeshUvs(mesh, operation.style, cyclic);
+  return mesh;
 }
 
 export function serializeCurveOperation(operation: CurveOperation): string {
@@ -368,9 +389,7 @@ export function readCurveOperation(raw: string | undefined): CurveOperation | nu
       cyclic:
         parsed.solidMode === 'lathe'
           ? false
-          : isPathStyle(parsed.style)
-            ? parsed.cyclic === true
-            : true,
+          : parsed.cyclic === true,
       inputMode: parsed.inputMode === 'pen' ? 'pen' : 'sketch',
       startScale: clampScale(parsed.startScale ?? 1),
       endScale: clampScale(parsed.endScale ?? 1),
@@ -414,6 +433,7 @@ export function readCurveOperation(raw: string | undefined): CurveOperation | nu
       pathKeepInstances: parsed.pathKeepInstances !== false,
       pathSourceObjectId:
         typeof parsed.pathSourceObjectId === 'string' ? parsed.pathSourceObjectId : null,
+      blobInflation: clampRange(parsed.blobInflation, 0, 1, 0.65),
       ...readHandles(parsed.points, parsed.handlesIn, parsed.handlesOut, parsed.cyclic === true),
     };
   } catch {
@@ -458,9 +478,7 @@ export function evaluateCurvePath(operation: CurveOperation): Vec3[] {
   const cyclic =
     operation.solidMode === 'lathe'
       ? false
-      : isPathStyle(operation.style)
-        ? operation.cyclic
-        : true;
+      : operation.cyclic;
   const steps = operation.resolution === 'medium' ? 8 : 4;
   if (operation.curveType === 'bezier') {
     const defaults = defaultBezierHandles(anchors, cyclic);

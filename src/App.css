@@ -113,6 +113,16 @@ body,
   background: color-mix(in srgb, #ff8c28 16%, var(--btn));
 }
 
+.selection-switch .tool {
+  padding: 0.22rem 0.42rem;
+  font-size: 0.72rem;
+}
+
+.gizmo-switch .tool {
+  padding: 0.22rem 0.42rem;
+  font-size: 0.72rem;
+}
+
 .bar-left,
 .bar-right {
   display: flex;
@@ -163,6 +173,11 @@ body,
   border-radius: 6px;
   background: #10151c;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.48);
+}
+
+.desktop-menu-bar.is-end .desktop-menu-popup {
+  left: auto;
+  right: 0;
 }
 
 .desktop-menu-item {
@@ -1647,6 +1662,336 @@ input[type="range"]:disabled {
   font-weight: 600;
 }
 
+/* Sculpt workspace — compact flat side rail */
+.sculpt-panel {
+  --sculpt-panel-w: 228px;
+  flex: 0 0 var(--sculpt-panel-w);
+  width: var(--sculpt-panel-w);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--line);
+  background: #0d1117;
+  z-index: 2;
+}
+
+.sculpt-panel-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.75rem 0.8rem 0.65rem;
+  border-bottom: 1px solid var(--line);
+  background: #0a0d12;
+}
+
+.sculpt-panel-kicker {
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.sculpt-panel-header strong {
+  font-family: Syne, sans-serif;
+  font-weight: 700;
+  font-size: 0.92rem;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.sculpt-panel-header p {
+  margin: 0.1rem 0 0;
+  color: var(--muted);
+  font-size: 0.66rem;
+  line-height: 1.45;
+}
+
+.sculpt-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.55rem 0.7rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.sculpt-section-label {
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.sculpt-section-head,
+.sculpt-object-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+}
+
+.sculpt-object-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+}
+
+.sculpt-stat-pill {
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.58rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sculpt-field {
+  display: block;
+}
+
+.sculpt-select {
+  appearance: none;
+  width: 100%;
+  padding: 0.32rem 1.35rem 0.32rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--text);
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='none' stroke='%237f8796' stroke-width='1.2' d='M1 1l4 4 4-4'/%3E%3C/svg%3E")
+    no-repeat right 0.45rem center / 10px,
+    transparent;
+  font: 500 0.72rem/1.2 'IBM Plex Sans', sans-serif;
+}
+
+.sculpt-select:focus {
+  outline: 1px solid color-mix(in srgb, #ff8c28 55%, var(--line));
+}
+
+.sculpt-empty-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.66rem;
+  line-height: 1.4;
+}
+
+.sculpt-quick-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.25rem;
+}
+
+.sculpt-action-btn {
+  min-height: 1.85rem;
+  padding: 0.32rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  background: transparent;
+  font: 500 0.68rem/1 'IBM Plex Sans', sans-serif;
+  cursor: pointer;
+  transition: border-color 100ms ease, color 100ms ease, background 100ms ease;
+}
+
+.sculpt-action-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, #ff8c28 50%, var(--line));
+  color: #ffe0c2;
+  background: color-mix(in srgb, #ff8c28 6%, transparent);
+}
+
+.sculpt-action-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.sculpt-action-primary {
+  border-color: color-mix(in srgb, #ff8c28 45%, var(--line));
+  color: #ffd2a8;
+}
+
+.sculpt-brush-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.sculpt-active-brush {
+  color: #ffb064;
+  font-size: 0.64rem;
+  font-weight: 600;
+}
+
+.sculpt-brush-hint {
+  margin: -0.12rem 0 0;
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.sculpt-brush-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.25rem;
+}
+
+.sculpt-brush-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  min-height: 3.1rem;
+  padding: 0.32rem 0.22rem 0.38rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+  font: 500 0.62rem/1.1 'IBM Plex Sans', sans-serif;
+  cursor: pointer;
+  transition: border-color 100ms ease, color 100ms ease, background 100ms ease;
+}
+
+.sculpt-brush-btn:hover {
+  border-color: color-mix(in srgb, #ff8c28 45%, var(--line));
+  color: var(--text);
+}
+
+.sculpt-brush-btn.is-active {
+  border-color: #ff8c28;
+  color: #ffd2a8;
+  background: color-mix(in srgb, #ff8c28 8%, transparent);
+}
+
+.sculpt-brush-icon {
+  display: grid;
+  place-items: center;
+  width: 1.3rem;
+  height: 1.3rem;
+  color: currentColor;
+}
+
+.sculpt-brush-icon svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sculpt-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+}
+
+.sculpt-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.sculpt-slider-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
+.sculpt-slider-label b {
+  color: var(--text);
+  font-size: 0.68rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.sculpt-range {
+  width: 100%;
+  accent-color: #ff8c28;
+}
+
+.sculpt-falloff {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.sculpt-falloff-toggle {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.22rem;
+}
+
+.sculpt-falloff-toggle button {
+  min-height: 1.7rem;
+  padding: 0.26rem 0.18rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+  font: 500 0.62rem/1 'IBM Plex Sans', sans-serif;
+  cursor: pointer;
+}
+
+.sculpt-falloff-toggle button:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, #ff8c28 40%, var(--line));
+}
+
+.sculpt-falloff-toggle button.is-active {
+  color: #ffd2a8;
+  border-color: #ff8c28;
+  background: color-mix(in srgb, #ff8c28 8%, transparent);
+}
+
+.sculpt-tip {
+  margin: 0.08rem 0 0;
+  padding: 0.35rem 0.42rem;
+  border-radius: 4px;
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  font-size: 0.62rem;
+  line-height: 1.4;
+}
+
+.sculpt-shortcuts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.22rem 0.35rem;
+  margin-top: auto;
+  padding: 0.42rem 0.48rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.58rem;
+  line-height: 1.25;
+}
+
+@media (max-width: 1100px) {
+  .sculpt-panel {
+    --sculpt-panel-w: 212px;
+  }
+
+  .sculpt-brush-btn {
+    min-height: 2.9rem;
+    font-size: 0.58rem;
+  }
+}
+
 .terrain-placement-settings {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 88px;
@@ -2001,6 +2346,14 @@ input[type="range"]:disabled {
   gap: 0.35rem;
 }
 
+.material-preset-grid .tool {
+  min-height: 2.1rem;
+  padding: 0.2rem 0.35rem;
+  font-size: 0.68rem;
+  line-height: 1.15;
+  white-space: normal;
+}
+
 .modelling-canvas {
   position: absolute;
   inset: 0;
@@ -2079,6 +2432,11 @@ input[type="range"]:disabled {
   border-color: #ffae53;
 }
 
+.viewport-chrome-pane {
+  position: absolute;
+  pointer-events: none;
+}
+
 .viewport-chrome {
   pointer-events: none;
   position: absolute;
@@ -2124,6 +2482,70 @@ input[type="range"]:disabled {
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.viewport-nav-toolbar {
+  position: absolute;
+  display: flex;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  backdrop-filter: none;
+  pointer-events: auto;
+}
+
+.viewport-nav-btn {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--muted) 52%, transparent);
+  border-radius: 3px;
+  color: color-mix(in srgb, var(--muted) 90%, white);
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  touch-action: none;
+  transition: color 100ms ease, border-color 100ms ease, background 100ms ease;
+}
+
+.viewport-nav-btn:hover:not(:disabled),
+.viewport-nav-btn:focus-visible:not(:disabled) {
+  color: #eef2f6;
+  border-color: color-mix(in srgb, #ff8c28 70%, var(--muted));
+  background: color-mix(in srgb, #ff8c28 8%, transparent);
+  outline: none;
+}
+
+.viewport-nav-btn.is-active {
+  color: #ffb86a;
+  border-color: #ff8c28;
+  background: color-mix(in srgb, #ff8c28 12%, transparent);
+  box-shadow: none;
+}
+
+.viewport-nav-btn:disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+}
+
+.viewport-nav-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.viewport-nav-maximize.is-active {
+  color: #8ec0ff;
+  border-color: color-mix(in srgb, #5b9cff 75%, var(--muted));
+  background: color-mix(in srgb, #5b9cff 10%, transparent);
 }
 
 .viewport-axis-gizmo {
