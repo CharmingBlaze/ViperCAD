@@ -15,6 +15,7 @@ import { cloneVec3, type Vec3 } from '@/core/math/Vec3';
 import {
   ensureTerrainPresetSource,
   terrainHeightAtLocalPoint,
+  terrainNormalAtLocalPoint,
   terrainPlacedObjects,
   type TerrainPropPreset,
 } from '@/core/terrain/TerrainProps';
@@ -40,6 +41,7 @@ export class TerrainObjectTool implements Tool {
   density = 4;
   randomYaw = true;
   randomScale = 0.22;
+  alignToSlope = false;
   placementMode: TerrainObjectPlacementMode = 'terrain';
   heightOffset = 0;
   /** Prevent the object's lowest face from occupying the terrain's exact depth. */
@@ -267,6 +269,7 @@ export class TerrainObjectTool implements Tool {
         this.placementMode === 'terrain' ? this.groundClearance : 0,
       ),
       terrainHeightOffset: String(this.heightOffset),
+      terrainAlignToSlope: this.alignToSlope && this.placementMode === 'terrain' ? 'true' : 'false',
     };
     copy.transform.position = {
       x: position.x,
@@ -285,6 +288,24 @@ export class TerrainObjectTool implements Tool {
       y: source.transform.scale.y * scaleVariation,
       z: source.transform.scale.z * scaleVariation,
     };
+    if (this.alignToSlope && this.placementMode === 'terrain' && this.terrainObjectId) {
+      const target = terrainTarget(context, this.terrainObjectId);
+      if (target) {
+        const local = inverseTransformPointApprox(copy.transform.position, target.object.transform);
+        const localNormal = terrainNormalAtLocalPoint(
+          target.object,
+          target.mesh,
+          local.x,
+          local.z,
+        );
+        const yaw = copy.transform.rotation.y;
+        copy.transform.rotation = {
+          x: Math.atan2(localNormal.z, localNormal.y),
+          y: yaw,
+          z: -Math.atan2(localNormal.x, localNormal.y),
+        };
+      }
+    }
     return copy;
   }
 }

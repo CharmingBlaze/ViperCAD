@@ -4,18 +4,21 @@ import { inverseTransformPointApprox, transformPoint, type Transform } from '@/c
 import {
   addVec3,
   dotVec3,
+  lengthSqVec3,
+  lerpVec3,
   scaleVec3,
   subVec3,
   type Vec3,
 } from '@/core/math/Vec3';
-import { faceVertexIds } from '@/core/mesh/EditableMesh';
+import { faceHalfEdgeIds, faceVertexIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
 import { computeFaceNormal } from '@/core/mesh/Normals';
 import {
   closestBoundaryEdgeToPoint,
-  knifeFace,
+  knifePath,
   type FaceEdgeHit,
+  type KnifePathHit,
 } from '@/core/mesh/ops/cut';
-import type { EditableMesh, FaceId } from '@/core/mesh/types';
+import type { EditableMesh, EdgeId, FaceId } from '@/core/mesh/types';
 import type { ModellingContext, Tool, ToolPointerInput } from './Tool';
 
 export type KnifeViewportPick = {
@@ -27,7 +30,8 @@ export type KnifeViewportPick = {
 };
 
 /**
- * Drag across a face to cut a chord between two boundary edges.
+ * Drag across one or more faces to cut a chord / path between boundary edges.
+ * Crossing onto an adjacent face inserts a hit on the shared edge.
  * Viewport supplies face picks via {@link setViewportPick} before begin/update.
  */
 export class KnifeTool implements Tool {
@@ -42,10 +46,14 @@ export class KnifeTool implements Tool {
 
   private viewportPick: KnifeViewportPick | null = null;
   private objectId: ObjectId | null = null;
-  private faceId: FaceId | null = null;
   private transform: Transform | null = null;
-  private entry: FaceEdgeHit | null = null;
+  /** Committed path hits (entry + any shared-edge crossings). */
+  private pathHits: KnifePathHit[] = [];
+  /** Local-space points matching pathHits for preview. */
+  private pathPoints: Vec3[] = [];
+  /** Tentative exit on the current face. */
   private exit: FaceEdgeHit | null = null;
+  private currentFaceId: FaceId | null = null;
   private planeOrigin: Vec3 | null = null;
   private planeNormal: Vec3 | null = null;
 
@@ -54,10 +62,10 @@ export class KnifeTool implements Tool {
   }
 
   getPreviewPoints(): Vec3[] {
-    if (!this.entry || !this.transform) return [];
-    const a = transformPoint(this.entry.point, this.transform);
-    const b = transformPoint((this.exit ?? this.entry).point, this.transform);
-    return [a, b];
+    if (!this.transform || !this.pathPoints.length) return [];
+    const points = [...this.pathPoints];
+    if (this.exit) points.push(this.exit.point);
+    return points.map((p) => transformPoint(p, this.transform!));
   }
 
   activate(context: ModellingContext): void {
@@ -100,9 +108,10 @@ export class KnifeTool implements Tool {
     }
 
     this.objectId = pick.objectId;
-    this.faceId = pick.faceId;
     this.transform = pick.transform;
-    this.entry = entry;
+    this.currentFaceId = pick.faceId;
+    this.pathHits = [{ faceId: pick.faceId, edgeId: entry.edgeId, factor: entry.factor }];
+    this.pathPoints = [{ ...entry.point }];
     this.exit = null;
     this.state.dragging = true;
     this.state.lastError = null;
@@ -111,24 +120,40 @@ export class KnifeTool implements Tool {
   }
 
   update(input: ToolPointerInput, context: ModellingContext): void {
-    if (!this.state.dragging || !this.objectId || !this.faceId || !this.entry) return;
+    if (!this.state.dragging || !this.objectId || !this.currentFaceId || !this.pathHits.length) return;
     const mesh = this.meshFor(context, this.objectId);
     if (!mesh) return;
 
-    let localPoint = this.viewportPick?.localPoint ?? null;
-    if (
-      !localPoint ||
-      this.viewportPick?.objectId !== this.objectId ||
-      this.viewportPick?.faceId !== this.faceId
-    ) {
+    const pick = this.viewportPick;
+    if (pick && pick.objectId === this.objectId && pick.faceId !== this.currentFaceId) {
+      // Crossed onto an adjacent face — pin shared-edge hit and continue.
+      const shared = sharedEdgeBetweenFaces(mesh, this.currentFaceId, pick.faceId);
+      if (shared) {
+        const last = this.pathHits[this.pathHits.length - 1]!;
+        if (last.edgeId !== shared.edgeId) {
+          const factor = shared.factorForPoint(pick.localPoint);
+          this.pathHits.push({
+            faceId: this.currentFaceId,
+            edgeId: shared.edgeId,
+            factor,
+          });
+          this.pathPoints.push(this.edgePoint(mesh, { faceId: this.currentFaceId, edgeId: shared.edgeId, factor }));
+        }
+        this.currentFaceId = pick.faceId;
+        this.cacheFacePlane(mesh, pick.faceId);
+      }
+    }
+
+    let localPoint = pick?.localPoint ?? null;
+    if (!localPoint || pick?.objectId !== this.objectId) {
       localPoint = this.intersectFacePlane(input);
     }
     if (!localPoint) return;
 
-    const exit = closestBoundaryEdgeToPoint(mesh, this.faceId, localPoint, {
-      excludeEdgeId: this.entry.edgeId,
+    const exclude = this.pathHits[this.pathHits.length - 1]!.edgeId;
+    this.exit = closestBoundaryEdgeToPoint(mesh, this.currentFaceId, localPoint, {
+      excludeEdgeId: exclude,
     });
-    this.exit = exit;
     this.touch(context);
   }
 
@@ -137,10 +162,26 @@ export class KnifeTool implements Tool {
   confirm(context: ModellingContext): void {
     if (!this.state.dragging) return;
     const objectId = this.objectId;
-    const faceId = this.faceId;
-    const entry = this.entry;
     const exit = this.exit;
-    if (!objectId || !faceId || !entry || !exit || entry.edgeId === exit.edgeId) {
+    if (!objectId || !this.currentFaceId || !exit || this.pathHits.length === 0) {
+      this.state.lastError = 'Drag across the face to a different edge';
+      this.reset();
+      this.touch(context);
+      return;
+    }
+
+    const hits: KnifePathHit[] = [
+      ...this.pathHits,
+      { faceId: this.currentFaceId, edgeId: exit.edgeId, factor: exit.factor },
+    ];
+    // Deduplicate consecutive identical hits.
+    const compact: KnifePathHit[] = [];
+    for (const hit of hits) {
+      const prev = compact[compact.length - 1];
+      if (prev && prev.edgeId === hit.edgeId && Math.abs(prev.factor - hit.factor) < 1e-6) continue;
+      compact.push(hit);
+    }
+    if (compact.length < 2) {
       this.state.lastError = 'Drag across the face to a different edge';
       this.reset();
       this.touch(context);
@@ -157,9 +198,9 @@ export class KnifeTool implements Tool {
     const result = runMeshTransaction(
       context.history,
       mesh,
-      'Knife Face',
+      compact.length > 2 ? 'Knife Path' : 'Knife Face',
       (m) => {
-        const cut = knifeFace(m, faceId, entry.edgeId, exit.edgeId, entry.factor, exit.factor);
+        const cut = knifePath(m, compact);
         if (!cut.ok) throw new Error(cut.error?.message ?? 'Knife failed');
         context.selection.applyTopologyChange(cut.change);
         return cut.change;
@@ -195,6 +236,16 @@ export class KnifeTool implements Tool {
     return context.document.meshes.get(object.meshId) ?? null;
   }
 
+  private edgePoint(mesh: EditableMesh, hit: KnifePathHit): Vec3 {
+    const ends = getEdgeVertices(mesh, hit.edgeId);
+    if (!ends) return { x: 0, y: 0, z: 0 };
+    return lerpVec3(
+      mesh.vertices.get(ends[0])!.position,
+      mesh.vertices.get(ends[1])!.position,
+      hit.factor,
+    );
+  }
+
   private cacheFacePlane(mesh: EditableMesh, faceId: FaceId): void {
     const verts = faceVertexIds(mesh, faceId);
     const first = mesh.vertices.get(verts[0]!)?.position;
@@ -209,7 +260,6 @@ export class KnifeTool implements Tool {
 
   private intersectFacePlane(input: ToolPointerInput): Vec3 | null {
     if (!this.planeOrigin || !this.planeNormal || !this.transform) return null;
-    // Transform world ray into local space via two points.
     const worldA = input.rayOrigin;
     const worldB = addVec3(input.rayOrigin, input.rayDirection);
     const localA = inverseTransformPointApprox(worldA, this.transform);
@@ -225,10 +275,11 @@ export class KnifeTool implements Tool {
   private reset(): void {
     this.state.dragging = false;
     this.objectId = null;
-    this.faceId = null;
     this.transform = null;
-    this.entry = null;
+    this.pathHits = [];
+    this.pathPoints = [];
     this.exit = null;
+    this.currentFaceId = null;
     this.planeOrigin = null;
     this.planeNormal = null;
     this.viewportPick = null;
@@ -238,4 +289,33 @@ export class KnifeTool implements Tool {
     this.state.revision += 1;
     context.requestRedraw();
   }
+}
+
+function sharedEdgeBetweenFaces(
+  mesh: EditableMesh,
+  faceA: FaceId,
+  faceB: FaceId,
+): { edgeId: EdgeId; factorForPoint: (point: Vec3) => number } | null {
+  for (const heId of faceHalfEdgeIds(mesh, faceA)) {
+    const he = mesh.halfEdges.get(heId);
+    if (!he?.twinHalfEdgeId) continue;
+    const twin = mesh.halfEdges.get(he.twinHalfEdgeId);
+    if (twin?.faceId !== faceB) continue;
+    const edgeId = he.edgeId;
+    return {
+      edgeId,
+      factorForPoint: (point: Vec3) => {
+        const ends = getEdgeVertices(mesh, edgeId);
+        if (!ends) return 0.5;
+        const a = mesh.vertices.get(ends[0])!.position;
+        const b = mesh.vertices.get(ends[1])!.position;
+        const ab = subVec3(b, a);
+        const ap = subVec3(point, a);
+        const abLenSq = lengthSqVec3(ab);
+        if (abLenSq < 1e-20) return 0.5;
+        return Math.max(0.0001, Math.min(0.9999, dotVec3(ap, ab) / abLenSq));
+      },
+    };
+  }
+  return null;
 }

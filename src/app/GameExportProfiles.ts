@@ -31,6 +31,11 @@ export function exportDiagnostics(document: ModelDocument, profile: ExportProfil
   if (stats.unappliedScales) warnings.push(`${stats.unappliedScales} object scale${stats.unappliedScales === 1 ? '' : 's'} will be exported as transforms.`);
   if (stats.missingLightmapUvs && (profile.id === 'unity' || profile.id === 'unreal')) warnings.push(`${stats.missingLightmapUvs} render mesh${stats.missingLightmapUvs === 1 ? '' : 'es'} have no lightmap UV channel.`);
   if (stats.oversizedMeshes) warnings.push(`${stats.oversizedMeshes} mesh${stats.oversizedMeshes === 1 ? '' : 'es'} exceed 100k triangles.`);
+  if (stats.hiddenLibraryObjects) {
+    warnings.push(
+      `${stats.hiddenLibraryObjects} terrain library/palette source${stats.hiddenLibraryObjects === 1 ? '' : 's'} will be omitted from export.`,
+    );
+  }
   return { errors, warnings, stats };
 }
 
@@ -45,12 +50,27 @@ export type GameReadiness = {
   drawCalls: number;
   unappliedScales: number;
   oversizedMeshes: number;
+  /** Palette / library brush sources omitted from engine export. */
+  hiddenLibraryObjects: number;
 };
+
+export function isExportExcludedObject(metadata: Record<string, string>): boolean {
+  return (
+    metadata.terrainPaletteSource === 'true' ||
+    metadata.terrainLibrarySource === 'true' ||
+    metadata.excludeFromExport === 'true'
+  );
+}
 
 export function gameReadiness(document: ModelDocument): GameReadiness {
   let vertices = 0, polygons = 0, triangles = 0, collisionObjects = 0;
   let missingLightmapUvs = 0, invalidMeshes = 0, drawCalls = 0, unappliedScales = 0, oversizedMeshes = 0;
+  let hiddenLibraryObjects = 0;
   for (const object of document.objects.values()) {
+    if (isExportExcludedObject(object.metadata)) {
+      hiddenLibraryObjects += 1;
+      continue;
+    }
     if (object.metadata.gameRole === 'collision') collisionObjects += 1;
     const mesh = object.meshId ? document.meshes.get(object.meshId) : null;
     if (!mesh) continue;
@@ -73,5 +93,17 @@ export function gameReadiness(document: ModelDocument): GameReadiness {
     }
     if (objectTriangles > 100_000) oversizedMeshes += 1;
   }
-  return { objects: document.objects.size, vertices, polygons, triangles, collisionObjects, missingLightmapUvs, invalidMeshes, drawCalls, unappliedScales, oversizedMeshes };
+  return {
+    objects: document.objects.size - hiddenLibraryObjects,
+    vertices,
+    polygons,
+    triangles,
+    collisionObjects,
+    missingLightmapUvs,
+    invalidMeshes,
+    drawCalls,
+    unappliedScales,
+    oversizedMeshes,
+    hiddenLibraryObjects,
+  };
 }

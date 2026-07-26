@@ -61,6 +61,207 @@ export function knifeFace(mesh: EditableMesh, faceId: FaceId, edgeA: EdgeId, edg
   return { ok: true, value: change, change, warnings: change.warnings };
 }
 
+export type KnifePathHit = {
+  faceId: FaceId;
+  edgeId: EdgeId;
+  factor: number;
+};
+
+/**
+ * Cut a polyline across one or more faces. Consecutive hits define chords;
+ * shared edges between adjacent faces are split once and the vertex is reused.
+ */
+export function knifePath(
+  mesh: EditableMesh,
+  hits: KnifePathHit[],
+): GeometryOpResult<TopologyChangeResult> {
+  const change = emptyTopologyChangeResult();
+  if (hits.length < 2) {
+    return fail(change, 'INSUFFICIENT_HITS', 'Knife path needs at least two edge hits', []);
+  }
+
+  // Single-face shortcut keeps prior knifeFace behaviour.
+  if (hits.length === 2 && hits[0]!.faceId === hits[1]!.faceId) {
+    return knifeFace(
+      mesh,
+      hits[0]!.faceId,
+      hits[0]!.edgeId,
+      hits[1]!.edgeId,
+      hits[0]!.factor,
+      hits[1]!.factor,
+    );
+  }
+
+  type SplitKey = string;
+  const splitKey = (ends: [VertexId, VertexId], factor: number): SplitKey =>
+    `${edgeKey(ends[0], ends[1])}@${factor.toFixed(5)}`;
+
+  const uniqueSplits: { edgeId: EdgeId; factor: number; ends: [VertexId, VertexId]; key: SplitKey }[] = [];
+  const seen = new Set<SplitKey>();
+  for (const hit of hits) {
+    const ends = getEdgeVertices(mesh, hit.edgeId);
+    if (!ends) return fail(change, 'MISSING_EDGE', `Edge ${hit.edgeId} not found`, [hit.edgeId]);
+    const factor = Math.max(0.0001, Math.min(0.9999, hit.factor));
+    const key = splitKey(ends, factor);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniqueSplits.push({ edgeId: hit.edgeId, factor, ends, key });
+  }
+
+  const vertexForKey = new Map<SplitKey, VertexId>();
+  const faceMap = new Map<FaceId, FaceId>();
+  const trackFace = (id: FaceId) => {
+    if (!faceMap.has(id)) faceMap.set(id, id);
+  };
+  for (const hit of hits) trackFace(hit.faceId);
+
+  for (const split of uniqueSplits) {
+    const resolvedEdge: EdgeId | null | undefined = mesh.edges.has(split.edgeId)
+      ? split.edgeId
+      : buildEdgeLookup(mesh).get(edgeKey(split.ends[0], split.ends[1]))
+        ?? findSplitEdge(mesh, split.ends, split.factor);
+    if (!resolvedEdge) {
+      return fail(change, 'MISSING_EDGE', `Could not resolve edge for knife split`, [split.edgeId]);
+    }
+    const localFactor = localFactorOnCurrentEdge(mesh, resolvedEdge, split.ends, split.factor);
+    const result = splitEdge(mesh, resolvedEdge, localFactor);
+    if (!result.ok) return result;
+    mergeTopologyChange(change, result.change);
+    const vertexId = result.change.createdVertexIds[0]!;
+    vertexForKey.set(split.key, vertexId);
+    for (const [original, current] of faceMap) {
+      faceMap.set(original, resolveReplacement(result.change, current));
+    }
+  }
+
+  const selectedFaces: FaceId[] = [];
+  for (let i = 0; i < hits.length - 1; i++) {
+    const a = hits[i]!;
+    const b = hits[i + 1]!;
+    if (a.edgeId === b.edgeId && Math.abs(a.factor - b.factor) < 1e-6) continue;
+
+    const endsA = getOriginalEnds(mesh, a, uniqueSplits);
+    const endsB = getOriginalEnds(mesh, b, uniqueSplits);
+    if (!endsA || !endsB) {
+      return fail(change, 'MISSING_EDGE', 'Knife path hit lost its edge', [a.edgeId, b.edgeId]);
+    }
+    const vA = vertexForKey.get(splitKey(endsA, Math.max(0.0001, Math.min(0.9999, a.factor))));
+    const vB = vertexForKey.get(splitKey(endsB, Math.max(0.0001, Math.min(0.9999, b.factor))));
+    if (!vA || !vB) {
+      return fail(change, 'MISSING_VERTEX', 'Knife path is missing a cut vertex', [a.edgeId, b.edgeId]);
+    }
+
+    const hintFace = faceMap.get(a.faceId) ?? faceMap.get(b.faceId) ?? a.faceId;
+    const faceId = resolvePathFace(mesh, hintFace, b.faceId, faceMap, vA, vB);
+    if (!faceId) {
+      return fail(change, 'MISSING_FACE', 'Could not find a face for knife chord', [a.faceId, b.faceId]);
+    }
+
+    const cut = splitFace(mesh, faceId, vA, vB);
+    if (!cut.ok) return cut;
+    mergeTopologyChange(change, cut.change);
+    for (const [original, current] of faceMap) {
+      faceMap.set(original, resolveReplacement(cut.change, current));
+    }
+    selectedFaces.push(...(cut.change.recommendedSelection.faceIds ?? []));
+  }
+
+  change.recommendedSelection = {
+    mode: 'face',
+    faceIds: selectedFaces.length ? selectedFaces : undefined,
+  };
+  return { ok: true, value: change, change, warnings: change.warnings };
+}
+
+function getOriginalEnds(
+  mesh: EditableMesh,
+  hit: KnifePathHit,
+  splits: { edgeId: EdgeId; ends: [VertexId, VertexId] }[],
+): [VertexId, VertexId] | null {
+  const fromSplit = splits.find((s) => s.edgeId === hit.edgeId);
+  if (fromSplit) return fromSplit.ends;
+  return getEdgeVertices(mesh, hit.edgeId);
+}
+
+function findSplitEdge(
+  mesh: EditableMesh,
+  ends: [VertexId, VertexId],
+  factor: number,
+): EdgeId | null {
+  const target = lerpVec3(
+    mesh.vertices.get(ends[0])!.position,
+    mesh.vertices.get(ends[1])!.position,
+    factor,
+  );
+  let best: EdgeId | null = null;
+  let bestDist = Infinity;
+  for (const edgeId of mesh.edges.keys()) {
+    const pair = getEdgeVertices(mesh, edgeId);
+    if (!pair) continue;
+    // Only consider edges whose endpoints lie on the original segment chain.
+    const a = mesh.vertices.get(pair[0])!.position;
+    const b = mesh.vertices.get(pair[1])!.position;
+    const ab = subVec3(b, a);
+    const ap = subVec3(target, a);
+    const abLenSq = lengthSqVec3(ab);
+    const t = abLenSq < 1e-20 ? 0.5 : Math.max(0, Math.min(1, dotVec3(ap, ab) / abLenSq));
+    const projected = lerpVec3(a, b, t);
+    const dist = lengthSqVec3(subVec3(target, projected));
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = edgeId;
+    }
+  }
+  return bestDist < 1e-6 ? best : null;
+}
+
+function localFactorOnCurrentEdge(
+  mesh: EditableMesh,
+  edgeId: EdgeId,
+  originalEnds: [VertexId, VertexId],
+  originalFactor: number,
+): number {
+  const pair = getEdgeVertices(mesh, edgeId);
+  if (!pair) return originalFactor;
+  const target = lerpVec3(
+    mesh.vertices.get(originalEnds[0])!.position,
+    mesh.vertices.get(originalEnds[1])!.position,
+    originalFactor,
+  );
+  const a = mesh.vertices.get(pair[0])!.position;
+  const b = mesh.vertices.get(pair[1])!.position;
+  const ab = subVec3(b, a);
+  const ap = subVec3(target, a);
+  const abLenSq = lengthSqVec3(ab);
+  if (abLenSq < 1e-20) return 0.5;
+  return Math.max(0.0001, Math.min(0.9999, dotVec3(ap, ab) / abLenSq));
+}
+
+function resolvePathFace(
+  mesh: EditableMesh,
+  faceA: FaceId,
+  faceB: FaceId,
+  faceMap: Map<FaceId, FaceId>,
+  vA: VertexId,
+  vB: VertexId,
+): FaceId | null {
+  const candidates = [
+    faceMap.get(faceA) ?? faceA,
+    faceMap.get(faceB) ?? faceB,
+    ...faceMap.values(),
+  ];
+  for (const faceId of candidates) {
+    if (!mesh.faces.has(faceId)) continue;
+    const verts = faceVertexIds(mesh, faceId);
+    if (verts.includes(vA) && verts.includes(vB)) return faceId;
+  }
+  for (const face of mesh.faces.values()) {
+    const verts = faceVertexIds(mesh, face.id);
+    if (verts.includes(vA) && verts.includes(vB)) return face.id;
+  }
+  return null;
+}
+
 export type LoopCutRing = {
   /** Ordered crossed edges. Open rings have one more edge than face. */
   edgeIds: EdgeId[];

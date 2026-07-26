@@ -153,6 +153,114 @@ export function fillBoundaryLoop(
   return makeFaceFromVertices(mesh, loop);
 }
 
+/**
+ * Fill boundary hole(s). Partial edge selections are expanded to their full
+ * closed boundary loop(s). With no seeds, every boundary loop is filled.
+ */
+export function fillHoles(
+  mesh: EditableMesh,
+  edgeIds?: EdgeId[],
+): GeometryOpResult<TopologyChangeResult> {
+  const change = emptyTopologyChangeResult();
+  const seeds = edgeIds?.length
+    ? [...new Set(edgeIds)].filter((id) => mesh.edges.has(id))
+    : [...mesh.edges.keys()].filter((id) => isBoundaryEdge(mesh, id));
+
+  if (!seeds.length) {
+    return failure(change, 'EMPTY_SELECTION', 'No boundary edges to fill', []);
+  }
+
+  for (const id of seeds) {
+    if (!isBoundaryEdge(mesh, id)) {
+      return failure(change, 'NOT_BOUNDARY', `Edge ${id} is not a boundary edge`, [id]);
+    }
+  }
+
+  const filledKeys = new Set<string>();
+  const faceIds: FaceId[] = [];
+
+  for (const seed of seeds) {
+    // Skip seeds already consumed by a prior fill in this call.
+    if (!mesh.edges.has(seed) || !isBoundaryEdge(mesh, seed)) continue;
+
+    const loopEdges = completeBoundaryLoopEdges(mesh, seed);
+    if (!loopEdges || loopEdges.length < 3) {
+      return failure(
+        change,
+        'INVALID_LOOP',
+        'Could not complete a closed boundary loop from the selection',
+        [seed],
+      );
+    }
+
+    const key = [...loopEdges].sort().join('|');
+    if (filledKeys.has(key)) continue;
+    filledKeys.add(key);
+
+    const filled = fillBoundaryLoop(mesh, loopEdges);
+    if (!filled.ok) return filled;
+    mergeTopologyChange(change, filled.change);
+    if (filled.value?.faceId) faceIds.push(filled.value.faceId);
+  }
+
+  if (!faceIds.length) {
+    return failure(change, 'EMPTY_SELECTION', 'No holes were filled', seeds);
+  }
+
+  change.recommendedSelection = { mode: 'face', faceIds };
+  return { ok: true, value: change, change, warnings: change.warnings };
+}
+
+/** Expand a seed boundary edge to every edge in its closed hole loop. */
+export function completeBoundaryLoopEdges(
+  mesh: EditableMesh,
+  seedEdgeId: EdgeId,
+): EdgeId[] | null {
+  if (!isBoundaryEdge(mesh, seedEdgeId)) return null;
+
+  const adj = new Map<VertexId, EdgeId[]>();
+  for (const edgeId of mesh.edges.keys()) {
+    if (!isBoundaryEdge(mesh, edgeId)) continue;
+    const pair = getEdgeVertices(mesh, edgeId);
+    if (!pair) continue;
+    for (const v of pair) {
+      const list = adj.get(v) ?? [];
+      list.push(edgeId);
+      adj.set(v, list);
+    }
+  }
+
+  const start = getEdgeVertices(mesh, seedEdgeId);
+  if (!start) return null;
+
+  const edges: EdgeId[] = [seedEdgeId];
+  const used = new Set<EdgeId>([seedEdgeId]);
+  let prev = start[0];
+  let curr = start[1];
+
+  while (curr !== start[0]) {
+    const links = (adj.get(curr) ?? []).filter((e) => !used.has(e));
+    if (!links.length) return null;
+    const nextEdge =
+      links.find((e) => {
+        const pair = getEdgeVertices(mesh, e);
+        if (!pair) return false;
+        const other = pair[0] === curr ? pair[1] : pair[0];
+        return other !== prev;
+      }) ?? links[0]!;
+    used.add(nextEdge);
+    edges.push(nextEdge);
+    const pair = getEdgeVertices(mesh, nextEdge);
+    if (!pair) return null;
+    const nextVert = pair[0] === curr ? pair[1] : pair[0];
+    prev = curr;
+    curr = nextVert;
+    if (edges.length > mesh.edges.size) return null;
+  }
+
+  return edges.length >= 3 ? edges : null;
+}
+
 /** Delete mesh elements implied by the current component selection. */
 export function deleteMeshSelection(
   mesh: EditableMesh,

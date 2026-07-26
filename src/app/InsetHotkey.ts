@@ -44,7 +44,10 @@ export function beginInteractiveInset(
     mesh,
     'Inset',
     (m) => {
-      const result = insetFaces(m, ids, { thickness: 0.15, individual: true });
+      const result = insetFaces(m, ids, {
+        thickness: 0.15,
+        individual: primaryCount <= 1,
+      });
       if (!result.ok) throw new Error(result.error?.message ?? 'Inset failed');
       if (result.change.recommendedSelection.faceIds) {
         result.change.recommendedSelection.faceIds =

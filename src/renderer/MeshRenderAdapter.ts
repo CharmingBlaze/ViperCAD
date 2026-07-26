@@ -213,6 +213,7 @@ export function materialAssetToThree(
         roughness: mat.roughness,
         metalness: mat.metallic,
         flatShading: mat.flatShaded,
+        emissive: new Color(mat.emissive.x, mat.emissive.y, mat.emissive.z),
       });
   if (mat.baseColourTextureId && assets) {
     const asset = assets.textures.get(mat.baseColourTextureId); const image = asset ? assets.images.get(asset.imageAssetId) : null;

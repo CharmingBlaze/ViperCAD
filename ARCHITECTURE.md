@@ -13,7 +13,7 @@ Three.js geometry, material groups, texture objects and ray hits are disposable 
 - Primitive generation: box, plane, cylinder, cone, sphere, pyramid and ramp share `MeshBuilder`; the box is eight vertices, twelve shared edges and six outward quad faces.
 - Rendering: stable triangulation hints, logical triangle pick maps, material-slot groups, smooth/hard corner normals, revision-aware pixel textures and partial GPU attribute uploads for position/UV edits.
 - Selection: one manager for object/vertex/edge/face IDs, conversion, grow, connected selection, remapping and stale-ID pruning.
-- Editing: vertex translation, edge split/collapse, merge, face split/flip/delete, region extrusion, inset, knife chord and quad-ring cut all return structured topology changes.
+- Editing: vertex translation, edge split/collapse, merge, dissolve, face split/flip/delete, region extrusion, region/individual inset, multi-segment bevel, solidify shell, knife path/chord and quad-ring cut all return structured topology changes.
 - Transactions: geometry edits snapshot, validate and atomically commit or roll back. Mesh and selection state are both restored by undo/redo.
 - UV and images: per-corner UV layers, seam-derived islands, planar projection, deterministic packing and exact RGBA pixel pencil/line/fill/UV-hit operations.
 - Persistence and interchange: checksum-protected versioned native JSON plus polygon/UV/material-slot preserving OBJ import/export.
@@ -46,17 +46,34 @@ Fast validation checks IDs, references, reciprocal loop links, twins, corners, U
 - The UV/pixel workspace, GLB exporter/validator and glTF importer are dynamic chunks. Lightweight export profiles and readiness diagnostics remain startup-safe.
 - Position/UV-only render updates retain BufferGeometry allocations, declare narrow GPU update ranges, and refit the logical BVH instead of rebuilding it.
 
+## Modelling power (landed)
+
+- Region inset (`individual: false`) keeps shared interior edges joined; hotkey uses region for multi-face selection.
+- `fillHoles` expands a partial boundary selection to full loop(s); inspector Fill uses it.
+- `dissolveEdges` / `dissolveFaces` merge manifold topology without opening holes.
+- Multi-segment bevel honors `segments` / `profile`, improves UV inheritance and junction spoke reuse.
+- `solidifyMesh` builds a real inner/outer shell with rim caps (open and closed meshes).
+- `knifePath` + KnifeTool cut across adjacent faces, splitting shared edges once.
+
+## Level editor (landed)
+
+- `reprojectTerrainPlacedObjects` keeps props grounded after sculpt, shape ops, heightmaps, and resample.
+- Flatten Alt+click samples surface height; TerrainPanel Game Output shows readiness and one-click colliders.
+- Engine export skips palette/library brush sources and `excludeFromExport`; readiness warns about omitted sources.
+- Slope-align placement + re-ground selection; terrain resolution resample up to 128.
+
 ## Remaining staged work
 
 The foundation is intentionally ready for the remaining high-complexity tools; these are not represented as completed merely by placeholder APIs.
 
-1. Robust bevel with overlap limiting and hardened normals; region inset with shared internal boundaries.
-2. Multi-face arbitrary knife paths, branching loop-cut policy, bridge, hole fill, dissolve and triangle-to-quad heuristics.
+1. Hardened bevel normals, vertex bevel networks, and richer overlap limiting beyond width clamps.
+2. Freeform / branching knife paths, branching loop-cut policy, and triangle-to-quad heuristics.
 3. Extend construction planes with named/user-defined planes and add persistent post-operation parameter editing.
-4. Angle-based smoothing, tangents, UV relax/stitch/straighten and production-quality chart packing.
+4. Angle-based smoothing, tangents, UV stitch and production-quality chart packing.
 5. Layered indexed-colour pixel documents, palettes, selection masks and brush transaction merging.
-6. Native save/open UI, autosave recovery, migrations beyond format v1, glTF/GLB/STL/PLY adapters and evaluated non-destructive export.
+6. STL/PLY adapters, migrations beyond current format, and evaluated non-destructive export.
 7. Modifier stack (mirror/array/subdivision/solidify/bevel/triangulate/boolean) and evaluated-cache invalidation.
 8. Scene broad phase, worker-pool scheduling and stress/performance suites.
+9. Terrain feature ribbon/water rebind after sculpt (soft stamp or polyline rebuild).
 
 Correctness gates stay ahead of tool count: a new topology tool is complete only when it preserves IDs/attributes, validates, remaps selection, supports undo/redo and has focused automated tests.

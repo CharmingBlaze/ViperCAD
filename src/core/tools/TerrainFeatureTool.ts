@@ -2,8 +2,7 @@ import type { ObjectId, TextureId } from '@/core/document/types';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import type { Vec3 } from '@/core/math/Vec3';
 import {
-  buildTerrainRibbon,
-  commitTerrainFeature,
+  commitRibbonWithCarve,
   type TerrainFeatureKind,
 } from '@/core/terrain/TerrainFeatures';
 import type {
@@ -21,9 +20,11 @@ export class TerrainFeatureTool implements Tool {
   width = 2;
   surfaceOffset = 0.04;
   textureScale = 2;
-  opacity = 0.72;
+  opacity = 0.78;
   animated = true;
-  flowSpeed = 0.12;
+  flowSpeed = 0.14;
+  carveTerrain = true;
+  carveDepth = 0.9;
   spacing = 0.25;
   dragging = false;
   revision = 0;
@@ -47,8 +48,8 @@ export class TerrainFeatureTool implements Tool {
     this.kind = kind;
     this.terrainObjectId = terrainObjectId;
     this.animated = kind === 'river';
-    this.opacity = kind === 'river' ? 0.72 : 1;
-    this.surfaceOffset = kind === 'river' ? 0.04 : 0.055;
+    this.opacity = kind === 'river' ? 0.78 : 1;
+    this.surfaceOffset = kind === 'river' ? 0.03 : 0.04;
     this.revision += 1;
     context.requestRedraw();
   }
@@ -56,13 +57,13 @@ export class TerrainFeatureTool implements Tool {
   begin(input: ToolPointerInput, context: ModellingContext): void {
     if (input.button !== 'left' || !input.worldPosition || !this.terrainObjectId) return;
     this.dragging = true;
-    this.points = [offsetPoint(input.worldPosition, this.surfaceOffset)];
+    this.points = [{ ...input.worldPosition }];
     context.requestRedraw();
   }
 
   update(input: ToolPointerInput, context: ModellingContext): void {
     if (!this.dragging || !input.worldPosition) return;
-    const point = offsetPoint(input.worldPosition, this.surfaceOffset);
+    const point = { ...input.worldPosition };
     const previous = this.points[this.points.length - 1]!;
     if (Math.hypot(point.x - previous.x, point.y - previous.y, point.z - previous.z) < this.spacing) {
       return;
@@ -81,21 +82,29 @@ export class TerrainFeatureTool implements Tool {
       session.requestRedraw();
       return false;
     }
-    const mesh = buildTerrainRibbon(
+
+    const defaultDepth = this.kind === 'path'
+      ? Math.max(0.12, this.width * 0.2)
+      : Math.max(0.35, this.width * 0.45);
+    const created = commitRibbonWithCarve(
+      session,
+      this.terrainObjectId,
+      this.kind,
       points,
       this.width,
-      this.textureScale,
-      this.kind === 'river' ? 'River' : 'Path',
+      {
+        textureId: this.textureId,
+        opacity: this.opacity,
+        animated: this.kind === 'river' && this.animated,
+        flowSpeed: this.flowSpeed,
+        textureScale: this.textureScale,
+        surfaceOffset: this.surfaceOffset,
+        carve: this.carveTerrain,
+        carveDepth: this.carveDepth > 0 ? this.carveDepth : defaultDepth,
+      },
     );
-    commitTerrainFeature(session, this.terrainObjectId, this.kind, mesh, {
-      textureId: this.textureId,
-      opacity: this.opacity,
-      animated: this.kind === 'river' && this.animated,
-      flowSpeed: this.flowSpeed,
-      textureScale: this.textureScale,
-    });
     this.revision += 1;
-    return true;
+    return !!created;
   }
 
   preview(_context: ModellingContext): void {}
@@ -109,16 +118,18 @@ export class TerrainFeatureTool implements Tool {
   }
 
   statusLine(): string {
-    if (this.dragging) return `drawing ${this.kind} · drag over terrain · release to finish`;
-    return `${this.kind} brush · width ${this.width.toFixed(1)} · drag over terrain`;
+    if (this.dragging) {
+      return this.carveTerrain
+        ? `drawing ${this.kind} · carve on release · drag over terrain`
+        : `drawing ${this.kind} · drag over terrain · release to finish`;
+    }
+    return this.carveTerrain
+      ? `${this.kind} brush · width ${this.width.toFixed(1)} · depth ${this.carveDepth.toFixed(1)} · carves terrain`
+      : `${this.kind} brush · width ${this.width.toFixed(1)} · drag over terrain`;
   }
 
   getAllowedSelectionModes() { return ['object'] as const; }
   getSnapPolicy() { return [] as const; }
-}
-
-function offsetPoint(point: Vec3, amount: number): Vec3 {
-  return { x: point.x, y: point.y + amount, z: point.z };
 }
 
 function simplifyStroke(points: Vec3[], tolerance: number): Vec3[] {

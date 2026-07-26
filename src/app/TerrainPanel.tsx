@@ -11,6 +11,7 @@ import {
   activeTerrain,
   applyTerrainTileRepeat,
   createTerrain,
+  resampleTerrain,
   terrainHeightRange,
 } from '@/core/terrain/Terrain';
 import {
@@ -18,7 +19,18 @@ import {
   type TerrainBrushMode,
   type TerrainFalloff,
 } from '@/core/tools/TerrainSculptTool';
-import { terrainPlacedObjects } from '@/core/terrain/TerrainProps';
+import {
+  reprojectTerrainPlacedObjects,
+  restorePlacedTransforms,
+  snapshotPlacedTransforms,
+  terrainPlacedObjects,
+} from '@/core/terrain/TerrainProps';
+import { gameReadiness } from '@/app/GameExportProfiles';
+import {
+  generateConvexCollider,
+  generateMeshCollider,
+} from '@/core/editor/GameAssetTools';
+import { pushToast } from '@/app/Toast';
 import {
   applyHeightmap,
   type HeightmapChannel,
@@ -37,9 +49,8 @@ import {
 } from '@/core/terrain/HeightmapGenerator';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
 import {
-  buildLakeMesh,
-  buildOceanMesh,
-  commitTerrainFeature,
+  commitLakeWithCarve,
+  commitOceanWithCarve,
   type TerrainFeatureKind,
 } from '@/core/terrain/TerrainFeatures';
 
@@ -88,9 +99,11 @@ export function TerrainPanel({
   const [waterLevel, setWaterLevel] = useState(0.1);
   const [waterSize, setWaterSize] = useState(4);
   const [naturalShoreline, setNaturalShoreline] = useState(true);
-  const [waterOpacity, setWaterOpacity] = useState(0.72);
+  const [waterOpacity, setWaterOpacity] = useState(0.78);
   const [waterAnimated, setWaterAnimated] = useState(true);
-  const [waterFlowSpeed, setWaterFlowSpeed] = useState(0.12);
+  const [waterFlowSpeed, setWaterFlowSpeed] = useState(0.14);
+  const [carveTerrain, setCarveTerrain] = useState(true);
+  const [carveDepth, setCarveDepth] = useState(0.9);
   const [featureNote, setFeatureNote] = useState<string | null>(null);
   const terrains = [...session.document.objects.values()].filter(
     (object) => object.metadata.terrain === 'true',
@@ -218,19 +231,24 @@ export function TerrainPanel({
   ) => {
     if (!terrain) return;
     const mesh = terrain.mesh;
+    const terrainObjectId = terrain.object.id;
     const ids = [...mesh.vertices.keys()];
     const before = new Map(ids.map((id) => [id, cloneVec3(mesh.vertices.get(id)!.position)]));
+    const beforeProps = snapshotPlacedTransforms(session.document, terrainObjectId);
     const gridResolution = Number(terrain.object.metadata.terrainResolution) || Math.round(Math.sqrt(ids.length)) - 1;
     const next = mutate(ids.map((id) => mesh.vertices.get(id)!.position.y), gridResolution);
     ids.forEach((id, index) => { mesh.vertices.get(id)!.position.y = next[index] ?? 0; });
     bumpPositions(mesh);
+    reprojectTerrainPlacedObjects(session.document, terrainObjectId);
     const after = new Map(ids.map((id) => [id, cloneVec3(mesh.vertices.get(id)!.position)]));
+    const afterProps = snapshotPlacedTransforms(session.document, terrainObjectId);
     let applied = true;
-    const restore = (snapshot: typeof before) => {
+    const restore = (snapshot: typeof before, props: typeof beforeProps) => {
       for (const [id, position] of snapshot) {
         const vertex = mesh.vertices.get(id);
         if (vertex) vertex.position = cloneVec3(position);
       }
+      restorePlacedTransforms(session.document, props);
       bumpPositions(mesh);
       session.document.dirty = true;
       session.requestRedraw();
@@ -239,11 +257,11 @@ export function TerrainPanel({
       name,
       execute: () => {
         if (applied) return;
-        restore(after);
+        restore(after, afterProps);
         applied = true;
       },
       undo: () => {
-        restore(before);
+        restore(before, beforeProps);
         applied = false;
       },
     });
@@ -294,10 +312,18 @@ export function TerrainPanel({
     featureTool.opacity = kind === 'river' ? waterOpacity : 1;
     featureTool.animated = kind === 'river' && waterAnimated;
     featureTool.flowSpeed = waterFlowSpeed;
+    featureTool.carveTerrain = carveTerrain;
+    featureTool.carveDepth = carveDepth;
     session.selection.setMode('object');
     session.selection.selectObjects([terrain.object.id], 'replace');
     session.tools.setActive('terrain-feature', session.context());
-    setFeatureNote(`Drag over the terrain to draw a ${kind}. Release to finish.`);
+    setFeatureNote(
+      carveTerrain
+        ? kind === 'river'
+          ? 'Drag a river — release carves a channel and fills it with water.'
+          : 'Drag a path — release wears a trail into the terrain.'
+        : `Drag a ${kind} over the terrain. Release to finish (carve off).`,
+    );
     session.requestRedraw();
     onRefresh();
   };
@@ -305,22 +331,41 @@ export function TerrainPanel({
   const addWaterBody = (kind: Extract<TerrainFeatureKind, 'lake' | 'ocean'>) => {
     if (!terrain) return;
     const terrainSize = Number(terrain.object.metadata.terrainSize) || 20;
-    const mesh = kind === 'lake'
-      ? buildLakeMesh(waterSize, 48, naturalShoreline ? 0.1 : 0)
-      : buildOceanMesh(Math.max(waterSize, terrainSize * 1.35));
-    for (const vertex of mesh.vertices.values()) {
-      vertex.position.x += terrain.object.transform.position.x;
-      vertex.position.y += terrain.object.transform.position.y + waterLevel;
-      vertex.position.z += terrain.object.transform.position.z;
-    }
-    commitTerrainFeature(session, terrain.object.id, kind, mesh, {
+    const style = {
       textureId: featureTextureId || null,
       opacity: waterOpacity,
       animated: waterAnimated,
       flowSpeed: waterFlowSpeed,
       textureScale: featureTextureScale,
-    });
-    setFeatureNote(`${kind === 'lake' ? 'Lake' : 'Ocean'} created · use Move to position or resize it.`);
+    };
+    if (kind === 'lake') {
+      commitLakeWithCarve(session, terrain.object.id, {
+        radius: waterSize,
+        waterLevel,
+        carveDepth,
+        carve: carveTerrain,
+        shorelineVariation: naturalShoreline ? 0.12 : 0,
+        style,
+      });
+      setFeatureNote(
+        carveTerrain
+          ? 'Lake carved into the terrain · water sits in the basin.'
+          : 'Lake created · use Move to position or resize it.',
+      );
+    } else {
+      commitOceanWithCarve(session, terrain.object.id, {
+        size: Math.max(waterSize, terrainSize * 1.35),
+        waterLevel,
+        carveDepth: Math.max(0.25, carveDepth * 0.65),
+        carve: carveTerrain,
+        style,
+      });
+      setFeatureNote(
+        carveTerrain
+          ? 'Ocean bed carved · water plane fills the shoreline.'
+          : 'Ocean created · use Move to position or resize it.',
+      );
+    }
     onRefresh();
   };
 
@@ -399,7 +444,7 @@ export function TerrainPanel({
             <label className="uv-field">
               <span>Resolution</span>
               <select className="uv-select" value={resolution} onChange={(event) => setResolution(Number(event.target.value))}>
-                {[8, 16, 32, 48, 64].map((value) => <option key={value} value={value}>{value} × {value}</option>)}
+                {[8, 16, 32, 48, 64, 96, 128].map((value) => <option key={value} value={value}>{value} × {value}</option>)}
               </select>
             </label>
           </div>
@@ -472,10 +517,13 @@ export function TerrainPanel({
                 </select>
               </label>
               {tool.mode === 'flatten' && (
-                <label className="uv-field">
-                  <span>Flatten height</span>
-                  <input className="uv-text" type="number" step={0.1} value={tool.flattenHeight} onChange={(event) => { tool.flattenHeight = Number(event.target.value); onRefresh(); }} />
-                </label>
+                <>
+                  <label className="uv-field">
+                    <span>Flatten height</span>
+                    <input className="uv-text" type="number" step={0.1} value={tool.flattenHeight} onChange={(event) => { tool.flattenHeight = Number(event.target.value); onRefresh(); }} />
+                  </label>
+                  <p className="uv-hint">Alt+click samples height from the terrain surface.</p>
+                </>
               )}
               <p className="uv-hint">LMB drag sculpts · Shift inverts raise/lower/noise · wheel changes brush size · RMB orbits camera.</p>
             </section>
@@ -742,8 +790,35 @@ export function TerrainPanel({
                 </span>
               </div>
               <p className="uv-hint">
-                Draw rivers and paths over the terrain surface, or add editable lakes and oceans.
+                Rivers, paths, and lakes carve soft depressions into the heightmap; water fills the cut.
               </p>
+              <label className="uv-check">
+                <input
+                  type="checkbox"
+                  checked={carveTerrain}
+                  onChange={(event) => {
+                    setCarveTerrain(event.target.checked);
+                    featureTool.carveTerrain = event.target.checked;
+                  }}
+                />
+                Carve terrain under rivers &amp; paths
+              </label>
+              <label className="uv-field">
+                <span>Carve depth <b className="uv-field-value">{carveDepth.toFixed(1)}</b></span>
+                <input
+                  className="uv-range"
+                  type="range"
+                  min={0.1}
+                  max={6}
+                  step={0.1}
+                  value={carveDepth}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    setCarveDepth(value);
+                    featureTool.carveDepth = value;
+                  }}
+                />
+              </label>
               <div className="terrain-feature-choice">
                 <button
                   type="button"
@@ -919,14 +994,89 @@ export function TerrainPanel({
               </div>
               {featureNote && <p className="uv-meta terrain-feature-note">{featureNote}</p>}
               <p className="uv-hint">
-                River/path: LMB drag over terrain · wheel changes width · release creates the feature · Ctrl+Z undo.
+                River/path: LMB drag · wheel changes width · release carves the trail · Ctrl+Z undoes feature and terrain together.
               </p>
             </section>
 
             <section className="uv-section terrain-output-summary" hidden={activeTab !== 'terrain'}>
               <h3 className="uv-section-title">Game output</h3>
-              <p className="uv-meta">Editable mesh · GLB / OBJ ready · terrain metadata included</p>
-              <p className="uv-hint">For runtime collision, use Model → Edit → Game Asset → Mesh or convex collider.</p>
+              {(() => {
+                const stats = gameReadiness(session.document);
+                return (
+                  <>
+                    <p className="uv-meta">
+                      {stats.objects} export object{stats.objects === 1 ? '' : 's'}
+                      {' · '}
+                      {stats.triangles.toLocaleString()} tris
+                      {' · '}
+                      {stats.collisionObjects} collider{stats.collisionObjects === 1 ? '' : 's'}
+                    </p>
+                    {stats.hiddenLibraryObjects > 0 && (
+                      <p className="uv-hint">
+                        {stats.hiddenLibraryObjects} library/palette source
+                        {stats.hiddenLibraryObjects === 1 ? '' : 's'} omitted from engine export.
+                      </p>
+                    )}
+                  </>
+                );
+              })()}
+              <label className="uv-field">
+                <span>Resample resolution</span>
+                <select
+                  className="uv-select"
+                  value={Number(terrain.object.metadata.terrainResolution) || resolution}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    if (!resampleTerrain(session, terrain.object.id, next)) {
+                      pushToast('Resolution unchanged', 'info');
+                    } else {
+                      pushToast(`Terrain resampled to ${next}×${next}`, 'success');
+                    }
+                    onRefresh();
+                  }}
+                >
+                  {[8, 16, 32, 48, 64, 96, 128].map((value) => (
+                    <option key={value} value={value}>{value} × {value}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="uv-btn-grid uv-btn-grid-2">
+                <button
+                  type="button"
+                  className="tool"
+                  onClick={() => {
+                    try {
+                      const id = generateMeshCollider(session.document, terrain.object.id);
+                      session.selection.selectObjects([id], 'replace');
+                      pushToast('Mesh collider created', 'success');
+                      session.requestRedraw();
+                      onRefresh();
+                    } catch (error) {
+                      pushToast(error instanceof Error ? error.message : 'Collider failed', 'error');
+                    }
+                  }}
+                >
+                  Mesh collider
+                </button>
+                <button
+                  type="button"
+                  className="tool"
+                  onClick={() => {
+                    try {
+                      const id = generateConvexCollider(session.document, terrain.object.id);
+                      session.selection.selectObjects([id], 'replace');
+                      pushToast('Convex collider created', 'success');
+                      session.requestRedraw();
+                      onRefresh();
+                    } catch (error) {
+                      pushToast(error instanceof Error ? error.message : 'Collider failed', 'error');
+                    }
+                  }}
+                >
+                  Convex collider
+                </button>
+              </div>
+              <p className="uv-hint">Editable mesh · GLB / OBJ ready · terrain metadata included.</p>
             </section>
           </>
         )}

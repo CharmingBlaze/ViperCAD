@@ -4,14 +4,11 @@ import type {
 } from '@/core/document/types';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { cloneVec3 } from '@/core/math/Vec3';
-import {
-  inverseTransformPointApprox,
-  transformPoint,
-} from '@/core/math/Transform';
 import { bumpPositions } from '@/core/mesh/EditableMesh';
 import {
-  terrainHeightAtLocalPoint,
-  terrainPlacedObjects,
+  reprojectTerrainPlacedObjects,
+  restorePlacedTransforms,
+  snapshotPlacedTransforms,
 } from '@/core/terrain/TerrainProps';
 
 export type HeightmapMode = 'replace' | 'add';
@@ -45,10 +42,7 @@ export function applyHeightmap(
     [...mesh.vertices].map(([id, vertex]) => [id, cloneVec3(vertex.position)]),
   );
   const beforeMetadata = { ...object.metadata };
-  const placedObjects = terrainPlacedObjects(session.document, terrainObjectId);
-  const beforeObjectPositions = new Map(
-    placedObjects.map((placed) => [placed.id, cloneVec3(placed.transform.position)]),
-  );
+  const beforeObjectTransforms = snapshotPlacedTransforms(session.document, terrainObjectId);
   const xs = [...mesh.vertices.values()].map((vertex) => vertex.position.x);
   const zs = [...mesh.vertices.values()].map((vertex) => vertex.position.z);
   const minX = Math.min(...xs);
@@ -76,34 +70,7 @@ export function applyHeightmap(
   }
   bumpPositions(mesh);
   if (options.reprojectObjects !== false) {
-    for (const placed of placedObjects) {
-      const local = inverseTransformPointApprox(placed.transform.position, object.transform);
-      const ground = transformPoint({
-        x: local.x,
-        y: terrainHeightAtLocalPoint(object, mesh, local.x, local.z),
-        z: local.z,
-      }, object.transform);
-      const source = placed.metadata.terrainSourceId
-        ? session.document.objects.get(placed.metadata.terrainSourceId)
-        : null;
-      const sourceMesh = source?.meshId ? session.document.meshes.get(source.meshId) : null;
-      const sourceBase =
-        Number(source?.metadata.terrainBaseOffset) ||
-        (sourceMesh?.vertices.size
-          ? -Math.min(...[...sourceMesh.vertices.values()].map((vertex) => vertex.position.y))
-          : 0);
-      const groundClearance = Number(placed.metadata.terrainGroundClearance) || 0;
-      const heightOffset = Number(placed.metadata.terrainHeightOffset) || 0;
-      placed.transform.position = {
-        x: ground.x,
-        y:
-          ground.y +
-          sourceBase * Math.abs(placed.transform.scale.y) +
-          groundClearance +
-          heightOffset,
-        z: ground.z,
-      };
-    }
+    reprojectTerrainPlacedObjects(session.document, terrainObjectId);
   }
   object.metadata.heightmapImageId = image.id;
   object.metadata.heightmapName = image.name;
@@ -119,24 +86,19 @@ export function applyHeightmap(
     [...mesh.vertices].map(([id, vertex]) => [id, cloneVec3(vertex.position)]),
   );
   const afterMetadata = { ...object.metadata };
-  const afterObjectPositions = new Map(
-    placedObjects.map((placed) => [placed.id, cloneVec3(placed.transform.position)]),
-  );
+  const afterObjectTransforms = snapshotPlacedTransforms(session.document, terrainObjectId);
   let applied = true;
   const restore = (
     positions: typeof before,
     metadata: Record<string, string>,
-    propPositions: typeof beforeObjectPositions,
+    propTransforms: typeof beforeObjectTransforms,
   ) => {
     for (const [id, position] of positions) {
       const vertex = mesh.vertices.get(id);
       if (vertex) vertex.position = cloneVec3(position);
     }
     object.metadata = { ...metadata };
-    for (const [id, position] of propPositions) {
-      const placed = session.document.objects.get(id);
-      if (placed) placed.transform.position = cloneVec3(position);
-    }
+    restorePlacedTransforms(session.document, propTransforms);
     bumpPositions(mesh);
     session.document.dirty = true;
     session.requestRedraw();
@@ -145,11 +107,11 @@ export function applyHeightmap(
     name: `Apply Heightmap ${image.name}`,
     execute: () => {
       if (applied) return;
-      restore(after, afterMetadata, afterObjectPositions);
+      restore(after, afterMetadata, afterObjectTransforms);
       applied = true;
     },
     undo: () => {
-      restore(before, beforeMetadata, beforeObjectPositions);
+      restore(before, beforeMetadata, beforeObjectTransforms);
       applied = false;
     },
   });

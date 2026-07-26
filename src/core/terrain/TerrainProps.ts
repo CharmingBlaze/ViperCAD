@@ -7,7 +7,15 @@ import type {
   ObjectId,
   SceneObject,
 } from '@/core/document/types';
-import { v3, type Vec3 } from '@/core/math/Vec3';
+import {
+  inverseTransformPointApprox,
+  transformPoint,
+} from '@/core/math/Transform';
+import {
+  normalizeVec3,
+  v3,
+  type Vec3,
+} from '@/core/math/Vec3';
 import {
   buildBox,
   buildCone,
@@ -180,6 +188,139 @@ export function terrainHeightAtLocalPoint(
   const a = y00 + (y10 - y00) * tx;
   const b = y01 + (y11 - y01) * tx;
   return a + (b - a) * tz;
+}
+
+/** Approximate terrain surface normal in terrain-local space from height gradients. */
+export function terrainNormalAtLocalPoint(
+  terrain: SceneObject,
+  mesh: EditableMesh,
+  x: number,
+  z: number,
+): Vec3 {
+  const size = Math.max(1e-6, Number(terrain.metadata.terrainSize) || 1);
+  const resolution = Math.max(2, Number(terrain.metadata.terrainResolution) || 2);
+  const step = size / resolution;
+  const yL = terrainHeightAtLocalPoint(terrain, mesh, x - step, z);
+  const yR = terrainHeightAtLocalPoint(terrain, mesh, x + step, z);
+  const yD = terrainHeightAtLocalPoint(terrain, mesh, x, z - step);
+  const yU = terrainHeightAtLocalPoint(terrain, mesh, x, z + step);
+  // Gradient of height field → surface normal.
+  return normalizeVec3(v3(-(yR - yL) / (2 * step), 1, -(yU - yD) / (2 * step)));
+}
+
+export type ReprojectOptions = {
+  alignToSlope?: boolean;
+};
+
+/**
+ * Snap all props owned by a terrain back onto the surface (Y + optional slope).
+ * Returns the ids of objects that were moved.
+ */
+export function reprojectTerrainPlacedObjects(
+  document: ModelDocument,
+  terrainObjectId: ObjectId,
+  options: ReprojectOptions = {},
+): ObjectId[] {
+  const terrain = document.objects.get(terrainObjectId);
+  const mesh = terrain?.meshId ? document.meshes.get(terrain.meshId) : null;
+  if (!terrain || terrain.metadata.terrain !== 'true' || !mesh) return [];
+
+  const moved: ObjectId[] = [];
+  for (const placed of terrainPlacedObjects(document, terrainObjectId)) {
+    if (groundObjectToTerrain(document, placed.id, terrainObjectId, {
+      alignToSlope: options.alignToSlope ?? placed.metadata.terrainAlignToSlope === 'true',
+    })) {
+      moved.push(placed.id);
+    }
+  }
+  return moved;
+}
+
+export type GroundObjectOptions = {
+  alignToSlope?: boolean;
+  groundClearance?: number;
+};
+
+/** Ground one placed object onto its owning terrain. */
+export function groundObjectToTerrain(
+  document: ModelDocument,
+  objectId: ObjectId,
+  terrainObjectId: ObjectId,
+  options: GroundObjectOptions = {},
+): boolean {
+  const terrain = document.objects.get(terrainObjectId);
+  const mesh = terrain?.meshId ? document.meshes.get(terrain.meshId) : null;
+  const placed = document.objects.get(objectId);
+  if (!terrain || !mesh || !placed || terrain.metadata.terrain !== 'true') return false;
+
+  const local = inverseTransformPointApprox(placed.transform.position, terrain.transform);
+  const height = terrainHeightAtLocalPoint(terrain, mesh, local.x, local.z);
+  const ground = transformPoint({ x: local.x, y: height, z: local.z }, terrain.transform);
+
+  const source = placed.metadata.terrainSourceId
+    ? document.objects.get(placed.metadata.terrainSourceId)
+    : null;
+  const sourceMesh = source?.meshId ? document.meshes.get(source.meshId) : null;
+  const sourceBase =
+    Number(source?.metadata.terrainBaseOffset) ||
+    (sourceMesh?.vertices.size
+      ? -Math.min(...[...sourceMesh.vertices.values()].map((vertex) => vertex.position.y))
+      : 0);
+  const groundClearance =
+    options.groundClearance ?? (Number(placed.metadata.terrainGroundClearance) || 0);
+  const heightOffset = Number(placed.metadata.terrainHeightOffset) || 0;
+
+  placed.transform.position = {
+    x: ground.x,
+    y:
+      ground.y +
+      sourceBase * Math.abs(placed.transform.scale.y) +
+      groundClearance +
+      heightOffset,
+    z: ground.z,
+  };
+
+  const align = options.alignToSlope ?? placed.metadata.terrainAlignToSlope === 'true';
+  if (align) {
+    const localNormal = terrainNormalAtLocalPoint(terrain, mesh, local.x, local.z);
+    // Keep yaw; set pitch/roll from slope (Y-up).
+    const yaw = placed.transform.rotation.y;
+    const pitch = Math.atan2(localNormal.z, localNormal.y);
+    const roll = -Math.atan2(localNormal.x, localNormal.y);
+    placed.transform.rotation = { x: pitch, y: yaw, z: roll };
+    placed.metadata.terrainAlignToSlope = 'true';
+  }
+
+  document.dirty = true;
+  return true;
+}
+
+/** Snapshot position+rotation for undo of prop reproject. */
+export function snapshotPlacedTransforms(
+  document: ModelDocument,
+  terrainObjectId: ObjectId,
+): Map<ObjectId, { position: Vec3; rotation: Vec3 }> {
+  return new Map(
+    terrainPlacedObjects(document, terrainObjectId).map((placed) => [
+      placed.id,
+      {
+        position: { ...placed.transform.position },
+        rotation: { ...placed.transform.rotation },
+      },
+    ]),
+  );
+}
+
+export function restorePlacedTransforms(
+  document: ModelDocument,
+  snapshots: Map<ObjectId, { position: Vec3; rotation: Vec3 }>,
+): void {
+  for (const [id, transform] of snapshots) {
+    const object = document.objects.get(id);
+    if (!object) continue;
+    object.transform.position = { ...transform.position };
+    object.transform.rotation = { ...transform.rotation };
+  }
 }
 
 export function buildTerrainPresetMesh(preset: TerrainPropPreset): EditableMesh {

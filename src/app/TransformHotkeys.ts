@@ -3,6 +3,10 @@ import { beginInteractiveInset } from '@/app/InsetHotkey';
 import { beginInteractiveKnife } from '@/app/KnifeHotkey';
 import { beginInteractiveBevel } from '@/app/BevelHotkey';
 import { beginInteractiveLoopCut } from '@/app/LoopCutHotkey';
+import {
+  applyShadeHotkey,
+  applySubdivideHotkey,
+} from '@/app/ModelingEditHotkeys';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { CreateDoodleTool } from '@/core/tools/CreateDoodleTool';
 import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
@@ -136,6 +140,22 @@ export function handleTransformHotkey(
   if ((key === 'r' || key === 'R') && (e.ctrlKey || e.metaKey) && !e.altKey) {
     e.preventDefault();
     return beginInteractiveLoopCut(session, workspace);
+  }
+
+  // Subdivide (Ctrl+Shift+D)
+  if ((key === 'd' || key === 'D') && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    return applySubdivideHotkey(session, 1);
+  }
+
+  // Shade Smooth / Flat (Shift+Alt+S / Shift+Alt+F)
+  if ((key === 's' || key === 'S') && e.shiftKey && e.altKey && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    return applyShadeHotkey(session, 'smooth');
+  }
+  if ((key === 'f' || key === 'F') && e.shiftKey && e.altKey && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    return applyShadeHotkey(session, 'flat');
   }
 
   // Start G / R / S

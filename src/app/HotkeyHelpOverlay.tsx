@@ -12,6 +12,8 @@ const MODEL_KEYS = [
   ['K', 'Knife · click start/end · Enter confirm'],
   ['Ctrl+B', 'Bevel edges'],
   ['Ctrl+R', 'Loop Cut · wheel count · click slide'],
+  ['Ctrl+Shift+D', 'Subdivide faces'],
+  ['Shift+Alt+S / F', 'Shade Smooth / Shade Flat'],
   ['F', 'Frame selection'],
   ['Home', 'Frame all'],
   ['Shift+Home', 'Reset view'],

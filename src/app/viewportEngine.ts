@@ -2806,9 +2806,20 @@ export class ViewportEngine {
         animated.polygonOffsetUnits = -1;
         if (isAnimated && animated.map) {
           animated.map.offset.y = (timeSeconds * speed) % 1;
-          animated.map.offset.x = (timeSeconds * speed * 0.18) % 1;
-        } else if (isAnimated && asset) {
-          animated.opacity = asset.opacity * (0.965 + Math.sin(timeSeconds * 1.7) * 0.035);
+          animated.map.offset.x = (timeSeconds * speed * 0.22 + Math.sin(timeSeconds * 0.35) * 0.02) % 1;
+          animated.map.repeat.set(
+            kind === 'ocean' ? 4 : kind === 'lake' ? 2.2 : 1.6,
+            kind === 'ocean' ? 4 : kind === 'lake' ? 2.2 : 1.6,
+          );
+        }
+        if (isAnimated && asset) {
+          const shimmer = 0.97 + Math.sin(timeSeconds * 1.55) * 0.03;
+          animated.opacity = asset.opacity * shimmer;
+          const lit = material as Material & { emissive?: { setRGB: (r: number, g: number, b: number) => void } };
+          if (lit.emissive) {
+            const pulse = 0.85 + Math.sin(timeSeconds * 2.1) * 0.15;
+            lit.emissive.setRGB(0.01 * pulse, 0.045 * pulse, 0.07 * pulse);
+          }
         }
       }
       active ||= isAnimated;

@@ -9,8 +9,11 @@ import type { EditorSession } from '@/core/editor/EditorSession';
 import { activeTerrain } from '@/core/terrain/Terrain';
 import {
   buildTerrainPresetMesh,
+  groundObjectToTerrain,
   projectTerrainPropSources,
   repairTerrainPresetSources,
+  snapshotPlacedTransforms,
+  restorePlacedTransforms,
   TERRAIN_PROP_PRESETS,
   terrainPlacedObjects,
   type TerrainPropPreset,
@@ -452,6 +455,18 @@ export function FloatingTerrainObjects({
                           />
                           Random rotation
                         </label>
+                        <label className="uv-check">
+                          <input
+                            type="checkbox"
+                            checked={objectTool.alignToSlope}
+                            onChange={(event) => {
+                              objectTool.alignToSlope = event.target.checked;
+                              objectTool.revision += 1;
+                              onRefresh();
+                            }}
+                          />
+                          Align to slope
+                        </label>
                       </>
                     )}
                   </>
@@ -471,6 +486,47 @@ export function FloatingTerrainObjects({
                     onClick={() => prepareObjectTool('erase')}
                   >
                     Brush erase
+                  </button>
+                  <button
+                    type="button"
+                    className="tool"
+                    disabled={!terrain || !placedObjects.length}
+                    onClick={() => {
+                      if (!terrain) return;
+                      const selected = [...session.selection.state.selectedObjectIds];
+                      const targets = selected.length
+                        ? placedObjects.filter((object) => selected.includes(object.id))
+                        : placedObjects;
+                      if (!targets.length) return;
+                      const before = snapshotPlacedTransforms(session.document, terrain.object.id);
+                      for (const object of targets) {
+                        groundObjectToTerrain(session.document, object.id, terrain.object.id, {
+                          alignToSlope: objectTool.alignToSlope,
+                        });
+                      }
+                      const after = snapshotPlacedTransforms(session.document, terrain.object.id);
+                      let applied = true;
+                      session.history.execute({
+                        name: 'Re-ground Level Objects',
+                        execute: () => {
+                          if (applied) return;
+                          restorePlacedTransforms(session.document, after);
+                          session.document.dirty = true;
+                          session.requestRedraw();
+                          applied = true;
+                        },
+                        undo: () => {
+                          restorePlacedTransforms(session.document, before);
+                          session.document.dirty = true;
+                          session.requestRedraw();
+                          applied = false;
+                        },
+                      });
+                      session.requestRedraw();
+                      onRefresh();
+                    }}
+                  >
+                    Re-ground selection
                   </button>
                 </div>
                 <p className="uv-hint">

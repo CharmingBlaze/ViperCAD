@@ -15,6 +15,7 @@ import {
   closestBoundaryEdgeToPoint,
   findLoopCutRing,
   knifeFace,
+  knifePath,
   loopCut,
   loopCutMulti,
 } from '@/core/mesh/ops/cut';
@@ -68,6 +69,24 @@ describe('insetFaces', () => {
     expect(validateMeshFull(mesh).ok).toBe(true);
     expect(getMeshStats(mesh).boundaryEdges).toBe(0);
   });
+
+  it('region-insets adjacent faces without duplicating the shared edge seam', () => {
+    const regionMesh = buildQuadStrip().mesh;
+    const regionFaceIds = [...regionMesh.faces.keys()].slice(0, 2);
+    const beforeFaces = regionMesh.faces.size;
+    const result = insetFaces(regionMesh, regionFaceIds, { thickness: 0.25, individual: false });
+    expect(result.ok).toBe(true);
+    expect(validateMeshFull(regionMesh).ok).toBe(true);
+    // Before 3 faces; replace 2 → 2 inner + 6 outer-boundary rim quads = 9
+    expect(regionMesh.faces.size).toBe(beforeFaces - 2 + 2 + 6);
+    expect(result.change.recommendedSelection.faceIds?.length).toBe(2);
+
+    const individualMesh = buildQuadStrip().mesh;
+    const individualIds = [...individualMesh.faces.keys()].slice(0, 2);
+    expect(insetFaces(individualMesh, individualIds, { thickness: 0.25, individual: true }).ok).toBe(true);
+    // Per-face path duplicates verts on the shared edge; region path does not.
+    expect(regionMesh.vertices.size).toBeLessThan(individualMesh.vertices.size);
+  });
 });
 
 describe('knifeFace / loopCut', () => {
@@ -91,6 +110,31 @@ describe('knifeFace / loopCut', () => {
     const result = knifeFace(mesh, faceId, edgeIds[0]!, edgeIds[2]!, 0.25, 0.75);
     expect(result.ok).toBe(true);
     expect(mesh.faces.size).toBe(beforeFaces + 1);
+    expect(validateMeshFull(mesh).ok).toBe(true);
+  });
+
+  it('knifes a path across two adjacent coplanar quads, splitting the shared edge once', () => {
+    const { mesh, bottom, top } = buildQuadStrip();
+    const faceIds = [...mesh.faces.keys()];
+    const face0 = faceIds[0]!;
+    const face1 = faceIds[1]!;
+    // Outer left edge of face0: bottom[0]-top[0]
+    const leftEdge = buildEdgeLookup(mesh).get(edgeKey(bottom[0]!, top[0]!))!;
+    // Shared edge face0/face1: bottom[1]-top[1]
+    const sharedEdge = buildEdgeLookup(mesh).get(edgeKey(bottom[1]!, top[1]!))!;
+    // Outer right edge of face1: bottom[2]-top[2]
+    const rightEdge = buildEdgeLookup(mesh).get(edgeKey(bottom[2]!, top[2]!))!;
+    const beforeFaces = mesh.faces.size;
+    const beforeVerts = mesh.vertices.size;
+    const result = knifePath(mesh, [
+      { faceId: face0, edgeId: leftEdge, factor: 0.5 },
+      { faceId: face0, edgeId: sharedEdge, factor: 0.5 },
+      { faceId: face1, edgeId: rightEdge, factor: 0.5 },
+    ]);
+    expect(result.ok).toBe(true);
+    // Two face splits → +2 faces; three edge splits → +3 verts
+    expect(mesh.faces.size).toBe(beforeFaces + 2);
+    expect(mesh.vertices.size).toBe(beforeVerts + 3);
     expect(validateMeshFull(mesh).ok).toBe(true);
   });
 

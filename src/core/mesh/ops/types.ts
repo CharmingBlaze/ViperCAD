@@ -37,3 +37,9 @@ export type BevelParams = {
   segments?: number;
   profile?: number;
 };
+
+export type SolidifyParams = {
+  thickness: number;
+  /** -1 = shell inward from original, 0 = centered, 1 = outward. Default -1. */
+  offset?: number;
+};

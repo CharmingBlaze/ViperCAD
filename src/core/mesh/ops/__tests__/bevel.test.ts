@@ -40,4 +40,21 @@ describe('bevelEdges', () => {
     expect(result.warnings[0]).toMatch(/limited/);
     expect(validateMeshFull(mesh).ok).toBe(true);
   });
+
+  it('creates more chamfer faces when segments > 1', () => {
+    const mesh1 = buildBox({ width: 2, height: 2, depth: 2 });
+    const mesh2 = buildBox({ width: 2, height: 2, depth: 2 });
+    const edge1 = faceHalfEdgeIds(mesh1, [...mesh1.faces.keys()][0]!)
+      .map((heId) => mesh1.halfEdges.get(heId)!.edgeId)[0]!;
+    const edge2 = faceHalfEdgeIds(mesh2, [...mesh2.faces.keys()][0]!)
+      .map((heId) => mesh2.halfEdges.get(heId)!.edgeId)[0]!;
+    const one = bevelEdges(mesh1, [edge1], { width: 0.2, segments: 1 });
+    const two = bevelEdges(mesh2, [edge2], { width: 0.2, segments: 2 });
+    expect(one.ok).toBe(true);
+    expect(two.ok).toBe(true);
+    expect(mesh2.faces.size).toBeGreaterThan(mesh1.faces.size);
+    expect(two.change.recommendedSelection.faceIds?.length).toBe(2);
+    expect(validateMeshFull(mesh2).ok).toBe(true);
+    expect(getMeshStats(mesh2).boundaryEdges).toBe(0);
+  });
 });

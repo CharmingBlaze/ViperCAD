@@ -5,3 +5,6 @@ export * from './inset';
 export * from './bevel';
 export * from './cut';
 export * from './draw';
+export * from './solidify';
+export * from './subdivide';
+export * from './shading';

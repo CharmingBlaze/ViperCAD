@@ -7,13 +7,16 @@ import {
   getEdgeVertices,
   removeFace,
 } from '@/core/mesh/EditableMesh';
+import { isBoundaryEdge } from '@/core/mesh/EditableMesh';
 import {
   deleteFaces,
   deleteVertices,
   fillBoundaryLoop,
+  fillHoles,
   makeFaceFromVertices,
 } from '@/core/mesh/ops/draw';
 import { v3 } from '@/core/math/Vec3';
+import { validateMeshFull } from '@/core/mesh/Validation';
 
 describe('draw ops', () => {
   it('makes a face from three vertices', () => {
@@ -75,6 +78,19 @@ describe('draw ops', () => {
     const filled = fillBoundaryLoop(mesh, edgeIds);
     expect(filled.ok).toBe(true);
     expect(mesh.faces.size).toBe(6);
+  });
+
+  it('fillHoles completes a loop from a single boundary edge', () => {
+    const mesh = buildBox({ width: 2, height: 2, depth: 2 });
+    const faceId = [...mesh.faces.keys()][0]!;
+    removeFace(mesh, faceId);
+    expect(mesh.faces.size).toBe(5);
+    const seed = [...mesh.edges.keys()].find((id) => isBoundaryEdge(mesh, id));
+    expect(seed).toBeTruthy();
+    const filled = fillHoles(mesh, [seed!]);
+    expect(filled.ok).toBe(true);
+    expect(mesh.faces.size).toBe(6);
+    expect(validateMeshFull(mesh).ok).toBe(true);
   });
 
   it('deletes selected faces and orphan vertices', () => {

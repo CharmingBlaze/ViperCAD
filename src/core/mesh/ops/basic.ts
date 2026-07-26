@@ -5,6 +5,7 @@ import {
   buildEdgeLookup,
   bumpTopology,
   faceCornerIds,
+  faceHalfEdgeIds,
   faceVertexIds,
   getEdgeVertices,
   mergeTopologyChange,
@@ -341,6 +342,232 @@ export function assignFaceMaterial(mesh: EditableMesh, faceIds: FaceId[], materi
   mesh.geometryVersion += 1;
   mesh.dirty.materials = true;
   return { ok: true, value: change, change, warnings: [] };
+}
+
+/**
+ * Dissolve manifold edges: merge the two incident faces into one ngon.
+ * Does not open holes — non-manifold / boundary edges are rejected.
+ */
+export function dissolveEdges(
+  mesh: EditableMesh,
+  edgeIds: EdgeId[],
+): GeometryOpResult<TopologyChangeResult> {
+  const change = emptyTopologyChangeResult();
+  const unique = [...new Set(edgeIds)].filter((id) => mesh.edges.has(id));
+  if (!unique.length) {
+    return failure(change, 'EMPTY_SELECTION', 'No edges to dissolve', []);
+  }
+
+  const selectedFaces: FaceId[] = [];
+  // Process one edge at a time so sequential dissolves stay valid.
+  for (const edgeId of unique) {
+    if (!mesh.edges.has(edgeId)) {
+      return failure(change, 'MISSING_EDGE', `Edge ${edgeId} was removed by a prior dissolve`, [edgeId]);
+    }
+    const edge = mesh.edges.get(edgeId)!;
+    const faceIds = [edge.halfEdgeAId, edge.halfEdgeBId]
+      .filter((id): id is string => !!id)
+      .map((id) => mesh.halfEdges.get(id)?.faceId)
+      .filter((id): id is FaceId => !!id);
+    if (faceIds.length !== 2) {
+      return failure(
+        change,
+        'NON_MANIFOLD_EDGE',
+        'Dissolve requires edges shared by exactly two faces',
+        [edgeId],
+      );
+    }
+
+    const endpoints = getEdgeVertices(mesh, edgeId);
+    if (!endpoints) {
+      return failure(change, 'MISSING_EDGE', `Edge ${edgeId} not found`, [edgeId]);
+    }
+    const [va, vb] = endpoints;
+    const snapA = snapshotFace(mesh, faceIds[0]!);
+    const snapB = snapshotFace(mesh, faceIds[1]!);
+    const merged = stitchFacesAcrossEdge(snapA, snapB, va, vb);
+    if (!merged) {
+      return failure(
+        change,
+        'DISSOLVE_FAILED',
+        `Could not stitch faces across edge ${edgeId}`,
+        [edgeId, faceIds[0]!, faceIds[1]!],
+      );
+    }
+    if (new Set(merged.vertices).size < 3) {
+      return failure(change, 'DEGENERATE_FACE', 'Dissolve would create a degenerate face', [edgeId]);
+    }
+
+    mergeTopologyChange(change, removeFace(mesh, faceIds[0]!));
+    mergeTopologyChange(change, removeFace(mesh, faceIds[1]!));
+    const newFace = addSnapshotFace(mesh, snapA, merged.vertices, merged.uvs, change);
+    change.replacedIds.set(faceIds[0]!, newFace);
+    change.replacedIds.set(faceIds[1]!, newFace);
+    selectedFaces.push(newFace);
+  }
+
+  change.recommendedSelection = { mode: 'face', faceIds: selectedFaces };
+  return { ok: true, value: change, change, warnings: change.warnings };
+}
+
+/**
+ * Dissolve adjacent faces into their outer boundary ngon(s).
+ * Internal shared edges between selected faces are removed.
+ */
+export function dissolveFaces(
+  mesh: EditableMesh,
+  faceIds: FaceId[],
+): GeometryOpResult<TopologyChangeResult> {
+  const change = emptyTopologyChangeResult();
+  const unique = [...new Set(faceIds)].filter((id) => mesh.faces.has(id));
+  if (!unique.length) {
+    return failure(change, 'EMPTY_SELECTION', 'No faces to dissolve', []);
+  }
+  if (unique.length === 1) {
+    // Single face dissolve is a no-op keep; recommend the same face.
+    change.recommendedSelection = { mode: 'face', faceIds: unique };
+    return { ok: true, value: change, change, warnings: ['Single face dissolve leaves the face unchanged'] };
+  }
+
+  const selected = new Set(unique);
+  const snaps = unique.map((id) => snapshotFace(mesh, id));
+  const template = snaps[0]!;
+
+  // Directed boundary segments: twin face ∉ selection.
+  type Seg = { a: VertexId; b: VertexId; uvA: { x: number; y: number }; uvB: { x: number; y: number } };
+  const segs: Seg[] = [];
+  for (const snap of snaps) {
+    const heIds = faceHalfEdgeIds(mesh, snap.id);
+    for (let i = 0; i < heIds.length; i++) {
+      const he = mesh.halfEdges.get(heIds[i]!)!;
+      const next = mesh.halfEdges.get(he.nextHalfEdgeId)!;
+      const twin = he.twinHalfEdgeId ? mesh.halfEdges.get(he.twinHalfEdgeId) : null;
+      const twinFace = twin?.faceId ?? null;
+      if (!twinFace || !selected.has(twinFace)) {
+        segs.push({
+          a: he.originVertexId,
+          b: next.originVertexId,
+          uvA: snap.uvs[i]!,
+          uvB: snap.uvs[(i + 1) % snap.uvs.length]!,
+        });
+      }
+    }
+  }
+
+  if (segs.length < 3) {
+    return failure(change, 'INVALID_REGION', 'Selection has no dissolvable outer boundary', unique);
+  }
+
+  const loops = orderDirectedLoops(segs);
+  if (!loops.length) {
+    return failure(change, 'INVALID_REGION', 'Could not order outer boundary loops', unique);
+  }
+
+  for (const id of unique) {
+    mergeTopologyChange(change, removeFace(mesh, id));
+  }
+
+  const created: FaceId[] = [];
+  for (const loop of loops) {
+    if (loop.vertices.length < 3) {
+      return failure(change, 'DEGENERATE_FACE', 'Dissolve produced a degenerate boundary', unique);
+    }
+    const faceId = addSnapshotFace(mesh, template, loop.vertices, loop.uvs, change);
+    created.push(faceId);
+  }
+  for (const id of unique) {
+    change.replacedIds.set(id, created[0]!);
+  }
+  change.recommendedSelection = { mode: 'face', faceIds: created };
+  return { ok: true, value: change, change, warnings: change.warnings };
+}
+
+function stitchFacesAcrossEdge(
+  snapA: FaceSnapshot,
+  snapB: FaceSnapshot,
+  va: VertexId,
+  vb: VertexId,
+): { vertices: VertexId[]; uvs: { x: number; y: number }[] } | null {
+  const edgeIndex = (snap: FaceSnapshot, from: VertexId, to: VertexId): number => {
+    for (let i = 0; i < snap.vertices.length; i++) {
+      const a = snap.vertices[i]!;
+      const b = snap.vertices[(i + 1) % snap.vertices.length]!;
+      if (a === from && b === to) return i;
+    }
+    return -1;
+  };
+
+  let ia = edgeIndex(snapA, va, vb);
+  let ib = edgeIndex(snapB, vb, va);
+  let aSnap = snapA;
+  let bSnap = snapB;
+  if (ia < 0 || ib < 0) {
+    ia = edgeIndex(snapA, vb, va);
+    ib = edgeIndex(snapB, va, vb);
+    if (ia < 0 || ib < 0) return null;
+    // Endpoints swapped relative to getEdgeVertices order — still valid.
+  }
+
+  const walk = (snap: FaceSnapshot, start: number, end: number) => {
+    const verts: VertexId[] = [];
+    const uvs: { x: number; y: number }[] = [];
+    const n = snap.vertices.length;
+    for (let i = start; ; i = (i + 1) % n) {
+      verts.push(snap.vertices[i]!);
+      uvs.push(snap.uvs[i]!);
+      if (i === end) break;
+    }
+    return { verts, uvs };
+  };
+
+  // From vb around A to va (inclusive), then from va around B to vb (inclusive), drop duplicate ends.
+  const startA = (ia + 1) % aSnap.vertices.length; // vb
+  const endA = ia; // va
+  const startB = (ib + 1) % bSnap.vertices.length; // va
+  const endB = ib; // vb
+  const pathA = walk(aSnap, startA, endA);
+  const pathB = walk(bSnap, startB, endB);
+  const vertices = [...pathA.verts.slice(0, -1), ...pathB.verts.slice(0, -1)];
+  const uvs = [...pathA.uvs.slice(0, -1), ...pathB.uvs.slice(0, -1)];
+  if (new Set(vertices).size !== vertices.length) return null;
+  return { vertices, uvs };
+}
+
+function orderDirectedLoops(
+  segs: { a: VertexId; b: VertexId; uvA: { x: number; y: number }; uvB: { x: number; y: number } }[],
+): { vertices: VertexId[]; uvs: { x: number; y: number }[] }[] {
+  const unused = new Set(segs.map((_, i) => i));
+  const outByStart = new Map<VertexId, number[]>();
+  for (let i = 0; i < segs.length; i++) {
+    const list = outByStart.get(segs[i]!.a) ?? [];
+    list.push(i);
+    outByStart.set(segs[i]!.a, list);
+  }
+
+  const loops: { vertices: VertexId[]; uvs: { x: number; y: number }[] }[] = [];
+  while (unused.size) {
+    const startIdx = unused.values().next().value as number;
+    unused.delete(startIdx);
+    const start = segs[startIdx]!;
+    const usedSegs = [start];
+    let curr = start.b;
+    let guard = 0;
+    while (curr !== start.a) {
+      const candidates = (outByStart.get(curr) ?? []).filter((i) => unused.has(i));
+      if (!candidates.length) return [];
+      const nextIdx = candidates[0]!;
+      unused.delete(nextIdx);
+      const next = segs[nextIdx]!;
+      usedSegs.push(next);
+      curr = next.b;
+      guard += 1;
+      if (guard > segs.length + 2) return [];
+    }
+    const vertices = usedSegs.map((s) => s.a);
+    const uvs = usedSegs.map((s) => s.uvA);
+    if (vertices.length >= 3) loops.push({ vertices, uvs });
+  }
+  return loops;
 }
 
 function failure(change: TopologyChangeResult, code: string, message: string, ids: string[]): GeometryOpResult<TopologyChangeResult> {

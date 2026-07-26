@@ -2,12 +2,29 @@ import { Group, Mesh, Scene, type Material, type Object3D, type Texture } from '
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { bakeAtlasTilesForExport } from '@/app/AtlasGltfBake';
-import type { ModelDocument, ObjectId } from '@/core/document/types';
-import { EXPORT_PROFILES, type ExportProfile } from '@/app/GameExportProfiles';
+import type { ModelDocument, ObjectId, SceneObject } from '@/core/document/types';
+import {
+  EXPORT_PROFILES,
+  isExportExcludedObject,
+  type ExportProfile,
+} from '@/app/GameExportProfiles';
 import {
   editableMeshToRenderData,
   materialAssetToThree,
 } from '@/renderer/MeshRenderAdapter';
+
+/** Objects that would be included in an engine export for the given profile. */
+export function objectsForExport(
+  document: ModelDocument,
+  profile: ExportProfile = EXPORT_PROFILES.godot,
+): SceneObject[] {
+  return [...document.objects.values()].filter((object) => {
+    if (!profile.includeColliders && object.metadata.gameRole === 'collision') return false;
+    if (profile.onlyVisible && !object.visible) return false;
+    if (isExportExcludedObject(object.metadata)) return false;
+    return true;
+  });
+}
 
 /** Export the complete editable scene as a game-ready binary glTF. */
 export async function exportDocumentGlb(
@@ -27,9 +44,7 @@ export async function exportDocumentGlb(
   const disposableMaterials: Material[] = [];
   const disposableTextures: Texture[] = [];
 
-  for (const object of document.objects.values()) {
-    if (!profile.includeColliders && object.metadata.gameRole === 'collision') continue;
-    if (profile.onlyVisible && !object.visible) continue;
+  for (const object of objectsForExport(document, profile)) {
     const meshData = object.meshId ? document.meshes.get(object.meshId) : null;
     let node: Object3D;
     if (meshData) {

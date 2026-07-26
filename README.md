@@ -39,7 +39,7 @@ updates and BVH refitting.
 
 ## Current status
 
-The coherent modelling foundation includes document assets, half-edge topology, builders, render/pick mapping, component selection, transactions, extrusion, inset, knife/loop cut, basic topology edits, UV islands/packing, pixel assets, OBJ interchange, native serialization and a mesh BVH. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the audited contracts and the explicit remaining roadmap; unfinished advanced tools are not presented as complete.
+The coherent modelling foundation includes document assets, half-edge topology, builders, render/pick mapping, component selection, transactions, extrusion, region/individual inset, multi-segment bevel, solidify, dissolve, fill holes, knife path/loop cut, UV islands/packing, pixel assets, OBJ/glTF interchange, native serialization and a mesh BVH. The terrain shell covers sculpt, heightmaps, props with reproject/slope-align, features, game readiness, and engine export hygiene. See [ARCHITECTURE.md](./ARCHITECTURE.md) for contracts and remaining roadmap.
 
 ## Snapping
 

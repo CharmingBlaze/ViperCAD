@@ -4,9 +4,11 @@ import type { EditorSession } from '@/core/editor/EditorSession';
 import { runMeshTransaction } from '@/core/history/Transaction';
 import { pushToast } from '@/app/Toast';
 import { beginInteractiveLoopCut } from '@/app/LoopCutHotkey';
-import { fillBoundaryLoop, makeFaceFromVertices } from '@/core/mesh/ops/draw';
+import { fillHoles, makeFaceFromVertices } from '@/core/mesh/ops/draw';
 import {
   bridgeEdgeLoops,
+  dissolveEdges,
+  dissolveFaces,
   flipFaces,
   mergeVertices,
   splitEdge,
@@ -14,11 +16,19 @@ import {
   weldVerticesByDistance,
 } from '@/core/mesh/ops/basic';
 import { knifeFace } from '@/core/mesh/ops/cut';
+import {
+  resolveEditFaceIds,
+  resolveShadingFaceIds,
+  resolveSharpEdgeIds,
+  setEdgeSharpness,
+  setFacesShading,
+} from '@/core/mesh/ops/shading';
+import { pokeFaces, subdivideFaces } from '@/core/mesh/ops/subdivide';
 import { validateMeshFull } from '@/core/mesh/Validation';
 import { duplicateObject } from '@/core/document/ModelDocument';
 import { cloneMeshPreserveIds, isBoundaryEdge } from '@/core/mesh/EditableMesh';
 import { bevelEdges } from '@/core/mesh/ops/bevel';
-import { extrudeFaceRegion } from '@/core/mesh/ops/extrude';
+import { solidifyMesh } from '@/core/mesh/ops/solidify';
 import { applyObjectTransform } from '@/core/document/ObjectTransforms';
 import {
   generateBoxCollider,
@@ -107,7 +117,9 @@ export function AppInspectorPanel({
   const [previewBevel, setPreviewBevel] = useState(false);
   const [previewSolidify, setPreviewSolidify] = useState(false);
   const [bevelWidth, setBevelWidth] = useState(0.05);
+  const [bevelSegments, setBevelSegments] = useState(1);
   const [solidifyThickness, setSolidifyThickness] = useState(0.1);
+  const [subdivideCuts, setSubdivideCuts] = useState(1);
   const [weldDistance, setWeldDistance] = useState(0.001);
   const [constructionOffset, setConstructionOffset] = useState(0);
   const [exactPoint, setExactPoint] = useState({ x: 0, y: 0, z: 0 });
@@ -137,12 +149,20 @@ export function AppInspectorPanel({
     ? session.document.meshes.get(activeObject.meshId)
     : null;
   const makeFaceReady = !!activeMesh && sel.mode === 'vertex' && sel.selectedVertexIds.size >= 3;
-  const fillReady = !!activeMesh && sel.mode === 'edge' && sel.selectedEdgeIds.size >= 3;
+  const fillReady =
+    !!activeMesh &&
+    sel.mode === 'edge' &&
+    sel.selectedEdgeIds.size >= 1 &&
+    [...sel.selectedEdgeIds].some((id) => isBoundaryEdge(activeMesh, id));
+  const dissolveReady =
+    !!activeMesh &&
+    ((sel.mode === 'edge' && sel.selectedEdgeIds.size > 0) ||
+      (sel.mode === 'face' && sel.selectedFaceIds.size > 1));
   const splitReady = !!activeMesh && sel.mode === 'edge' && sel.selectedEdgeIds.size > 0;
   const mergeReady = !!activeMesh && sel.mode === 'vertex' && sel.selectedVertexIds.size >= 2;
   const separateReady = !!activeMesh && faceEditReady && sel.selectedFaceIds.size < activeMesh.faces.size;
   const selectedEdgeKey = [...sel.selectedEdgeIds].sort().join('|');
-  const solidifyReady = !!activeMesh && [...activeMesh.edges.keys()].some((id) => isBoundaryEdge(activeMesh, id));
+  const solidifyReady = !!activeMesh && activeMesh.faces.size > 0;
   const gameStats = gameReadiness(session.document);
   const symmetry = session.document.settings.symmetry;
 
@@ -165,10 +185,10 @@ export function AppInspectorPanel({
         selectedEdgeKey.split('|'),
         symmetry,
       )];
-      if (bevelEdges(clone, ids, { width: bevelWidth }).ok) preview = clone;
-    } else if (activeMesh && previewSolidify && [...activeMesh.edges.keys()].some((id) => isBoundaryEdge(activeMesh, id))) {
+      if (bevelEdges(clone, ids, { width: bevelWidth, segments: bevelSegments }).ok) preview = clone;
+    } else if (activeMesh && previewSolidify && activeMesh.faces.size > 0) {
       const clone = cloneMeshPreserveIds(activeMesh);
-      if (extrudeFaceRegion(clone, [...clone.faces.keys()], { distance: solidifyThickness }).ok) preview = clone;
+      if (solidifyMesh(clone, { thickness: solidifyThickness }).ok) preview = clone;
     }
     viewportEngine.setMeshModifierPreview(activeObject?.id ?? null, preview);
     return () => viewportEngine.setMeshModifierPreview(null, null);
@@ -176,6 +196,7 @@ export function AppInspectorPanel({
     activeMesh,
     activeObject?.id,
     bevelWidth,
+    bevelSegments,
     previewBevel,
     previewSolidify,
     sel.mode,
@@ -247,7 +268,7 @@ export function AppInspectorPanel({
     if (!activeMesh || !fillReady) return;
     const edges = [...sel.selectedEdgeIds];
     runDrawOp('Fill Boundary', (mesh) => {
-      const result = fillBoundaryLoop(mesh, edges);
+      const result = fillHoles(mesh, edges);
       if (!result.ok) throw new Error(result.error?.message ?? 'Fill failed');
       session.selection.applyTopologyChange(result.change);
     });
@@ -322,6 +343,27 @@ export function AppInspectorPanel({
     });
   };
 
+  const dissolveSelection = () => {
+    if (!activeMesh || !dissolveReady) return;
+    if (sel.mode === 'edge') {
+      const edges = [...expandSymmetryEdgeIds(activeMesh, sel.selectedEdgeIds, symmetry)];
+      runDrawOp('Dissolve Edges', (mesh) => {
+        const result = dissolveEdges(mesh, edges);
+        if (!result.ok) throw new Error(result.error?.message ?? 'Dissolve failed');
+        session.selection.applyTopologyChange(result.change);
+      });
+      return;
+    }
+    if (sel.mode === 'face') {
+      const faces = [...expandSymmetryFaceIds(activeMesh, sel.selectedFaceIds, symmetry)];
+      runDrawOp('Dissolve Faces', (mesh) => {
+        const result = dissolveFaces(mesh, faces);
+        if (!result.ok) throw new Error(result.error?.message ?? 'Dissolve failed');
+        session.selection.applyTopologyChange(result.change);
+      });
+    }
+  };
+
   const weldSelectedVertices = () => {
     if (!activeMesh || sel.mode !== 'vertex' || sel.selectedVertexIds.size < 2) return;
     const vertices = [...sel.selectedVertexIds];
@@ -339,6 +381,67 @@ export function AppInspectorPanel({
       const result = triangulateFaces(mesh, ids);
       if (!result.ok) throw new Error(result.error?.message ?? 'Triangulate failed');
       session.selection.applyTopologyChange(result.change);
+    });
+  };
+
+  const selectionForOps = () => ({
+    mode: sel.mode,
+    selectedFaceIds: sel.selectedFaceIds,
+    selectedEdgeIds: sel.selectedEdgeIds,
+    selectedVertexIds: sel.selectedVertexIds,
+  });
+
+  const subdivideSelectedFaces = () => {
+    if (!activeMesh) return;
+    const ids = [...expandSymmetryFaceIds(
+      activeMesh,
+      resolveEditFaceIds(activeMesh, selectionForOps()),
+      symmetry,
+    )];
+    runDrawOp('Subdivide', (mesh) => {
+      const result = subdivideFaces(mesh, ids, subdivideCuts);
+      if (!result.ok) throw new Error(result.error?.message ?? 'Subdivide failed');
+      session.selection.applyTopologyChange(result.change);
+    });
+  };
+
+  const pokeSelectedFaces = () => {
+    if (!activeMesh) return;
+    const ids = [...expandSymmetryFaceIds(
+      activeMesh,
+      resolveEditFaceIds(activeMesh, selectionForOps()),
+      symmetry,
+    )];
+    runDrawOp('Poke Faces', (mesh) => {
+      const result = pokeFaces(mesh, ids);
+      if (!result.ok) throw new Error(result.error?.message ?? 'Poke failed');
+      session.selection.applyTopologyChange(result.change);
+    });
+  };
+
+  const shadeSelection = (mode: 'smooth' | 'flat') => {
+    if (!activeMesh) return;
+    const ids = [...expandSymmetryFaceIds(
+      activeMesh,
+      resolveShadingFaceIds(activeMesh, selectionForOps()),
+      symmetry,
+    )];
+    runDrawOp(mode === 'smooth' ? 'Shade Smooth' : 'Shade Flat', (mesh) => {
+      const result = setFacesShading(mesh, ids, mode);
+      if (!result.ok) throw new Error(result.error?.message ?? 'Shading failed');
+    });
+  };
+
+  const sharpSelection = (sharpness: number) => {
+    if (!activeMesh) return;
+    const ids = [...expandSymmetryEdgeIds(
+      activeMesh,
+      resolveSharpEdgeIds(activeMesh, selectionForOps()),
+      symmetry,
+    )];
+    runDrawOp(sharpness > 0 ? 'Mark Sharp' : 'Clear Sharp', (mesh) => {
+      const result = setEdgeSharpness(mesh, ids, sharpness);
+      if (!result.ok) throw new Error(result.error?.message ?? 'Sharpness failed');
     });
   };
 
@@ -363,6 +466,9 @@ export function AppInspectorPanel({
       </button>
       <button type="button" className="tool" disabled={!fillReady} onClick={fillBoundary}>
         Fill
+      </button>
+      <button type="button" className="tool" disabled={!dissolveReady} onClick={dissolveSelection}>
+        Dissolve
       </button>
       <button type="button" className="tool" disabled={!splitReady} onClick={splitEdges}>
         Split Edges
@@ -402,6 +508,12 @@ export function AppInspectorPanel({
       </button>
       <button type="button" className="tool" disabled={!faceEditReady} onClick={triangulateSelectedFaces}>
         Triangulate
+      </button>
+      <button type="button" className="tool" disabled={!activeMesh} onClick={subdivideSelectedFaces}>
+        Subdivide
+      </button>
+      <button type="button" className="tool" disabled={!activeMesh} onClick={pokeSelectedFaces}>
+        Poke Faces
       </button>
       <button type="button" className="tool" disabled={!separateReady} onClick={separateSelectedFaces}>
         Separate Faces
@@ -1718,8 +1830,41 @@ export function AppInspectorPanel({
             </section>
 
             <section className="uv-section">
+              <h3 className="uv-section-title">Shading</h3>
+              <div className="uv-btn-grid uv-btn-grid-2">
+                <button type="button" className="tool" disabled={!activeMesh} onClick={() => shadeSelection('smooth')}>
+                  Shade Smooth
+                </button>
+                <button type="button" className="tool" disabled={!activeMesh} onClick={() => shadeSelection('flat')}>
+                  Shade Flat
+                </button>
+                <button type="button" className="tool" disabled={!activeMesh} onClick={() => sharpSelection(1)}>
+                  Mark Sharp
+                </button>
+                <button type="button" className="tool" disabled={!activeMesh} onClick={() => sharpSelection(0)}>
+                  Clear Sharp
+                </button>
+              </div>
+              <p className="uv-hint">
+                Smooth/Flat uses faces · Sharp uses edges · empty selection applies to the whole mesh · Shift+Alt+S / F
+              </p>
+            </section>
+
+            <section className="uv-section">
               <h3 className="uv-section-title">Topology</h3>
               {topologyActions}
+              <label className="uv-field">
+                <span>Subdivide cuts <b className="uv-field-value">{subdivideCuts}</b></span>
+                <input
+                  className="uv-range"
+                  type="range"
+                  min={1}
+                  max={3}
+                  step={1}
+                  value={subdivideCuts}
+                  onChange={(event) => setSubdivideCuts(Number(event.target.value))}
+                />
+              </label>
               <label className="uv-field">
                 <span>Weld distance</span>
                 <input
@@ -1732,7 +1877,7 @@ export function AppInspectorPanel({
                 />
               </label>
               <p className="uv-hint">
-                Make Face · Fill holes · Bridge matching boundary loops · Loop Cut · Knife
+                Subdivide · Poke · Make Face · Fill · Bridge · Loop Cut · Knife · Ctrl+Shift+D
               </p>
               {activeMesh && (() => {
                 const report = validateMeshFull(activeMesh);
@@ -1894,6 +2039,21 @@ export function AppInspectorPanel({
                     onChange={(event) => setBevelWidth(Math.max(0.0001, Number(event.target.value)))}
                   />
                 </label>
+                <label className="uv-field">
+                  <span>Bevel segments</span>
+                  <input
+                    className="uv-text"
+                    type="number"
+                    min={1}
+                    max={16}
+                    step={1}
+                    value={bevelSegments}
+                    onChange={(event) => {
+                      const next = Math.floor(Number(event.target.value) || 1);
+                      setBevelSegments(Math.max(1, Math.min(16, next)));
+                    }}
+                  />
+                </label>
                 <label className="uv-check">
                   <input
                     type="checkbox"
@@ -1942,7 +2102,7 @@ export function AppInspectorPanel({
                       symmetry,
                     )];
                     const tx = runMeshTransaction(session.history, activeMesh, 'Bevel', (mesh) => {
-                      const result = bevelEdges(mesh, ids, { width: bevelWidth });
+                      const result = bevelEdges(mesh, ids, { width: bevelWidth, segments: bevelSegments });
                       if (!result.ok) throw new Error(result.error?.message ?? 'Bevel failed');
                       session.selection.applyTopologyChange(result.change);
                     }, { fullValidation: true, selection: session.selection });
@@ -1960,9 +2120,8 @@ export function AppInspectorPanel({
                   disabled={!solidifyReady || !activeMesh}
                   onClick={() => {
                     if (!activeMesh) return;
-                    const faceIds = [...activeMesh.faces.keys()];
                     const tx = runMeshTransaction(session.history, activeMesh, 'Solidify', (mesh) => {
-                      const result = extrudeFaceRegion(mesh, faceIds, { distance: solidifyThickness });
+                      const result = solidifyMesh(mesh, { thickness: solidifyThickness });
                       if (!result.ok) throw new Error(result.error?.message ?? 'Solidify failed');
                       session.selection.applyTopologyChange(result.change);
                     }, { fullValidation: true, selection: session.selection });
@@ -2143,6 +2302,7 @@ export function AppInspectorPanel({
                       }}
                     >
                       <option value="geometry">Geometry</option>
+                      <option value="terrain">Terrain</option>
                       <option value="collision">Collision</option>
                       <option value="spawn">Spawn</option>
                       <option value="marker">Marker</option>

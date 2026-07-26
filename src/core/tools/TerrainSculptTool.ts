@@ -2,6 +2,11 @@ import { cloneVec3, type Vec3 } from '@/core/math/Vec3';
 import { inverseTransformPointApprox, type Transform } from '@/core/math/Transform';
 import { bumpPositions } from '@/core/mesh/EditableMesh';
 import type { EditableMesh, VertexId } from '@/core/mesh/types';
+import {
+  reprojectTerrainPlacedObjects,
+  restorePlacedTransforms,
+  snapshotPlacedTransforms,
+} from '@/core/terrain/TerrainProps';
 import type { ModellingContext, Tool, ToolPointerInput } from '@/core/tools/Tool';
 
 export type TerrainBrushMode = 'raise' | 'lower' | 'smooth' | 'flatten' | 'noise';
@@ -53,6 +58,14 @@ export class TerrainSculptTool implements Tool {
     if (input.button !== 'left' || !input.worldPosition) return;
     const target = terrainFromContext(context);
     if (!target) return;
+    // Alt+click in flatten mode samples the surface height without sculpting.
+    if (this.mode === 'flatten' && input.altKey) {
+      const local = inverseTransformPointApprox(input.worldPosition, target.object.transform);
+      this.flattenHeight = local.y;
+      this.revision += 1;
+      context.requestRedraw();
+      return;
+    }
     this.targetMesh = target.mesh;
     this.before = snapshot(target.mesh);
     this.dragging = true;
@@ -71,19 +84,32 @@ export class TerrainSculptTool implements Tool {
     if (!this.dragging || !this.before || !this.targetMesh) return false;
     const mesh = this.targetMesh;
     const before = this.before;
+    const target = terrainFromContext(context);
+    const terrainObjectId = target?.object.id ?? null;
+    const beforeProps = terrainObjectId
+      ? snapshotPlacedTransforms(context.document, terrainObjectId)
+      : new Map();
+    if (terrainObjectId) {
+      reprojectTerrainPlacedObjects(context.document, terrainObjectId);
+    }
     const after = snapshot(mesh);
+    const afterProps = terrainObjectId
+      ? snapshotPlacedTransforms(context.document, terrainObjectId)
+      : new Map();
     let applied = true;
     context.history.execute({
       name: `Terrain ${this.mode[0]!.toUpperCase()}${this.mode.slice(1)}`,
       execute: () => {
         if (applied) return;
         restore(mesh, after);
+        if (terrainObjectId) restorePlacedTransforms(context.document, afterProps);
         context.document.dirty = true;
         context.requestRedraw();
         applied = true;
       },
       undo: () => {
         restore(mesh, before);
+        if (terrainObjectId) restorePlacedTransforms(context.document, beforeProps);
         context.document.dirty = true;
         context.requestRedraw();
         applied = false;
@@ -112,7 +138,8 @@ export class TerrainSculptTool implements Tool {
   }
 
   statusLine(): string {
-    return `${this.mode} terrain · radius ${this.radius.toFixed(1)} · strength ${this.strength.toFixed(2)} · Shift invert`;
+    const flattenHint = this.mode === 'flatten' ? ' · Alt+click sample height' : '';
+    return `${this.mode} terrain · radius ${this.radius.toFixed(1)} · strength ${this.strength.toFixed(2)} · Shift invert${flattenHint}`;
   }
 
   getAllowedSelectionModes() { return ['object'] as const; }

@@ -11,6 +11,14 @@ import { v3 } from '@/core/math/Vec3';
 import { MeshBuilder } from '@/core/mesh/MeshBuilder';
 import { faceCornerIds } from '@/core/mesh/EditableMesh';
 import type { EditableMesh, MeshId } from '@/core/mesh/types';
+import {
+  reprojectTerrainPlacedObjects,
+  restorePlacedTransforms,
+  snapshotPlacedTransforms,
+  terrainHeightAtLocalPoint,
+} from '@/core/terrain/TerrainProps';
+
+const MAX_TERRAIN_RESOLUTION = 128;
 
 export type TerrainOptions = {
   name?: string;
@@ -28,7 +36,7 @@ export type TerrainAsset = {
 
 export function buildTerrainMesh(options: TerrainOptions = {}): EditableMesh {
   const size = clamp(options.size ?? 20, 1, 1000);
-  const resolution = Math.round(clamp(options.resolution ?? 32, 2, 64));
+  const resolution = Math.round(clamp(options.resolution ?? 32, 2, MAX_TERRAIN_RESOLUTION));
   const name = options.name?.trim() || 'Terrain';
   const builder = new MeshBuilder(name, false);
   const vertices: string[][] = [];
@@ -68,7 +76,7 @@ export function createTerrain(session: EditorSession, options: TerrainOptions = 
   const index = [...document.objects.values()].filter((object) => object.metadata.terrain === 'true').length + 1;
   const name = options.name?.trim() || `Terrain ${index}`;
   const size = clamp(options.size ?? 20, 1, 1000);
-  const resolution = Math.round(clamp(options.resolution ?? 32, 2, 64));
+  const resolution = Math.round(clamp(options.resolution ?? 32, 2, MAX_TERRAIN_RESOLUTION));
   const tileRepeat = Math.round(clamp(options.tileRepeat ?? 8, 1, 128));
   const mesh = buildTerrainMesh({ name, size, resolution });
 
@@ -134,6 +142,80 @@ export function activeTerrain(session: EditorSession) {
   const object = objectId ? session.document.objects.get(objectId) : null;
   const mesh = object?.meshId ? session.document.meshes.get(object.meshId) : null;
   return object?.metadata.terrain === 'true' && mesh ? { object, mesh } : null;
+}
+
+/**
+ * Rebuild terrain grid at a new resolution, bilinear-sampling heights from the
+ * current mesh, then reprojecting placed props.
+ */
+export function resampleTerrain(
+  session: EditorSession,
+  terrainObjectId: ObjectId,
+  resolution: number,
+): boolean {
+  const document = session.document;
+  const object = document.objects.get(terrainObjectId);
+  const oldMesh = object?.meshId ? document.meshes.get(object.meshId) : null;
+  if (!object || object.metadata.terrain !== 'true' || !oldMesh) return false;
+
+  const size = Math.max(1e-6, Number(object.metadata.terrainSize) || 20);
+  const oldResolution = Math.max(2, Number(object.metadata.terrainResolution) || 2);
+  const nextResolution = Math.round(clamp(resolution, 2, MAX_TERRAIN_RESOLUTION));
+  if (nextResolution === oldResolution) return false;
+
+  const tileRepeat = Math.max(1, Number(object.metadata.terrainTileRepeat) || 8);
+  const beforeProps = snapshotPlacedTransforms(document, terrainObjectId);
+  const beforeMetadata = { ...object.metadata };
+
+  const newMesh = buildTerrainMesh({
+    name: oldMesh.name,
+    size,
+    resolution: nextResolution,
+  });
+  newMesh.id = oldMesh.id;
+  for (const vertex of newMesh.vertices.values()) {
+    vertex.position.y = terrainHeightAtLocalPoint(
+      object,
+      oldMesh,
+      vertex.position.x,
+      vertex.position.z,
+    );
+  }
+  applyTerrainTileRepeat(newMesh, tileRepeat);
+  newMesh.topologyVersion = oldMesh.topologyVersion + 1;
+  newMesh.geometryVersion = oldMesh.geometryVersion + 1;
+
+  document.meshes.set(newMesh.id, newMesh);
+  object.metadata.terrainResolution = String(nextResolution);
+  reprojectTerrainPlacedObjects(document, terrainObjectId);
+  const afterProps = snapshotPlacedTransforms(document, terrainObjectId);
+  const afterMetadata = { ...object.metadata };
+
+  let applied = true;
+  session.history.execute({
+    name: `Resample Terrain ${nextResolution}`,
+    execute: () => {
+      if (applied) return;
+      document.meshes.set(newMesh.id, newMesh);
+      object.metadata = { ...afterMetadata };
+      restorePlacedTransforms(document, afterProps);
+      document.dirty = true;
+      session.requestRedraw();
+      applied = true;
+    },
+    undo: () => {
+      document.meshes.set(oldMesh.id, oldMesh);
+      object.metadata = { ...beforeMetadata };
+      restorePlacedTransforms(document, beforeProps);
+      document.dirty = true;
+      session.requestRedraw();
+      applied = false;
+    },
+  });
+
+  document.dirty = true;
+  session.requestRedraw();
+  return true;
 }
 
 export function applyTerrainTileRepeat(mesh: EditableMesh, repeat: number): void {
