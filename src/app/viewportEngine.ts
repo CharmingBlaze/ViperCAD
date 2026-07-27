@@ -109,6 +109,7 @@ import {
 import { markUvSeams } from '@/core/uv/UvOperations';
 import { ViewportInteractionOverlay } from '@/app/viewport/ViewportInteractionOverlay';
 import { ViewportSceneSynchronizer } from '@/app/viewport/ViewportSceneSynchronizer';
+import { RigPreviewSynchronizer } from '@/app/viewport/RigPreviewSynchronizer';
 import { ModifierPreviewOverlay, type ModifierPreview } from '@/renderer/ModifierPreviewOverlay';
 import {
   CurveControlOverlay,
@@ -163,6 +164,7 @@ export class ViewportEngine {
       this.invalidate();
     },
   });
+  private rigPreviewSynchronizer = new RigPreviewSynchronizer();
   private frame = 0;
   private resizeObserver: ResizeObserver | null = null;
   private unsubRedraw: (() => void) | null = null;
@@ -294,6 +296,7 @@ export class ViewportEngine {
     this.resizeObserver = null;
     this.unbindPointer();
     this.sceneSynchronizer.reset();
+    this.rigPreviewSynchronizer.reset();
     this.clearMarquee(false);
     this.seamStroke = null;
     this.painting3D = false;
@@ -3329,6 +3332,7 @@ export class ViewportEngine {
     if (!this.attached || !this.session || !this.scene) return;
     const session = this.session;
     this.sceneSynchronizer.sync(this.scene);
+    this.rigPreviewSynchronizer.sync(this.scene, session);
     const shadingMode = this.workspace?.getShadingMode() ?? 'material';
     for (const handle of this.handles.values()) {
       applyViewportRenderStyle(handle, shadingMode);

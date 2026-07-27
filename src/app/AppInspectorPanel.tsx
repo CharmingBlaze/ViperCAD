@@ -2701,8 +2701,8 @@ export function AppInspectorPanel({
               {sceneToolMode === 'modifiers' && <>
               <ModifierStackPanel
                 session={session}
-                object={activeObject}
-                mesh={activeMesh}
+                object={activeObject ?? null}
+                mesh={activeMesh ?? null}
                 onRefresh={onRefresh}
               />
               <h3 className="uv-section-title">Live Modifiers</h3>

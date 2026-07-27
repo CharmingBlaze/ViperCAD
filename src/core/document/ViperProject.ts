@@ -13,10 +13,14 @@ import type {
   ViperProject,
 } from '@/core/document/types';
 import { DEFAULT_PROJECT_SETTINGS } from '@/core/document/types';
+import { createDefaultRigDocumentSettings } from '@/core/rig/types';
 
 export function createDefaultDocumentSettings(kind: DocumentKind): DocumentSettings {
   if (kind === 'model') {
     return { origin: defaultTransform(), thumbnailImageId: null };
+  }
+  if (kind === 'rig') {
+    return { rig: createDefaultRigDocumentSettings() };
   }
   return {};
 }
@@ -38,6 +42,8 @@ export function createEmptyProject(projectName = 'Untitled Project'): ViperProje
   const { material, texture, image } = createDefaultCheckerAssets();
   const model = createViperDocument('Untitled Model', 'model');
   const level = createViperDocument('Main Level', 'level');
+  const rig = createViperDocument('Character Rig', 'rig');
+  rig.settings.rig = createDefaultRigDocumentSettings(model.id);
   return {
     id: createId('proj'),
     name: projectName,
@@ -45,14 +51,19 @@ export function createEmptyProject(projectName = 'Untitled Project'): ViperProje
     documents: new Map([
       [model.id, model],
       [level.id, level],
+      [rig.id, rig],
     ]),
     modelDocumentIds: [model.id],
     levelDocumentIds: [level.id],
+    rigDocumentIds: [rig.id],
     activeDocumentId: level.id,
     meshes: new Map(),
     materials: new Map([[material.id, material]]),
     textures: new Map([[texture.id, texture]]),
     images: new Map([[image.id, image]]),
+    armatures: new Map(),
+    skinBindings: new Map(),
+    animationClips: new Map(),
     settings: {
       ...DEFAULT_PROJECT_SETTINGS,
       symmetry: { ...DEFAULT_PROJECT_SETTINGS.symmetry },
@@ -113,6 +124,7 @@ export function getViperDocument(project: ViperProject, documentId: DocumentId):
 export function addDocumentToProject(project: ViperProject, doc: ViperDocument): DocumentId {
   project.documents.set(doc.id, doc);
   if (doc.kind === 'model') project.modelDocumentIds.push(doc.id);
+  else if (doc.kind === 'rig') project.rigDocumentIds.push(doc.id);
   else project.levelDocumentIds.push(doc.id);
   project.dirty = true;
   return doc.id;
@@ -122,17 +134,28 @@ export function removeDocumentFromProject(project: ViperProject, documentId: Doc
   project.documents.delete(documentId);
   project.modelDocumentIds = project.modelDocumentIds.filter((id) => id !== documentId);
   project.levelDocumentIds = project.levelDocumentIds.filter((id) => id !== documentId);
+  project.rigDocumentIds = project.rigDocumentIds.filter((id) => id !== documentId);
   if (project.activeDocumentId === documentId) {
-    project.activeDocumentId = project.levelDocumentIds[0] ?? project.modelDocumentIds[0] ?? null;
+    project.activeDocumentId =
+      project.levelDocumentIds[0]
+      ?? project.modelDocumentIds[0]
+      ?? project.rigDocumentIds[0]
+      ?? null;
   }
   project.dirty = true;
 }
 
 export function projectFromLegacyDocument(document: ModelDocument): ViperProject {
   const project = createEmptyProject(document.name);
-  project.documents.delete(project.modelDocumentIds[0]!);
+  for (const docId of [...project.documents.keys()]) {
+    project.documents.delete(docId);
+  }
   project.modelDocumentIds = [];
-  project.documents.delete(project.levelDocumentIds[0]!);
+  project.levelDocumentIds = [];
+  project.rigDocumentIds = [];
+  project.armatures.clear();
+  project.skinBindings.clear();
+  project.animationClips.clear();
 
   const level = createViperDocument(document.name || 'Main Level', 'level');
   level.id = document.id;

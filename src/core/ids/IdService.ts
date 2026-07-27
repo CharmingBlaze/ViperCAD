@@ -15,7 +15,11 @@ export type IdKind =
   | 'cmd'
   | 'doc'
   | 'proj'
-  | 'island';
+  | 'island'
+  | 'bone'
+  | 'arm'
+  | 'skin'
+  | 'clip';
 
 export type ElementId = string;
 

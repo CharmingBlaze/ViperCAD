@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:rig": "vite --config rig/vite.config.ts",
     "build": "tsc -b && vite build",
+    "build:rig": "vite build --config rig/vite.config.ts",
+    "build:all": "npm run build && npm run build:rig",
     "build:exe": "npm run build && node scripts/prepare-desktop.mjs && cd desktop && go build -ldflags=\"-H windowsgui\" -o ../ViperCAD.exe .",
     "lint": "oxlint",
     "preview": "vite preview",

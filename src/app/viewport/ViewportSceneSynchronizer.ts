@@ -8,6 +8,7 @@ import {
 } from '@/core/editor/ModelInstances';
 import type { MaterialAsset, MaterialId, ObjectId, SceneObject } from '@/core/document/types';
 import type { EditableMesh, MeshId } from '@/core/mesh/types';
+import { hideStaticMeshWhenRigPreview } from '@/app/viewport/RigPreviewSynchronizer';
 import { resolveDisplayMesh } from '@/core/modifiers/displayMesh';
 import {
   readObjectModifierStack,
@@ -89,6 +90,7 @@ export class ViewportSceneSynchronizer {
         continue;
       }
       if (!object.meshId || !object.visible) continue;
+      if (hideStaticMeshWhenRigPreview(session, object.id)) continue;
       this.syncHandle(
         session,
         scene,

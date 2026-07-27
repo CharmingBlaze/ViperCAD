@@ -70,6 +70,11 @@ import {
   DesktopMenuBar,
   type DesktopMenuDefinition,
 } from '@/app/DesktopMenuBar';
+import {
+  bindViperCadLink,
+  launchViperRig,
+  syncProjectToRig,
+} from '@/app/viperRigLauncher';
 import './App.css';
 
 export default function App() {
@@ -110,6 +115,18 @@ export default function App() {
     }, 5000);
     return () => window.clearInterval(timer);
   }, [session]);
+
+  useEffect(() => {
+    return bindViperCadLink(session.project, (project) => {
+      session.loadProject(project, project.activeDocumentId ?? undefined);
+      refresh();
+      pushToast('Rig changes synced from ViperRig', 'info');
+    });
+  }, [session]);
+
+  useEffect(() => {
+    syncProjectToRig(session.project, session.documentId);
+  }, [session, session.project.version, session.documentId]);
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -534,6 +551,21 @@ export default function App() {
         : sel.hoveredObjectId
           ? 'hover object'
           : '';
+
+  const openViperRig = () => {
+    const rigDocumentId = session.project.rigDocumentIds[0] ?? null;
+    const child = launchViperRig(session.project, rigDocumentId);
+    if (child) {
+      pushToast('Opened ViperRig — rig and animation companion', 'info');
+    } else {
+      pushToast('Popup blocked — allow popups or open /rig/ from the same ViperCAD tab', 'error');
+    }
+  };
+
+  const openDocumentById = (documentId: string) => {
+    session.openDocument(documentId);
+    refresh();
+  };
 
   const setShell = (mode: 'model' | 'sculpt' | 'terrain' | 'texture') => {
     if (mode === 'texture') {
@@ -1293,6 +1325,14 @@ export default function App() {
               title="Create and sculpt game terrain"
             >
               Terrain
+            </button>
+            <button
+              type="button"
+              className="tool"
+              onClick={openViperRig}
+              title="Open ViperRig for armatures, skinning, and animation"
+            >
+              Animate
             </button>
             <button
               type="button"

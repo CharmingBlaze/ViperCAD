@@ -12,9 +12,20 @@ import {
 import type { DocumentId, ModelDocument, ObjectId, SceneObject, ViperDocument, ViperProject } from '@/core/document/types';
 import { DEFAULT_PROJECT_SETTINGS } from '@/core/document/types';
 import { defaultTransform } from '@/core/math/Transform';
+import {
+  decodeAnimationClip,
+  decodeArmature,
+  decodeSkinBinding,
+  encodeAnimationClip,
+  encodeArmature,
+  encodeSkinBinding,
+  type EncodedAnimationClip,
+  type EncodedArmature,
+  type EncodedSkinBinding,
+} from '@/core/rig/serialize';
 
 export const PROJECT_FORMAT = 'vipercad';
-export const PROJECT_FORMAT_VERSION = 3;
+export const PROJECT_FORMAT_VERSION = 4;
 
 type EncodedMesh = Omit<EditableMesh, 'vertices' | 'edges' | 'halfEdges' | 'faces' | 'faceCorners' | 'uvLayers' | 'triangulationHints'> & {
   vertices: EditableMesh['vertices'] extends Map<unknown, infer V> ? V[] : never;
@@ -45,33 +56,39 @@ type LegacyProjectFile = {
 type EncodedDocument = {
   id: DocumentId;
   name: string;
-  kind: 'model' | 'level';
+  kind: 'model' | 'level' | 'rig';
   rootObjectIds: ObjectId[];
   objects: (SceneObject & { childIds: string[]; materialSlotIds: string[] })[];
   revision: number;
   settings: ViperDocument['settings'];
 };
 
+type ProjectFilePayload = {
+  id: string;
+  name: string;
+  version: number;
+  activeDocumentId: string | null;
+  modelDocumentIds: string[];
+  levelDocumentIds: string[];
+  rigDocumentIds?: string[];
+  documents: EncodedDocument[];
+  meshes: EncodedMesh[];
+  materials: ModelDocument['materials'] extends Map<unknown, infer V> ? V[] : never;
+  textures: ModelDocument['textures'] extends Map<unknown, infer V> ? V[] : never;
+  images: (Omit<ModelDocument['images'] extends Map<unknown, infer V> ? V : never, 'pixels'> & { pixels: number[] })[];
+  armatures?: EncodedArmature[];
+  skinBindings?: EncodedSkinBinding[];
+  animationClips?: EncodedAnimationClip[];
+  settings: ModelDocument['settings'];
+};
+
 type ProjectFileV3 = {
   format: typeof PROJECT_FORMAT;
-  formatVersion: 3;
+  formatVersion: 3 | 4;
   applicationVersion: string;
   savedAt?: string;
   checksum: string;
-  project: {
-    id: string;
-    name: string;
-    version: number;
-    activeDocumentId: string | null;
-    modelDocumentIds: string[];
-    levelDocumentIds: string[];
-    documents: EncodedDocument[];
-    meshes: EncodedMesh[];
-    materials: ModelDocument['materials'] extends Map<unknown, infer V> ? V[] : never;
-    textures: ModelDocument['textures'] extends Map<unknown, infer V> ? V[] : never;
-    images: (Omit<ModelDocument['images'] extends Map<unknown, infer V> ? V : never, 'pixels'> & { pixels: number[] })[];
-    settings: ModelDocument['settings'];
-  };
+  project: ProjectFilePayload;
 };
 
 export function serializeViperProject(project: ViperProject, applicationVersion = '0.0.0'): string {
@@ -82,6 +99,7 @@ export function serializeViperProject(project: ViperProject, applicationVersion 
     activeDocumentId: project.activeDocumentId,
     modelDocumentIds: [...project.modelDocumentIds],
     levelDocumentIds: [...project.levelDocumentIds],
+    rigDocumentIds: [...project.rigDocumentIds],
     documents: [...project.documents.values()].map((doc) => ({
       id: doc.id,
       name: doc.name,
@@ -101,6 +119,9 @@ export function serializeViperProject(project: ViperProject, applicationVersion 
     materials: [...project.materials.values()].map((m) => ({ ...m, baseColour: { ...m.baseColour }, emissive: { ...m.emissive } })),
     textures: [...project.textures.values()].map((t) => ({ ...t })),
     images: [...project.images.values()].map((i) => ({ ...i, pixels: [...i.pixels] })),
+    armatures: [...project.armatures.values()].map(encodeArmature),
+    skinBindings: [...project.skinBindings.values()].map(encodeSkinBinding),
+    animationClips: [...project.animationClips.values()].map(encodeAnimationClip),
     settings: { ...project.settings, symmetry: { ...project.settings.symmetry } },
   };
   const payload = JSON.stringify(payloadProject);
@@ -141,19 +162,23 @@ export function deserializeViperProject(text: string): DeserializeProjectResult 
     project.activeDocumentId = p.activeDocumentId;
     project.modelDocumentIds = [...p.modelDocumentIds];
     project.levelDocumentIds = [...p.levelDocumentIds];
+    project.rigDocumentIds = [...(p.rigDocumentIds ?? [])];
     project.settings = { ...DEFAULT_PROJECT_SETTINGS, ...p.settings, symmetry: { ...DEFAULT_PROJECT_SETTINGS.symmetry, ...(p.settings?.symmetry ?? {}) } };
     project.documents.clear();
     for (const encoded of p.documents) {
+      const kind = encoded.kind ?? 'level';
       const doc: ViperDocument = {
         id: encoded.id,
         name: encoded.name,
-        kind: encoded.kind,
+        kind,
         rootObjectIds: [...encoded.rootObjectIds],
         revision: encoded.revision ?? 1,
         dirty: false,
-        settings: encoded.kind === 'model'
+        settings: kind === 'model'
           ? { ...createDefaultDocumentSettings('model'), ...encoded.settings, origin: encoded.settings.origin ?? defaultTransform() }
-          : { ...encoded.settings },
+          : kind === 'rig'
+            ? { ...createDefaultDocumentSettings('rig'), ...encoded.settings }
+            : { ...encoded.settings },
         objects: new Map(encoded.objects.map((o) => [o.id, { ...o, childIds: [...o.childIds], materialSlotIds: [...o.materialSlotIds], instanceSourceModelId: o.instanceSourceModelId ?? null, kind: o.kind ?? 'empty' }])),
       };
       normalizeDocumentObjects(doc.objects);
@@ -169,8 +194,14 @@ export function deserializeViperProject(text: string): DeserializeProjectResult 
     project.materials = new Map(p.materials.map((m) => [m.id, normalizeMaterialAsset(m)]));
     project.textures = new Map(p.textures.map((t) => [t.id, t]));
     project.images = new Map(p.images.map((i) => [i.id, { ...i, pixels: new Uint8ClampedArray(i.pixels) }]));
+    project.armatures = new Map((p.armatures ?? []).map((entry) => [entry.id, decodeArmature(entry)]));
+    project.skinBindings = new Map((p.skinBindings ?? []).map((entry) => [entry.id, decodeSkinBinding(entry)]));
+    project.animationClips = new Map((p.animationClips ?? []).map((entry) => [entry.id, decodeAnimationClip(entry)]));
     reserveProjectIds(project);
-    const activeDocumentId = project.activeDocumentId ?? project.levelDocumentIds[0] ?? project.modelDocumentIds[0]!;
+    const activeDocumentId = project.activeDocumentId
+      ?? project.levelDocumentIds[0]
+      ?? project.modelDocumentIds[0]
+      ?? project.rigDocumentIds[0]!;
     project.activeDocumentId = activeDocumentId;
     return { project, activeDocumentId };
   }
@@ -239,8 +270,19 @@ function buildLegacyModelDocument(d: LegacyProjectFile['document']): ModelDocume
 }
 
 function reserveProjectIds(project: ViperProject): void {
-  const ids: string[] = [project.id, ...project.documents.keys(), ...project.meshes.keys(), ...project.materials.keys(), ...project.textures.keys(), ...project.images.keys()];
+  const ids: string[] = [
+    project.id,
+    ...project.documents.keys(),
+    ...project.meshes.keys(),
+    ...project.materials.keys(),
+    ...project.textures.keys(),
+    ...project.images.keys(),
+    ...project.armatures.keys(),
+    ...project.skinBindings.keys(),
+    ...project.animationClips.keys(),
+  ];
   for (const doc of project.documents.values()) ids.push(...doc.objects.keys());
+  for (const armature of project.armatures.values()) ids.push(...armature.bones.keys());
   for (const mesh of project.meshes.values()) {
     ids.push(...mesh.vertices.keys(), ...mesh.edges.keys(), ...mesh.halfEdges.keys(), ...mesh.faces.keys(), ...mesh.faceCorners.keys(), ...mesh.uvLayers.keys());
   }

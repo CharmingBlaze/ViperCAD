@@ -2,6 +2,15 @@ import type { ElementId } from '@/core/ids/IdService';
 import type { Transform } from '@/core/math/Transform';
 import type { Vec3 } from '@/core/math/Vec3';
 import type { EditableMesh, MeshId } from '@/core/mesh/types';
+import type {
+  AnimationClip,
+  AnimationClipId,
+  Armature,
+  ArmatureId,
+  RigDocumentSettings,
+  SkinBinding,
+  SkinBindingId,
+} from '@/core/rig/types';
 
 export type ObjectId = ElementId;
 export type DocumentId = ElementId;
@@ -9,11 +18,13 @@ export type MaterialId = ElementId;
 export type TextureId = ElementId;
 export type ImageId = ElementId;
 
-export type DocumentKind = 'model' | 'level';
+export type DocumentKind = 'model' | 'level' | 'rig';
 
 export type DocumentSettings = {
   origin?: Transform;
   thumbnailImageId?: ImageId | null;
+  /** Rig/animation document configuration when kind is `rig`. */
+  rig?: RigDocumentSettings;
 };
 
 export type ViperDocument = {
@@ -163,11 +174,15 @@ export type ViperProject = {
   documents: Map<DocumentId, ViperDocument>;
   modelDocumentIds: DocumentId[];
   levelDocumentIds: DocumentId[];
+  rigDocumentIds: DocumentId[];
   activeDocumentId: DocumentId | null;
   meshes: Map<MeshId, EditableMesh>;
   materials: Map<MaterialId, MaterialAsset>;
   textures: Map<TextureId, TextureAsset>;
   images: Map<ImageId, ImageAsset>;
+  armatures: Map<ArmatureId, Armature>;
+  skinBindings: Map<SkinBindingId, SkinBinding>;
+  animationClips: Map<AnimationClipId, AnimationClip>;
   settings: ProjectSettings;
   dirty: boolean;
 };
