@@ -53,6 +53,7 @@ import {
 } from '@/core/symmetry/Symmetry';
 import { gameReadiness } from '@/app/GameExportProfiles';
 import { PRIMITIVE_KINDS, PRIMITIVE_LABELS, type PrimitiveKind } from '@/core/primitives/PrimitiveFactory';
+import { ModifierStackPanel } from '@/app/inspector/ModifierStackPanel';
 import { PrimitiveOperationPanel } from '@/app/inspector/PrimitiveOperationPanel';
 import { CurveOperationPanel } from '@/app/inspector/CurveOperationPanel';
 import { ExactCoordinateInput } from '@/app/inspector/ExactCoordinateInput';
@@ -75,6 +76,8 @@ import {
   type SimpleTextureSettings,
 } from '@/core/curves/SimpleTexture';
 import { viewportEngine } from '@/app/viewportEngine';
+import { readObjectModifierStack } from '@/core/modifiers/serialize';
+import { stackHasEnabledModifiers } from '@/core/modifiers/types';
 import {
   CreateDoodleTool,
   type DoodlePolyPreset,
@@ -293,14 +296,17 @@ export function AppInspectorPanel({
   };
 
   useEffect(() => {
+    const persistentStack = activeObject
+      ? stackHasEnabledModifiers(readObjectModifierStack(activeObject))
+      : false;
     viewportEngine.setModifierPreview(activeObject?.id ?? null, [
-      ...(previewMirror ? [{ kind: 'mirror' as const, axis: mirrorAxis }] : []),
+      ...(previewMirror && !persistentStack ? [{ kind: 'mirror' as const, axis: mirrorAxis }] : []),
       ...(previewArray
         ? [{ kind: 'array' as const, axis: arrayAxis, count: arrayCount, spacing: arraySpacing }]
         : []),
     ]);
     return () => viewportEngine.setModifierPreview(null, []);
-  }, [activeObject?.id, arrayAxis, arrayCount, arraySpacing, mirrorAxis, previewArray, previewMirror]);
+  }, [activeObject, arrayAxis, arrayCount, arraySpacing, mirrorAxis, previewArray, previewMirror]);
 
   useEffect(() => {
     let preview = null;
@@ -2693,6 +2699,12 @@ export function AppInspectorPanel({
               </label>
               </>}
               {sceneToolMode === 'modifiers' && <>
+              <ModifierStackPanel
+                session={session}
+                object={activeObject}
+                mesh={activeMesh}
+                onRefresh={onRefresh}
+              />
               <h3 className="uv-section-title">Live Modifiers</h3>
               <div className="uv-btn-grid uv-btn-grid-2">
                 <label className="uv-check">

@@ -6,8 +6,14 @@ import {
   collectInstanceRenderParts,
   isInstanceObject,
 } from '@/core/editor/ModelInstances';
-import type { MaterialAsset, MaterialId, ObjectId } from '@/core/document/types';
+import type { MaterialAsset, MaterialId, ObjectId, SceneObject } from '@/core/document/types';
 import type { EditableMesh, MeshId } from '@/core/mesh/types';
+import { resolveDisplayMesh } from '@/core/modifiers/displayMesh';
+import {
+  readObjectModifierStack,
+  serializeModifierStack,
+} from '@/core/modifiers/serialize';
+import { createEmptyModifierStack } from '@/core/modifiers/types';
 import { v3 } from '@/core/math/Vec3';
 import {
   applyMeshEvaluation,
@@ -92,6 +98,7 @@ export class ViewportSceneSynchronizer {
         getObjectWorldMatrix(session.document, object.id),
         object.id,
         liveIds,
+        object,
       );
     }
 
@@ -116,9 +123,16 @@ export class ViewportSceneSynchronizer {
     worldMatrix: Matrix4,
     pickObjectId: ObjectId,
     liveIds: Set<string>,
+    sceneObject?: SceneObject,
   ): void {
-    const mesh = session.document.meshes.get(meshId);
-    if (!mesh) return;
+    const baseMesh = session.document.meshes.get(meshId);
+    if (!baseMesh) return;
+
+    const object = sceneObject ?? session.document.objects.get(pickObjectId);
+    const renderMesh = object ? resolveDisplayMesh(baseMesh, object) : baseMesh;
+    const stackKey = object
+      ? serializeModifierStack(readObjectModifierStack(object) ?? createEmptyModifierStack())
+      : '';
 
     liveIds.add(handleKey);
     const materials = materialSlotIds
@@ -128,20 +142,31 @@ export class ViewportSceneSynchronizer {
 
     let handle = this.options.handles.get(handleKey);
     if (!handle) {
-      handle = createObjectRenderHandle(pickObjectId, mesh, resolvedMaterials, {
+      handle = createObjectRenderHandle(pickObjectId, renderMesh, resolvedMaterials, {
         textures: session.document.textures,
         images: session.document.images,
       });
+      handle.meshId = baseMesh.id;
       handle.group.name = handleKey;
       this.options.handles.set(handleKey, handle);
       scene.add(handle.group);
+      if (renderMesh !== baseMesh) {
+        this.schedule(handleKey, handle, baseMesh, renderMesh, stackKey, object ?? null);
+      }
     } else {
       updateObjectRenderHandle(
         handle,
-        mesh,
+        renderMesh,
         resolvedMaterials,
         { textures: session.document.textures, images: session.document.images },
-        (targetHandle, targetMesh) => this.schedule(handleKey, targetHandle, targetMesh),
+        (targetHandle, targetMesh) => this.schedule(
+          handleKey,
+          targetHandle,
+          baseMesh,
+          targetMesh,
+          stackKey,
+          object ?? null,
+        ),
       );
     }
 
@@ -169,24 +194,45 @@ export class ViewportSceneSynchronizer {
     }
   }
 
-  private schedule(handleKey: string, handle: ObjectRenderHandle, mesh: EditableMesh): void {
-    const token = `${mesh.id}:${mesh.topologyVersion}:${mesh.geometryVersion}`;
+  private schedule(
+    handleKey: string,
+    handle: ObjectRenderHandle,
+    baseMesh: EditableMesh,
+    renderMesh: EditableMesh,
+    stackKey: string,
+    object: SceneObject | null,
+  ): void {
+    const token = `${baseMesh.id}:${baseMesh.topologyVersion}:${baseMesh.geometryVersion}:${stackKey}`;
     if (this.pending.get(handleKey) === token) return;
     this.pending.set(handleKey, token);
-    void evaluateMeshAsync(mesh).then((result) => {
+    void evaluateMeshAsync(renderMesh).then((result) => {
       const session = this.options.getSession();
       if (!this.options.isAttached() || !session || this.pending.get(handleKey) !== token) return;
       const currentHandle = this.options.handles.get(handleKey);
-      const currentMesh = session.document.meshes.get(mesh.id);
-      if (!currentHandle || currentHandle !== handle || !currentMesh) return;
-      if (currentMesh.topologyVersion !== result.topologyVersion || currentMesh.geometryVersion !== result.geometryVersion) return;
-      applyMeshEvaluation(handle, result, currentMesh);
+      const currentBase = session.document.meshes.get(baseMesh.id);
+      if (!currentHandle || currentHandle !== handle || !currentBase) return;
+      const currentObject = object ?? session.document.objects.get(handle.objectId);
+      const currentRender = currentObject
+        ? resolveDisplayMesh(currentBase, currentObject)
+        : currentBase;
+      if (
+        currentRender.topologyVersion !== result.topologyVersion
+        || currentRender.geometryVersion !== result.geometryVersion
+      ) return;
+      applyMeshEvaluation(handle, result, currentRender);
       this.pending.delete(handleKey);
       this.options.onApplied();
     }).catch(() => {
       this.pending.delete(handleKey);
-      const currentMesh = this.options.getSession()?.document.meshes.get(mesh.id);
-      if (currentMesh) updateObjectRenderHandle(handle, currentMesh);
+      const session = this.options.getSession();
+      const currentBase = session?.document.meshes.get(baseMesh.id);
+      if (currentBase) {
+        const currentObject = object ?? session?.document.objects.get(handle.objectId);
+        const currentRender = currentObject
+          ? resolveDisplayMesh(currentBase, currentObject)
+          : currentBase;
+        updateObjectRenderHandle(handle, currentRender);
+      }
       this.options.onApplied();
     });
   }
