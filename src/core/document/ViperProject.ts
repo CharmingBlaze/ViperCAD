@@ -8,6 +8,7 @@ import type {
   DocumentKind,
   DocumentSettings,
   ModelDocument,
+  ObjectId,
   ViperDocument,
   ViperProject,
 } from '@/core/document/types';
@@ -75,7 +76,12 @@ export function buildModelDocumentView(
     version: project.version,
     kind: doc.kind,
     objects: doc.objects,
-    rootObjectIds: doc.rootObjectIds,
+    get rootObjectIds() {
+      return doc.rootObjectIds;
+    },
+    set rootObjectIds(value: ObjectId[]) {
+      doc.rootObjectIds = value;
+    },
     meshes: project.meshes,
     materials: project.materials,
     textures: project.textures,

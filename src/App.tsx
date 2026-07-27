@@ -28,7 +28,7 @@ import { activeTerrain } from '@/core/terrain/Terrain';
 import { sculptableObjects } from '@/core/sculpt/MeshSculptTarget';
 import type { GizmoMode, TransformOrientation, TransformPivotMode } from '@/core/transform/types';
 import { WorkspaceController } from '@/workspace/WorkspaceController';
-import { VIEW_LABELS } from '@/workspace/types';
+import { VIEW_LABELS, SHADING_MODE_LABELS, type ShadingMode } from '@/workspace/types';
 import { deserializeViperProject, serializeProject } from '@/core/persistence/ProjectSerializer';
 import { exportObj, importObj } from '@/core/io/ObjAdapter';
 import { commitMeshObject } from '@/core/document/ModelDocument';
@@ -88,6 +88,12 @@ export default function App() {
 
   useEffect(() => session.onRedraw(refresh), [session]);
   useEffect(() => workspace.subscribe(refresh), [workspace]);
+
+  useEffect(() => {
+    if (workspace.shellMode === 'model') session.ensureDocumentKind('model');
+    else if (workspace.shellMode === 'terrain') session.ensureDocumentKind('level');
+    refresh();
+  }, [session, workspace]);
 
   useEffect(() => {
     let active = true;
@@ -213,14 +219,21 @@ export default function App() {
   const newProject = () => {
     if (!confirmReplaceDirtyProject()) return;
     session.loadProject(createEmptyProject());
+    if (workspace.shellMode === 'model') session.ensureDocumentKind('model');
+    else if (workspace.shellMode === 'terrain') session.ensureDocumentKind('level');
     projectFileToken.current = null;
     void clearAutomaticAutosaves();
-    pushToast('New project — Main Level is active', 'success');
+    pushToast(
+      workspace.shellMode === 'model'
+        ? 'New project — Untitled Model is active'
+        : 'New project — Main Level is active',
+      'success',
+    );
     refresh();
   };
 
-  const openDocumentById = (documentId: string) => {
-    session.openDocument(documentId);
+  const toggleOutliner = () => {
+    setOutlinerOpen((open) => !open);
     refresh();
   };
 
@@ -456,6 +469,14 @@ export default function App() {
     refresh();
   };
 
+  const setRenderMode = (mode: ShadingMode) => {
+    workspace.setShadingMode(mode);
+    session.requestRedraw();
+    refresh();
+  };
+
+  const shadingMode = workspace.getShadingMode();
+
   const setGizmoMode = (mode: GizmoMode) => {
     session.tools.setActive('select', session.context());
     session.transform.setGizmoMode(mode);
@@ -560,7 +581,20 @@ export default function App() {
     } else {
       session.tools.setActive('select', session.context());
     }
+    const switchedDoc = mode === 'model'
+      ? session.ensureDocumentKind('model')
+      : mode === 'terrain'
+        ? session.ensureDocumentKind('level')
+        : false;
     workspace.setShellMode(mode);
+    if (switchedDoc) {
+      pushToast(
+        mode === 'model'
+          ? `Switched to model "${session.document.name}" — model edits stay in model documents`
+          : `Switched to level "${session.document.name}"`,
+        'info',
+      );
+    }
     refresh();
   };
 
@@ -890,6 +924,14 @@ export default function App() {
       entries: [
         {
           kind: 'command',
+          label: 'Outliner',
+          checked: outlinerOpen,
+          disabled: workspace.shellMode !== 'model',
+          action: toggleOutliner,
+        },
+        { kind: 'separator' },
+        {
+          kind: 'command',
           label: 'Scene Outliner',
           checked: outlinerOpen && outlinerTab === 'scene',
           action: () => {
@@ -914,12 +956,6 @@ export default function App() {
             setOutlinerTab('levels');
             setOutlinerOpen(true);
           },
-        },
-        {
-          kind: 'command',
-          label: 'Hide Outliner',
-          checked: !outlinerOpen,
-          action: () => setOutlinerOpen(false),
         },
         {
           kind: 'command',
@@ -989,6 +1025,42 @@ export default function App() {
             viewportEngine.invalidate();
             refresh();
           },
+        },
+      ],
+    },
+    {
+      label: 'Render',
+      entries: [
+        {
+          kind: 'command',
+          label: 'Material',
+          checked: shadingMode === 'material',
+          action: () => setRenderMode('material'),
+        },
+        {
+          kind: 'command',
+          label: 'Wireframe',
+          checked: shadingMode === 'wireframe',
+          action: () => setRenderMode('wireframe'),
+        },
+        {
+          kind: 'command',
+          label: 'Outlines',
+          checked: shadingMode === 'outlines',
+          action: () => setRenderMode('outlines'),
+        },
+        {
+          kind: 'command',
+          label: 'Game',
+          checked: shadingMode === 'game',
+          action: () => setRenderMode('game'),
+        },
+        { kind: 'separator' },
+        {
+          kind: 'command',
+          label: 'X-Ray',
+          checked: sel.xRay,
+          action: toggleXRay,
         },
       ],
     },
@@ -1185,8 +1257,8 @@ export default function App() {
     },
   ];
 
-  const leftMenus = menus.slice(0, 6);
-  const rightMenus = menus.slice(5);
+  const leftMenus = menus.slice(0, 7);
+  const rightMenus = menus.slice(6);
 
   return (
     <div className="app">
@@ -1281,6 +1353,20 @@ export default function App() {
               </button>
             ))}
           </div>
+          {workspace.shellMode === 'model' && (
+            <>
+              <span className="bar-sep" aria-hidden />
+              <button
+                type="button"
+                className={`tool outliner-toggle${outlinerOpen ? ' is-active' : ''}`}
+                onClick={toggleOutliner}
+                aria-pressed={outlinerOpen}
+                title={outlinerOpen ? 'Hide Outliner' : 'Show Outliner'}
+              >
+                Outliner
+              </button>
+            </>
+          )}
         </div>
         <DocumentTabs
           session={session}
@@ -1358,6 +1444,8 @@ export default function App() {
           <span>
             {sel.mode}
             {sel.xRay ? ' · x-ray' : ' · visible'}
+            {' · '}
+            {SHADING_MODE_LABELS[shadingMode]}
             {' · '}
             {selectionSummary}
             {hoverSummary ? ` · ${hoverSummary}` : ''}

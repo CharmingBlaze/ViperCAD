@@ -1,4 +1,4 @@
-import type { DocumentId, ObjectId, ViperProject } from '@/core/document/types';
+import type { DocumentId, DocumentKind, ObjectId, ViperProject } from '@/core/document/types';
 import {
   addDocumentToProject,
   buildModelDocumentView,
@@ -29,10 +29,14 @@ export class ProjectEditor {
   project: ViperProject;
   openDocuments = new Map<DocumentId, OpenDocumentSession>();
   activeDocumentId: DocumentId | null;
+  lastModelDocumentId: DocumentId | null = null;
+  lastLevelDocumentId: DocumentId | null = null;
 
   constructor(project: ViperProject) {
     this.project = project;
     this.activeDocumentId = project.activeDocumentId;
+    if (project.modelDocumentIds[0]) this.lastModelDocumentId = project.modelDocumentIds[0]!;
+    if (project.levelDocumentIds[0]) this.lastLevelDocumentId = project.levelDocumentIds[0]!;
     if (this.activeDocumentId) this.openDocument(this.activeDocumentId);
   }
 
@@ -45,7 +49,22 @@ export class ProjectEditor {
     }
     this.activeDocumentId = documentId;
     this.project.activeDocumentId = documentId;
+    const doc = getViperDocument(this.project, documentId);
+    if (doc.kind === 'model') this.lastModelDocumentId = documentId;
+    else this.lastLevelDocumentId = documentId;
     return session;
+  }
+
+  preferredDocumentId(kind: DocumentKind): DocumentId | null {
+    if (kind === 'model') {
+      return this.lastModelDocumentId ?? this.project.modelDocumentIds[0] ?? null;
+    }
+    return this.lastLevelDocumentId ?? this.project.levelDocumentIds[0] ?? null;
+  }
+
+  activeDocumentKind(): DocumentKind | null {
+    if (!this.activeDocumentId) return null;
+    return getViperDocument(this.project, this.activeDocumentId).kind;
   }
 
   closeDocument(documentId: DocumentId): void {

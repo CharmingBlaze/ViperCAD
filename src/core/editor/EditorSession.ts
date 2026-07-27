@@ -2,7 +2,7 @@ import {
   createEmptyProject,
   projectFromLegacyDocument,
 } from '@/core/document/ViperProject';
-import type { DocumentId, ModelDocument, ObjectId, SceneObject, ViperProject } from '@/core/document/types';
+import type { DocumentId, DocumentKind, ModelDocument, ObjectId, SceneObject, ViperProject } from '@/core/document/types';
 import { syncFocusScopeFilter } from '@/core/editor/GroupFocus';
 import { ProjectEditor, type OpenDocumentSession } from '@/core/editor/ProjectEditor';
 import { CommandHistory } from '@/core/history/CommandHistory';
@@ -131,6 +131,15 @@ export class EditorSession {
     this.snapIndexCache.clear();
     this.snapBvhCache.clear();
     this.requestRedraw();
+  }
+
+  /** Switch to a model or level document when the active shell expects that kind. */
+  ensureDocumentKind(kind: DocumentKind): boolean {
+    if (this.projectEditor.activeDocumentKind() === kind) return false;
+    const preferred = this.projectEditor.preferredDocumentId(kind);
+    if (!preferred) return false;
+    this.openDocument(preferred);
+    return true;
   }
 
   closeDocument(documentId: DocumentId): void {

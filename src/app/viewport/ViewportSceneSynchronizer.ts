@@ -164,7 +164,9 @@ export class ViewportSceneSynchronizer {
         material.opacity = base;
       }
     }
-    handle.edgeOverlay.visible = !ghosted;
+    if (ghosted) {
+      handle.edgeOverlay.visible = false;
+    }
   }
 
   private schedule(handleKey: string, handle: ObjectRenderHandle, mesh: EditableMesh): void {

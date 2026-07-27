@@ -11,7 +11,14 @@ import {
   loadWorkspacePreferences,
   saveWorkspacePreferences,
 } from './WorkspacePersistence';
-import type { AppShellMode, ViewId, WorkspacePreferences } from './types';
+import {
+  normalizeShadingMode,
+  VIEW_ORDER,
+  type AppShellMode,
+  type ShadingMode,
+  type ViewId,
+  type WorkspacePreferences,
+} from './types';
 
 export type InspectorTab = 'create' | 'edit' | 'material';
 export type InspectorSection = 'select' | 'transform' | 'geometry' | 'symmetry' | 'scene';
@@ -245,6 +252,20 @@ export class WorkspaceController {
 
   getCamera(id: ViewId) {
     return this.preferences.viewports[id].camera;
+  }
+
+  getShadingMode(): ShadingMode {
+    return normalizeShadingMode(this.preferences.viewports.persp.shadingMode);
+  }
+
+  setShadingMode(mode: ShadingMode): void {
+    const normalized = normalizeShadingMode(mode);
+    if (this.getShadingMode() === normalized) return;
+    for (const id of VIEW_ORDER) {
+      this.preferences.viewports[id].shadingMode = normalized;
+    }
+    this.notify();
+    this.schedulePersist();
   }
 
   schedulePersist(): void {

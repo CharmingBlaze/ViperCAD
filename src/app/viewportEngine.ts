@@ -30,6 +30,7 @@ import {
   type ObjectRenderHandle,
 } from '@/renderer/MeshRenderAdapter';
 import { SelectionOverlaySystem } from '@/renderer/SelectionOverlays';
+import { applyViewportRenderStyle } from '@/renderer/ViewportRenderStyle';
 import { TransformGizmo } from '@/renderer/TransformGizmo';
 import {
   ORBIT_MAX_DISTANCE,
@@ -270,6 +271,7 @@ export class ViewportEngine {
     this.unsubWorkspace = workspace.subscribe(() => {
       // Recompute scissor rects before UI chrome reads them (Tab maximize/restore).
       this.resize();
+      this.syncScene();
       this.invalidate();
       this.onLayoutChange?.();
       this.rebindActiveControls();
@@ -2776,6 +2778,7 @@ export class ViewportEngine {
   private syncOverlays(): void {
     if (!this.session || !this.workspace) return;
     const doc = this.session.document;
+    const shadingMode = this.workspace.getShadingMode();
     this.overlays.sync(
       this.session.selection.state,
       this.handles,
@@ -2784,6 +2787,7 @@ export class ViewportEngine {
         return object?.meshId ? doc.meshes.get(object.meshId) ?? null : null;
       },
       (ids) => expandGroupsToDescendants(doc, ids),
+      shadingMode,
     );
     const activeTool = this.session.tools.getActive();
     const draft =
@@ -3325,6 +3329,10 @@ export class ViewportEngine {
     if (!this.attached || !this.session || !this.scene) return;
     const session = this.session;
     this.sceneSynchronizer.sync(this.scene);
+    const shadingMode = this.workspace?.getShadingMode() ?? 'material';
+    for (const handle of this.handles.values()) {
+      applyViewportRenderStyle(handle, shadingMode);
+    }
     const tool = session.tools.getActive();
     if (!(tool instanceof TileDrawTool) && this.tileDrawOverlay.group.visible) {
       this.tileDrawOverlay.update(null, this.primitivePreview.revision);

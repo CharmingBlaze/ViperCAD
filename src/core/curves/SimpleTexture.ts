@@ -12,6 +12,7 @@ import {
   createImageAsset,
   createTextureAsset,
 } from '@/core/image/PixelEditor';
+import { generateGradientPixels } from '@/core/image/GradientGenerator';
 import { v3 } from '@/core/math/Vec3';
 
 export type CurveTipStyle = 'pointed' | 'square';
@@ -158,12 +159,17 @@ function ensureGradientTexture(
 ): TextureId {
   const storedImageId = object.metadata.simpleTextureGradientImageId;
   const storedTextureId = object.metadata.simpleTextureGradientTextureId;
-  const pixels = gradientPixels(
+  const pixels = generateGradientPixels(
     64,
     64,
-    settings.gradientStart,
-    settings.gradientEnd,
-    settings.gradientAngle,
+    {
+      type: 'linear',
+      angle: settings.gradientAngle,
+      stops: [
+        { color: settings.gradientStart, position: 0, opacity: 100 },
+        { color: settings.gradientEnd, position: 100, opacity: 100 },
+      ],
+    },
   );
   const image = storedImageId ? doc.images.get(storedImageId) : null;
   const texture = storedTextureId ? doc.textures.get(storedTextureId) : null;
@@ -195,34 +201,6 @@ function applyTextureTransform(
   texture.offsetU = settings.offsetAcross + (settings.flipAcross ? 1 : 0);
   texture.offsetV = settings.offsetAlong + (settings.flipAlong ? 1 : 0);
   texture.rotationDegrees = settings.rotation;
-}
-
-function gradientPixels(
-  width: number,
-  height: number,
-  startHex: string,
-  endHex: string,
-  angleDegrees: number,
-): Uint8ClampedArray {
-  const start = hexToRgb(startHex);
-  const end = hexToRgb(endHex);
-  const angle = angleDegrees * Math.PI / 180;
-  const dx = Math.cos(angle);
-  const dy = Math.sin(angle);
-  const result = new Uint8ClampedArray(width * height * 4);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const nx = width > 1 ? x / (width - 1) - 0.5 : 0;
-      const ny = height > 1 ? y / (height - 1) - 0.5 : 0;
-      const t = Math.max(0, Math.min(1, nx * dx + ny * dy + 0.5));
-      const offset = (y * width + x) * 4;
-      result[offset] = Math.round((start[0] + (end[0] - start[0]) * t) * 255);
-      result[offset + 1] = Math.round((start[1] + (end[1] - start[1]) * t) * 255);
-      result[offset + 2] = Math.round((start[2] + (end[2] - start[2]) * t) * 255);
-      result[offset + 3] = 255;
-    }
-  }
-  return result;
 }
 
 function hexToRgb(hex: string): [number, number, number] {

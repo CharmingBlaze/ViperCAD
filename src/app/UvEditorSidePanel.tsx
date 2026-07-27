@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { MaterialEditor } from '@/app/MaterialEditor';
+import { PixelateToolControls } from '@/app/PixelateToolControls';
+import { GradientToolControls } from '@/app/GradientToolControls';
 import { IMAGE_FILES, openNativeFile } from '@/app/platform/FileDialogs';
 import { createMaterial } from '@/core/document/ModelDocument';
 import type { EditorSession } from '@/core/editor/EditorSession';
@@ -604,6 +606,26 @@ export function UvEditorSidePanel({
                 </button>
               </div>
             </section>
+            <GradientToolControls
+              session={session}
+              workspace={workspace}
+              image={workspace.texture.activeImageId
+                ? session.document.images.get(workspace.texture.activeImageId)
+                : null}
+              material={workspace.texture.activeMaterialId
+                ? session.document.materials.get(workspace.texture.activeMaterialId)
+                : null}
+            />
+            <PixelateToolControls
+              session={session}
+              workspace={workspace}
+              image={workspace.texture.activeImageId
+                ? session.document.images.get(workspace.texture.activeImageId)
+                : null}
+              material={workspace.texture.activeMaterialId
+                ? session.document.materials.get(workspace.texture.activeMaterialId)
+                : null}
+            />
           </>
         )}
 
@@ -617,7 +639,7 @@ export function UvEditorSidePanel({
           </section>
         )}
 
-        {tab === 'material' && <MaterialEditor session={session} compact />}
+        {tab === 'material' && <MaterialEditor session={session} workspace={workspace} compact />}
 
         {tab === 'view' && (
           <>

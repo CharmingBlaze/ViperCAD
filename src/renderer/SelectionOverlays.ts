@@ -17,6 +17,12 @@ import { faceVertexIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
 import { triangulateFace } from '@/core/mesh/Triangulation';
 import type { EditableMesh, EdgeId, FaceId } from '@/core/mesh/types';
 import type { SelectionState } from '@/core/selection/SelectionManager';
+import type { ShadingMode } from '@/workspace/types';
+import {
+  edgeOverlayStyleForRenderMode,
+  renderStyleHidesEdgeOverlay,
+  renderStyleShowsAllEdges,
+} from '@/renderer/ViewportRenderStyle';
 import type { ObjectRenderHandle } from './MeshRenderAdapter';
 
 /** Blender-like selection palette — overlays only; never replaces materials. */
@@ -87,14 +93,25 @@ export class SelectionOverlaySystem {
     handles: Map<string, ObjectRenderHandle>,
     getMesh: (objectId: ObjectId) => EditableMesh | null,
     expandObjectIds?: (ids: Iterable<ObjectId>) => ObjectId[],
+    shadingMode: ShadingMode = 'material',
   ): void {
     const mode = selection.mode;
     const activeObjectId = selection.activeObjectId;
     const xRay = selection.xRay;
+    const showAllEdges = renderStyleShowsAllEdges(shadingMode);
+    const hideEdges = renderStyleHidesEdgeOverlay(shadingMode);
+    const edgeStyle = edgeOverlayStyleForRenderMode(shadingMode);
 
     for (const [objectId, handle] of handles) {
       const mat = handle.edgeOverlay.material as LineBasicMaterial;
-      if (mode === 'object') {
+      if (hideEdges) {
+        handle.edgeOverlay.visible = false;
+      } else if (showAllEdges) {
+        handle.edgeOverlay.visible = true;
+        mat.color.copy(edgeStyle.color);
+        mat.opacity = edgeStyle.opacity;
+        mat.depthTest = !xRay;
+      } else if (mode === 'object') {
         handle.edgeOverlay.visible = false;
       } else if (objectId === activeObjectId) {
         handle.edgeOverlay.visible = true;

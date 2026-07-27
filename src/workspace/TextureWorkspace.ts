@@ -1,5 +1,7 @@
 /** Editor-only UV / Pixel workspace state — never stored in EditableMesh. */
 
+import type { GradientStop } from '@/core/image/GradientGenerator';
+
 export type RightEditorMode = 'combined' | 'uv' | 'pixel';
 export type UvSelectionSyncMode = 'off' | 'face' | 'component' | 'island';
 /** What the UV editor selects / drags: faces, UV points, or seam islands. */
@@ -66,6 +68,12 @@ export type TextureWorkspaceState = {
   foreground: [number, number, number, number];
   background: [number, number, number, number];
   brushSize: number;
+  /** Pixelate filter block size in texels. */
+  pixelateBlockSize: number;
+  pixelateMode: 'average' | 'center' | 'mosaic';
+  gradientStops: GradientStop[];
+  gradientAngle: number;
+  gradientType: 'linear' | 'radial';
   atlasTileWidth: number;
   atlasTileHeight: number;
   atlasTileX: number;
@@ -136,6 +144,14 @@ export function createDefaultTextureWorkspace(): TextureWorkspaceState {
     foreground: [220, 90, 70, 255],
     background: [0, 0, 0, 0],
     brushSize: 2,
+    pixelateBlockSize: 4,
+    pixelateMode: 'average',
+    gradientStops: [
+      { color: '#0030e8', position: 0, opacity: 100 },
+      { color: '#ffffff', position: 100, opacity: 100 },
+    ],
+    gradientAngle: 90,
+    gradientType: 'linear',
     atlasTileWidth: 16,
     atlasTileHeight: 16,
     atlasTileX: 0,
@@ -191,9 +207,30 @@ export function loadTextureWorkspace(): TextureWorkspaceState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return createDefaultTextureWorkspace();
-    const parsed = JSON.parse(raw) as Partial<TextureWorkspaceState>;
-    const merged = { ...createDefaultTextureWorkspace(), ...parsed, open: false };
+    const parsed = JSON.parse(raw) as Partial<TextureWorkspaceState> & {
+      gradientStart?: string;
+      gradientEnd?: string;
+    };
+    const defaults = createDefaultTextureWorkspace();
+    const merged = { ...defaults, ...parsed, open: false };
     merged.uvPanelTab = normalizeUvPanelTab(parsed.uvPanelTab);
+    merged.pixelateMode = parsed.pixelateMode === 'center' || parsed.pixelateMode === 'mosaic'
+      ? parsed.pixelateMode
+      : defaults.pixelateMode;
+    if (!Array.isArray(parsed.gradientStops) || parsed.gradientStops.length < 2) {
+      merged.gradientStops = [
+        {
+          color: parsed.gradientStart ?? defaults.gradientStops[0]!.color,
+          position: 0,
+          opacity: 100,
+        },
+        {
+          color: parsed.gradientEnd ?? defaults.gradientStops[defaults.gradientStops.length - 1]!.color,
+          position: 100,
+          opacity: 100,
+        },
+      ];
+    }
     return merged;
   } catch {
     return createDefaultTextureWorkspace();

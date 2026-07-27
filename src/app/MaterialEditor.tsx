@@ -21,14 +21,20 @@ import {
 } from '@/core/material/MaterialPresets';
 import { resolveActiveTexture } from '@/core/texture/resolveActiveTexture';
 import { IMAGE_FILES, openNativeFile } from '@/app/platform/FileDialogs';
+import { PixelateToolControls } from '@/app/PixelateToolControls';
+import { GradientToolControls } from '@/app/GradientToolControls';
+import type { WorkspaceController } from '@/workspace/WorkspaceController';
 
 type Props = {
   session: EditorSession;
   /** Compact layout for the UV inspector tab. */
   compact?: boolean;
+  workspace?: WorkspaceController;
 };
 
 type SizePreset = (typeof IMAGE_SIZE_PRESETS)[number] | 'custom';
+
+type MaterialEditorTab = 'assign' | 'look' | 'maps' | 'tools' | 'advanced';
 
 type TextureSlotKey =
   | 'baseColourTextureId'
@@ -36,6 +42,14 @@ type TextureSlotKey =
   | 'roughnessTextureId'
   | 'metallicTextureId'
   | 'emissiveTextureId';
+
+const MATERIAL_TABS: { id: MaterialEditorTab; label: string }[] = [
+  { id: 'assign', label: 'Assign' },
+  { id: 'look', label: 'Look' },
+  { id: 'maps', label: 'Maps' },
+  { id: 'tools', label: 'Tools' },
+  { id: 'advanced', label: 'Advanced' },
+];
 
 const TEXTURE_SLOTS: { key: TextureSlotKey; label: string }[] = [
   { key: 'baseColourTextureId', label: 'Base colour map' },
@@ -45,10 +59,16 @@ const TEXTURE_SLOTS: { key: TextureSlotKey; label: string }[] = [
   { key: 'emissiveTextureId', label: 'Emissive map' },
 ];
 
+const QUICK_PRESETS = MATERIAL_PRESETS.filter((preset) =>
+  ['default', 'metal-chrome', 'metal-gold', 'glass-clear', 'glass-frosted', 'plastic-glossy', 'rubber', 'neon-blue', 'pixel-unlit', 'water', 'ceramic', 'foliage-cutout'].includes(
+    preset.id,
+  ),
+);
+
 /**
  * Per-object materials: assign an existing asset, or create a new one for the selection.
  */
-export function MaterialEditor({ session, compact = false }: Props) {
+export function MaterialEditor({ session, compact = false, workspace }: Props) {
   const doc = session.document;
   const selection = session.selection.state;
   const activeObjectId = selection.activeObjectId;
@@ -59,12 +79,12 @@ export function MaterialEditor({ session, compact = false }: Props) {
   const [materialId, setMaterialId] = useState<MaterialId | null>(
     objectMaterialId ?? ctx.materialId,
   );
+  const [tab, setTab] = useState<MaterialEditorTab>('assign');
   const [sizePreset, setSizePreset] = useState<SizePreset>(64);
   const [customW, setCustomW] = useState(64);
   const [customH, setCustomH] = useState(64);
   const [importBusy, setImportBusy] = useState(false);
   const [importNote, setImportNote] = useState<string | null>(null);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   useEffect(() => {
     if (objectMaterialId) setMaterialId(objectMaterialId);
@@ -75,11 +95,17 @@ export function MaterialEditor({ session, compact = false }: Props) {
   const textures = [...doc.textures.values()];
   const material = materialId ? doc.materials.get(materialId) : null;
   const users = materialId ? countMaterialUsers(doc, materialId) : 0;
+  const baseMapImage = (() => {
+    if (!material?.baseColourTextureId) return null;
+    const texture = doc.textures.get(material.baseColourTextureId);
+    if (!texture) return null;
+    return doc.images.get(texture.imageAssetId) ?? null;
+  })();
   const isOnObject = !!activeObject && objectMaterialId === materialId;
+  const isLit = !!material && !material.unlit && material.shadingModel !== 'unlit';
   const isPhysical =
     !!material &&
-    !material.unlit &&
-    material.shadingModel !== 'unlit' &&
+    isLit &&
     (material.shadingModel === 'physical' ||
       material.transmission > 0.01 ||
       material.clearcoat > 0.01);
@@ -113,12 +139,14 @@ export function MaterialEditor({ session, compact = false }: Props) {
       name: uniqueObjectMaterialName(doc, activeObject.name),
     });
     setMaterialId(mat.id);
+    setTab('look');
     session.requestRedraw();
   };
 
   const createShared = () => {
     const mat = createMaterial(doc, { name: `Material ${doc.materials.size + 1}` });
     setMaterialId(mat.id);
+    setTab('look');
     session.requestRedraw();
   };
 
@@ -214,6 +242,7 @@ export function MaterialEditor({ session, compact = false }: Props) {
   };
 
   const rootClass = compact ? 'material-editor is-compact' : 'material-editor';
+  const activeTab = material || tab === 'assign' ? tab : 'assign';
 
   return (
     <div className={rootClass}>
@@ -224,165 +253,200 @@ export function MaterialEditor({ session, compact = false }: Props) {
         </header>
       )}
 
-      <section className="uv-section">
-        <h3 className="uv-section-title">Object</h3>
-        {activeObject ? (
-          <>
-            <p className="uv-meta material-object-name">{activeObject.name}</p>
-            <label className="uv-field">
-              <span>Material on object</span>
-              <select
-                className="uv-select"
-                aria-label="Material on selected object"
-                value={objectMaterialId ?? ''}
-                onChange={(e) => {
-                  const id = e.target.value;
-                  if (id) assignExistingToObject(id);
-                }}
-              >
-                {!materials.length && <option value="">No materials</option>}
-                {materials.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                    {countMaterialUsers(doc, m.id) > 1 ? ' (shared)' : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="button" className="tool primary uv-btn-block" onClick={createForObject}>
-              New material for object
-            </button>
-          </>
-        ) : (
-          <p className="uv-hint">Select an object to assign or create a material for it.</p>
-        )}
-      </section>
-
-      <section className="uv-section">
-        <h3 className="uv-section-title">Library</h3>
-        <label className="uv-field">
-          <span>Edit material</span>
-          <select
-            className="uv-select"
-            aria-label="Edit material"
-            value={material?.id ?? ''}
-            onChange={(e) => selectMaterial(e.target.value)}
-          >
-            {!materials.length && <option value="">No materials</option>}
-            {materials.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="material-actions-row">
-          <button type="button" className="tool uv-btn-block" onClick={createShared}>
-            New in library
-          </button>
-          {activeObject && material && !isOnObject && (
-            <button
-              type="button"
-              className="tool primary uv-btn-block"
-              onClick={() => assignExistingToObject(material.id)}
-            >
-              Use on object
-            </button>
-          )}
-        </div>
-        {material && (
-          <p className="uv-meta">
-            Used by {users} object{users === 1 ? '' : 's'}
-            {isOnObject ? ' · on selection' : ''}
-          </p>
-        )}
-      </section>
-
       {material && (
-        <>
-          <section className="uv-section">
-            <h3 className="uv-section-title">Presets</h3>
-            <label className="uv-field">
-              <span>Quick preset</span>
-              <select
-                className="uv-select"
-                aria-label="Material preset"
-                value={material.presetId ?? ''}
-                onChange={(e) => {
-                  if (e.target.value) applyPreset(e.target.value);
-                }}
-              >
-                <option value="">Custom</option>
-                {MATERIAL_PRESETS.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="uv-btn-grid uv-btn-grid-3 material-preset-grid">
-              {MATERIAL_PRESETS.filter((preset) =>
-                ['default', 'metal-chrome', 'metal-gold', 'glass-clear', 'glass-frosted', 'plastic-glossy', 'rubber', 'neon-blue', 'pixel-unlit', 'water', 'ceramic', 'foliage-cutout'].includes(
-                  preset.id,
-                ),
-              ).map((preset) => (
-                <button
-                  key={preset.id}
-                  type="button"
-                  className={`tool${material.presetId === preset.id ? ' is-active' : ''}`}
-                  onClick={() => applyPreset(preset.id)}
-                  aria-pressed={material.presetId === preset.id}
-                >
-                  {preset.label.replace(' · ', '\n').split('\n').slice(-1)[0]}
-                </button>
-              ))}
-            </div>
-          </section>
+        <div className="material-editor-summary">
+          <span className="material-editor-summary-name">{material.name}</span>
+          <span className="material-editor-summary-meta">
+            {material.presetId
+              ? MATERIAL_PRESETS.find((preset) => preset.id === material.presetId)?.label ?? 'Preset'
+              : material.shadingModel === 'unlit' ? 'Unlit' : material.shadingModel === 'physical' ? 'Physical' : 'Lit'}
+            {' · '}
+            {users} user{users === 1 ? '' : 's'}
+          </span>
+        </div>
+      )}
 
-          <section className="uv-section">
-            <h3 className="uv-section-title">Properties</h3>
-            <label className="uv-field">
-              <span>Name</span>
-              <input
-                className="uv-text"
-                aria-label="Material name"
-                value={material.name}
-                onChange={(e) => {
-                  material.name = e.target.value;
-                  touch();
-                }}
-              />
-            </label>
-            <label className="uv-field">
-              <span>Shading</span>
-              <select
-                className="uv-select"
-                aria-label="Shading model"
-                value={material.shadingModel}
-                onChange={(e) => setShadingModel(e.target.value as MaterialShadingModel)}
-              >
-                <option value="lit">Lit · Standard PBR</option>
-                <option value="physical">Physical · Glass / clearcoat</option>
-                <option value="unlit">Unlit · Pixel / flat colour</option>
-              </select>
-            </label>
-            <label className="uv-field">
-              <span>Base colour</span>
-              <div className="material-color-row">
-                <input
-                  type="color"
-                  aria-label="Base colour"
-                  value={rgb01ToHex(material.baseColour.x, material.baseColour.y, material.baseColour.z)}
-                  onChange={(e) => setColourHex(e.target.value)}
-                />
-                <span className="uv-meta">
-                  {Math.round(material.baseColour.x * 255)}, {Math.round(material.baseColour.y * 255)},{' '}
-                  {Math.round(material.baseColour.z * 255)}
-                </span>
+      <nav className="material-editor-tabs" aria-label="Material categories">
+        {MATERIAL_TABS.map(({ id, label }) => (
+          <button
+            key={id}
+            type="button"
+            className={`material-editor-tab${activeTab === id ? ' is-active' : ''}`}
+            aria-selected={activeTab === id}
+            disabled={id !== 'assign' && !material}
+            onClick={() => setTab(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      <div className="material-editor-panel">
+        {activeTab === 'assign' && (
+          <>
+            <section className="uv-section">
+              <h3 className="uv-section-title">Selection</h3>
+              {activeObject ? (
+                <>
+                  <p className="uv-meta material-object-name">{activeObject.name}</p>
+                  <label className="uv-field">
+                    <span>Material on object</span>
+                    <select
+                      className="uv-select"
+                      aria-label="Material on selected object"
+                      value={objectMaterialId ?? ''}
+                      onChange={(e) => {
+                        const id = e.target.value;
+                        if (id) assignExistingToObject(id);
+                      }}
+                    >
+                      {!materials.length && <option value="">No materials</option>}
+                      {materials.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.name}
+                          {countMaterialUsers(doc, m.id) > 1 ? ' (shared)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button type="button" className="tool primary uv-btn-block" onClick={createForObject}>
+                    New material for object
+                  </button>
+                </>
+              ) : (
+                <p className="uv-hint">Select an object to assign or create a material for it.</p>
+              )}
+            </section>
+
+            <section className="uv-section">
+              <h3 className="uv-section-title">Library</h3>
+              <label className="uv-field">
+                <span>Edit material</span>
+                <select
+                  className="uv-select"
+                  aria-label="Edit material"
+                  value={material?.id ?? ''}
+                  onChange={(e) => {
+                    selectMaterial(e.target.value);
+                    if (e.target.value) setTab('look');
+                  }}
+                >
+                  {!materials.length && <option value="">No materials</option>}
+                  {materials.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="material-actions-row">
+                <button type="button" className="tool uv-btn-block" onClick={createShared}>
+                  New in library
+                </button>
+                {activeObject && material && !isOnObject && (
+                  <button
+                    type="button"
+                    className="tool primary uv-btn-block"
+                    onClick={() => assignExistingToObject(material.id)}
+                  >
+                    Use on object
+                  </button>
+                )}
               </div>
-            </label>
-            {!material.unlit && material.shadingModel !== 'unlit' && (
-              <>
+              {material && (
+                <p className="uv-meta">
+                  Used by {users} object{users === 1 ? '' : 's'}
+                  {isOnObject ? ' · on selection' : ''}
+                </p>
+              )}
+            </section>
+          </>
+        )}
+
+        {material && activeTab === 'look' && (
+          <>
+            <section className="uv-section">
+              <h3 className="uv-section-title">Presets</h3>
+              <label className="uv-field">
+                <span>Quick preset</span>
+                <select
+                  className="uv-select"
+                  aria-label="Material preset"
+                  value={material.presetId ?? ''}
+                  onChange={(e) => {
+                    if (e.target.value) applyPreset(e.target.value);
+                  }}
+                >
+                  <option value="">Custom</option>
+                  {MATERIAL_PRESETS.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="uv-btn-grid uv-btn-grid-3 material-preset-grid">
+                {QUICK_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className={`tool${material.presetId === preset.id ? ' is-active' : ''}`}
+                    onClick={() => applyPreset(preset.id)}
+                    aria-pressed={material.presetId === preset.id}
+                  >
+                    {preset.label.replace(' · ', '\n').split('\n').slice(-1)[0]}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="uv-section">
+              <h3 className="uv-section-title">Identity</h3>
+              <label className="uv-field">
+                <span>Name</span>
+                <input
+                  className="uv-text"
+                  aria-label="Material name"
+                  value={material.name}
+                  onChange={(e) => {
+                    material.name = e.target.value;
+                    touch();
+                  }}
+                />
+              </label>
+              <label className="uv-field">
+                <span>Shading</span>
+                <select
+                  className="uv-select"
+                  aria-label="Shading model"
+                  value={material.shadingModel}
+                  onChange={(e) => setShadingModel(e.target.value as MaterialShadingModel)}
+                >
+                  <option value="lit">Lit · Standard PBR</option>
+                  <option value="physical">Physical · Glass / clearcoat</option>
+                  <option value="unlit">Unlit · Pixel / flat colour</option>
+                </select>
+              </label>
+              <label className="uv-field">
+                <span>Base colour</span>
+                <div className="material-color-row">
+                  <input
+                    type="color"
+                    aria-label="Base colour"
+                    value={rgb01ToHex(material.baseColour.x, material.baseColour.y, material.baseColour.z)}
+                    onChange={(e) => setColourHex(e.target.value)}
+                  />
+                  <span className="uv-meta">
+                    {Math.round(material.baseColour.x * 255)}, {Math.round(material.baseColour.y * 255)},{' '}
+                    {Math.round(material.baseColour.z * 255)}
+                  </span>
+                </div>
+              </label>
+            </section>
+
+            {isLit && (
+              <section className="uv-section">
+                <h3 className="uv-section-title">Surface response</h3>
                 <label className="uv-field">
                   <span>Roughness</span>
                   <input
@@ -419,38 +483,12 @@ export function MaterialEditor({ session, compact = false }: Props) {
                   />
                   <span className="uv-meta">{material.clearcoat.toFixed(2)}</span>
                 </label>
-                {isPhysical && (
-                  <>
-                    <label className="uv-field">
-                      <span>Transmission</span>
-                      <input
-                        type="range"
-                        min={0}
-                        max={1}
-                        step={0.01}
-                        value={material.transmission}
-                        onChange={(e) => patchMaterial({ transmission: Number(e.target.value) })}
-                      />
-                      <span className="uv-meta">{material.transmission.toFixed(2)}</span>
-                    </label>
-                    <label className="uv-field">
-                      <span>Index of refraction</span>
-                      <input
-                        className="uv-text"
-                        type="number"
-                        min={1}
-                        max={2.5}
-                        step={0.01}
-                        value={material.ior}
-                        onChange={(e) => patchMaterial({ ior: Number(e.target.value) })}
-                      />
-                    </label>
-                  </>
-                )}
-              </>
+              </section>
             )}
-            {!material.unlit && material.shadingModel !== 'unlit' && (
-              <>
+
+            {isLit && (
+              <section className="uv-section">
+                <h3 className="uv-section-title">Emission</h3>
                 <label className="uv-field">
                   <span>Emissive colour</span>
                   <div className="material-color-row">
@@ -478,213 +516,287 @@ export function MaterialEditor({ session, compact = false }: Props) {
                   />
                   <span className="uv-meta">{material.emissiveIntensity.toFixed(2)}</span>
                 </label>
-              </>
+              </section>
             )}
-            <label className="uv-field">
-              <span>Opacity</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={material.opacity}
-                onChange={(e) => patchMaterial({ opacity: Number(e.target.value) })}
-              />
-              <span className="uv-meta">{material.opacity.toFixed(2)}</span>
-            </label>
-            <label className="uv-field">
-              <span>Alpha mode</span>
-              <select
-                className="uv-select"
-                aria-label="Alpha mode"
-                value={material.alphaMode}
-                onChange={(e) =>
-                  patchMaterial({ alphaMode: e.target.value as 'opaque' | 'mask' | 'blend' })
-                }
-              >
-                <option value="opaque">Opaque</option>
-                <option value="mask">Mask / cutout</option>
-                <option value="blend">Blend / transparent</option>
-              </select>
-            </label>
-            {material.alphaMode === 'mask' && (
+
+            <section className="uv-section">
+              <h3 className="uv-section-title">Opacity</h3>
               <label className="uv-field">
-                <span>Alpha cutoff</span>
+                <span>Opacity</span>
                 <input
                   type="range"
                   min={0}
                   max={1}
                   step={0.01}
-                  value={material.alphaCutoff}
-                  onChange={(e) => patchMaterial({ alphaCutoff: Number(e.target.value) })}
+                  value={material.opacity}
+                  onChange={(e) => patchMaterial({ opacity: Number(e.target.value) })}
                 />
-                <span className="uv-meta">{material.alphaCutoff.toFixed(2)}</span>
+                <span className="uv-meta">{material.opacity.toFixed(2)}</span>
               </label>
-            )}
-            <div className="uv-btn-grid uv-btn-grid-2">
-              <label className="uv-check">
-                <input
-                  type="checkbox"
-                  checked={material.flatShaded}
-                  onChange={(e) => patchMaterial({ flatShaded: e.target.checked })}
-                />
-                Flat shaded
-              </label>
-              <label className="uv-check">
-                <input
-                  type="checkbox"
-                  checked={material.doubleSided}
-                  onChange={(e) => patchMaterial({ doubleSided: e.target.checked })}
-                />
-                Double sided
-              </label>
-            </div>
-          </section>
+            </section>
+          </>
+        )}
 
-          <section className="uv-section">
-            <h3 className="uv-section-title">Texture maps</h3>
-            {TEXTURE_SLOTS.map(({ key, label }) => (
-              <label className="uv-field" key={key}>
-                <span>{label}</span>
+        {material && activeTab === 'maps' && (
+          <>
+            <section className="uv-section">
+              <h3 className="uv-section-title">Assigned maps</h3>
+              {TEXTURE_SLOTS.map(({ key, label }) => (
+                <label className="uv-field" key={key}>
+                  <span>{label}</span>
+                  <select
+                    className="uv-select"
+                    aria-label={label}
+                    value={material[key] ?? ''}
+                    onChange={(e) => setTextureSlot(key, e.target.value)}
+                  >
+                    <option value="">None</option>
+                    {textures.map((t) => {
+                      const img = doc.images.get(t.imageAssetId);
+                      const dim = img ? ` (${img.width}×${img.height})` : '';
+                      return (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                          {dim}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </label>
+              ))}
+            </section>
+
+            <section className="uv-section">
+              <h3 className="uv-section-title">Create base map</h3>
+              <label className="uv-field">
+                <span>New map size</span>
                 <select
                   className="uv-select"
-                  aria-label={label}
-                  value={material[key] ?? ''}
-                  onChange={(e) => setTextureSlot(key, e.target.value)}
+                  aria-label="New map size"
+                  value={sizePreset}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === 'custom') {
+                      setSizePreset('custom');
+                    } else {
+                      const n = Number(v) as (typeof IMAGE_SIZE_PRESETS)[number];
+                      setSizePreset(n);
+                      setCustomW(n);
+                      setCustomH(n);
+                    }
+                  }}
                 >
-                  <option value="">None</option>
-                  {textures.map((t) => {
-                    const img = doc.images.get(t.imageAssetId);
-                    const dim = img ? ` (${img.width}×${img.height})` : '';
-                    return (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                        {dim}
-                      </option>
-                    );
-                  })}
+                  {IMAGE_SIZE_PRESETS.map((n) => (
+                    <option key={n} value={n}>
+                      {n}×{n}
+                    </option>
+                  ))}
+                  <option value="custom">Custom…</option>
                 </select>
               </label>
-            ))}
-            <label className="uv-field">
-              <span>New map size</span>
-              <select
-                className="uv-select"
-                aria-label="New map size"
-                value={sizePreset}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === 'custom') {
-                    setSizePreset('custom');
-                  } else {
-                    const n = Number(v) as (typeof IMAGE_SIZE_PRESETS)[number];
-                    setSizePreset(n);
-                    setCustomW(n);
-                    setCustomH(n);
-                  }
-                }}
+              {sizePreset === 'custom' && (
+                <div className="material-size-row">
+                  <label className="uv-field">
+                    <span>Width</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={IMAGE_SIZE_LIMITS.min}
+                      max={IMAGE_SIZE_LIMITS.max}
+                      value={customW}
+                      onChange={(e) => setCustomW(clampImageSize(Number(e.target.value)))}
+                    />
+                  </label>
+                  <label className="uv-field">
+                    <span>Height</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={IMAGE_SIZE_LIMITS.min}
+                      max={IMAGE_SIZE_LIMITS.max}
+                      value={customH}
+                      onChange={(e) => setCustomH(clampImageSize(Number(e.target.value)))}
+                    />
+                  </label>
+                </div>
+              )}
+              <button type="button" className="tool uv-btn-block" onClick={createBlankTexture}>
+                {(() => {
+                  const { w, h } = mapSize();
+                  return `New ${w}×${h} base map`;
+                })()}
+              </button>
+              <button
+                type="button"
+                className="tool uv-btn-block"
+                disabled={importBusy}
+                onClick={() => void chooseTextureFile()}
               >
-                {IMAGE_SIZE_PRESETS.map((n) => (
-                  <option key={n} value={n}>
-                    {n}×{n}
-                  </option>
-                ))}
-                <option value="custom">Custom…</option>
-              </select>
-            </label>
-            {sizePreset === 'custom' && (
-              <div className="material-size-row">
+                {importBusy ? 'Importing…' : 'Import base map…'}
+              </button>
+              <p className="uv-hint">
+                {importNote ??
+                  `PNG/JPEG/WebP · max ${IMAGE_SIZE_LIMITS.max}px (larger images scale down)`}
+              </p>
+            </section>
+          </>
+        )}
+
+        {material && activeTab === 'tools' && (
+          <>
+            <GradientToolControls
+              session={session}
+              workspace={workspace}
+              image={baseMapImage}
+              material={material}
+              mapWidth={mapSize().w}
+              mapHeight={mapSize().h}
+              hint="Create a gradient base map or fill the current base colour texture."
+            />
+            <PixelateToolControls
+              session={session}
+              workspace={workspace}
+              image={baseMapImage}
+              material={material}
+              showAllMapsAction
+              hint="Pixelate the base map, or all maps assigned to this material."
+            />
+          </>
+        )}
+
+        {material && activeTab === 'advanced' && (
+          <>
+            {isPhysical && (
+              <section className="uv-section">
+                <h3 className="uv-section-title">Glass &amp; physical</h3>
                 <label className="uv-field">
-                  <span>Width</span>
+                  <span>Transmission</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={material.transmission}
+                    onChange={(e) => patchMaterial({ transmission: Number(e.target.value) })}
+                  />
+                  <span className="uv-meta">{material.transmission.toFixed(2)}</span>
+                </label>
+                <label className="uv-field">
+                  <span>Index of refraction</span>
                   <input
                     className="uv-text"
                     type="number"
-                    min={IMAGE_SIZE_LIMITS.min}
-                    max={IMAGE_SIZE_LIMITS.max}
-                    value={customW}
-                    onChange={(e) => setCustomW(clampImageSize(Number(e.target.value)))}
+                    min={1}
+                    max={2.5}
+                    step={0.01}
+                    value={material.ior}
+                    onChange={(e) => patchMaterial({ ior: Number(e.target.value) })}
                   />
                 </label>
                 <label className="uv-field">
-                  <span>Height</span>
+                  <span>Clearcoat roughness</span>
                   <input
-                    className="uv-text"
-                    type="number"
-                    min={IMAGE_SIZE_LIMITS.min}
-                    max={IMAGE_SIZE_LIMITS.max}
-                    value={customH}
-                    onChange={(e) => setCustomH(clampImageSize(Number(e.target.value)))}
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={material.clearcoatRoughness}
+                    onChange={(e) => patchMaterial({ clearcoatRoughness: Number(e.target.value) })}
                   />
+                  <span className="uv-meta">{material.clearcoatRoughness.toFixed(2)}</span>
+                </label>
+              </section>
+            )}
+
+            <section className="uv-section">
+              <h3 className="uv-section-title">Alpha &amp; faces</h3>
+              <label className="uv-field">
+                <span>Alpha mode</span>
+                <select
+                  className="uv-select"
+                  aria-label="Alpha mode"
+                  value={material.alphaMode}
+                  onChange={(e) =>
+                    patchMaterial({ alphaMode: e.target.value as 'opaque' | 'mask' | 'blend' })
+                  }
+                >
+                  <option value="opaque">Opaque</option>
+                  <option value="mask">Mask / cutout</option>
+                  <option value="blend">Blend / transparent</option>
+                </select>
+              </label>
+              {material.alphaMode === 'mask' && (
+                <label className="uv-field">
+                  <span>Alpha cutoff</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={material.alphaCutoff}
+                    onChange={(e) => patchMaterial({ alphaCutoff: Number(e.target.value) })}
+                  />
+                  <span className="uv-meta">{material.alphaCutoff.toFixed(2)}</span>
+                </label>
+              )}
+              <div className="uv-btn-grid uv-btn-grid-2">
+                <label className="uv-check">
+                  <input
+                    type="checkbox"
+                    checked={material.flatShaded}
+                    onChange={(e) => patchMaterial({ flatShaded: e.target.checked })}
+                  />
+                  Flat shaded
+                </label>
+                <label className="uv-check">
+                  <input
+                    type="checkbox"
+                    checked={material.doubleSided}
+                    onChange={(e) => patchMaterial({ doubleSided: e.target.checked })}
+                  />
+                  Double sided
                 </label>
               </div>
-            )}
-            <button type="button" className="tool uv-btn-block" onClick={createBlankTexture}>
-              {(() => {
-                const { w, h } = mapSize();
-                return `New ${w}×${h} base map`;
-              })()}
-            </button>
-            <button
-              type="button"
-              className="tool uv-btn-block"
-              disabled={importBusy}
-              onClick={() => void chooseTextureFile()}
-            >
-              {importBusy ? 'Importing…' : 'Import base map…'}
-            </button>
-            <p className="uv-hint">
-              {importNote ??
-                `PNG/JPEG/WebP · max ${IMAGE_SIZE_LIMITS.max}px (larger images scale down)`}
-            </p>
-          </section>
+            </section>
 
-          <details
-            className="draw-details"
-            open={advancedOpen}
-            onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
-          >
-            <summary>Advanced surface options</summary>
-            <label className="uv-field">
-              <span>Clearcoat roughness</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={material.clearcoatRoughness}
-                onChange={(e) => patchMaterial({ clearcoatRoughness: Number(e.target.value) })}
-              />
-              <span className="uv-meta">{material.clearcoatRoughness.toFixed(2)}</span>
-            </label>
-            <label className="uv-field">
-              <span>Texture filtering</span>
-              <select
-                className="uv-select"
-                value={material.textureFiltering}
-                onChange={(e) =>
-                  patchMaterial({ textureFiltering: e.target.value as 'nearest' | 'linear' })
-                }
-              >
-                <option value="nearest">Nearest · pixel art</option>
-                <option value="linear">Linear · smooth</option>
-              </select>
-            </label>
-            <label className="uv-field">
-              <span>Texture wrapping</span>
-              <select
-                className="uv-select"
-                value={material.textureWrapping}
-                onChange={(e) =>
-                  patchMaterial({ textureWrapping: e.target.value as 'repeat' | 'clamp' })
-                }
-              >
-                <option value="repeat">Repeat</option>
-                <option value="clamp">Clamp</option>
-              </select>
-            </label>
-          </details>
-        </>
-      )}
+            <section className="uv-section">
+              <h3 className="uv-section-title">Sampling</h3>
+              <label className="uv-field">
+                <span>Texture filtering</span>
+                <select
+                  className="uv-select"
+                  value={material.textureFiltering}
+                  onChange={(e) =>
+                    patchMaterial({ textureFiltering: e.target.value as 'nearest' | 'linear' })
+                  }
+                >
+                  <option value="nearest">Nearest · pixel art</option>
+                  <option value="linear">Linear · smooth</option>
+                </select>
+              </label>
+              <label className="uv-field">
+                <span>Texture wrapping</span>
+                <select
+                  className="uv-select"
+                  value={material.textureWrapping}
+                  onChange={(e) =>
+                    patchMaterial({ textureWrapping: e.target.value as 'repeat' | 'clamp' })
+                  }
+                >
+                  <option value="repeat">Repeat</option>
+                  <option value="clamp">Clamp</option>
+                </select>
+              </label>
+            </section>
+          </>
+        )}
+
+        {!material && activeTab !== 'assign' && (
+          <p className="uv-hint material-editor-empty">
+            Choose or create a material on the Assign tab first.
+          </p>
+        )}
+      </div>
     </div>
   );
 }

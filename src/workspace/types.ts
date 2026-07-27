@@ -13,7 +13,22 @@ export type LayoutMode = 'quad' | 'maximized';
 
 export type ProjectionType = 'perspective' | 'orthographic';
 
-export type ShadingMode = 'solid' | 'material' | 'wireframe' | 'solid-wire';
+export type ShadingMode = 'material' | 'wireframe' | 'outlines' | 'game';
+
+export const SHADING_MODE_LABELS: Record<ShadingMode, string> = {
+  material: 'Material',
+  wireframe: 'Wireframe',
+  outlines: 'Outlines',
+  game: 'Game',
+};
+
+export function normalizeShadingMode(value: unknown): ShadingMode {
+  if (value === 'wireframe' || value === 'outlines' || value === 'game' || value === 'material') {
+    return value;
+  }
+  if (value === 'solid-wire') return 'outlines';
+  return 'material';
+}
 
 /** Split ratios for default quad tree (root horizontal, then vertical per row). */
 export type QuadSplitRatios = {
