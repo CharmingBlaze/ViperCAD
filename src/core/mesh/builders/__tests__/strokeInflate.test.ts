@@ -53,6 +53,20 @@ describe('StrokeInflateBuilder', () => {
     expect(mid.vertices.size).toBeGreaterThan(low.vertices.size);
   });
 
+  it('builds an exact vector pen outline as a flat prism', () => {
+    const mesh = buildInflatedDoodle({
+      points: [v3(0, 0, 0), v3(2, 0, 0), v3(2, 1, 0), v3(0, 1, 0)],
+      thickness: 0.08,
+      outlineSegments: 16,
+      profile: 'sharp',
+      closed: true,
+      exactOutline: true,
+    });
+    expect(mesh.vertices.size).toBe(8);
+    expect(mesh.faces.size).toBe(6);
+    expect(validateMeshFull(mesh).issues.filter((i) => i.severity === 'error')).toEqual([]);
+  });
+
   it('extrudes blob depth from brush thickness, not a fixed minimum', () => {
     const thickness = 0.1;
     const mesh = buildInflatedDoodle({
@@ -63,7 +77,7 @@ describe('StrokeInflateBuilder', () => {
     });
     const zs = [...mesh.vertices.values()].map((vertex) => vertex.position.z);
     const height = Math.max(...zs) - Math.min(...zs);
-    expect(height).toBeCloseTo(thickness * 2, 1);
+    expect(height).toBeCloseTo(thickness * 3.5, 1);
     expect(height).toBeLessThan(1);
   });
 

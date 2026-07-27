@@ -33,7 +33,12 @@ export function finalizeCurveMeshUvs(
     return;
   }
 
-  if (style === 'tube' || SWEEP_STYLES.has(style) || (style === 'capsule' && !cyclic)) {
+  if (
+    style === 'tube' ||
+    SWEEP_STYLES.has(style) ||
+    style === 'segmented-sweep' ||
+    ((style === 'capsule' || style === 'profile-solid') && !cyclic)
+  ) {
     ensurePaintableUvs(mesh);
     return;
   }

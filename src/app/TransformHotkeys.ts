@@ -3,6 +3,7 @@ import { beginInteractiveInset } from '@/app/InsetHotkey';
 import { beginInteractiveKnife } from '@/app/KnifeHotkey';
 import { beginInteractiveBevel } from '@/app/BevelHotkey';
 import { beginInteractiveLoopCut } from '@/app/LoopCutHotkey';
+import { beginInteractivePushPull } from '@/app/PushPullHotkey';
 import {
   applyShadeHotkey,
   applySubdivideHotkey,
@@ -141,6 +142,12 @@ export function handleTransformHotkey(
   if (key === 'k' || key === 'K') {
     e.preventDefault();
     return beginInteractiveKnife(session, workspace);
+  }
+
+  // SketchUp-style Push/Pull
+  if ((key === 'p' || key === 'P') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    return beginInteractivePushPull(session, workspace);
   }
 
   // Interactive Bevel (Ctrl+B — plain B is brush in UV paint)

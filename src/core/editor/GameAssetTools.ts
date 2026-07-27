@@ -23,6 +23,11 @@ import { createUvLayer, unwrapUvAuto } from '@/core/uv/UvOperations';
 import { deleteFaces } from '@/core/mesh/ops/draw';
 import { Matrix4, Vector3 } from 'three';
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
+import {
+  readCurveOperation,
+  serializeCurveOperation,
+} from '@/core/curves/CurveOperation';
+import { subVec3 } from '@/core/math/Vec3';
 
 export const LIGHTMAP_UV_NAME = 'Lightmap UV';
 
@@ -337,6 +342,52 @@ export function joinMeshObjects(document: ModelDocument, objectIds: ObjectId[], 
   return joined.id;
 }
 
+export type CombineMeshesResult =
+  | { ok: true; objectId: ObjectId; sourceCount: number }
+  | { ok: false; message: string };
+
+/** Mesh-bearing objects at the document root (typical curve/primitive pieces). */
+export function rootMeshObjectIds(document: ModelDocument): ObjectId[] {
+  return document.rootObjectIds.filter((id) => {
+    const object = document.objects.get(id);
+    return !!object?.meshId && document.meshes.has(object.meshId);
+  });
+}
+
+/**
+ * Join mesh objects into one combined mesh.
+ * Uses the current selection when 2+ mesh objects are selected; otherwise joins all root mesh objects.
+ */
+export function combineMeshObjects(
+  document: ModelDocument,
+  selectedIds: Iterable<ObjectId>,
+  options: { name?: string; allowCombineAll?: boolean } = {},
+): CombineMeshesResult {
+  const allowCombineAll = options.allowCombineAll !== false;
+  let ids = [...new Set(selectedIds)].filter((id) => {
+    const object = document.objects.get(id);
+    return !!object?.meshId && document.meshes.has(object.meshId);
+  });
+  if (ids.length < 2 && allowCombineAll) {
+    ids = rootMeshObjectIds(document);
+  }
+  if (ids.length < 2) {
+    return {
+      ok: false,
+      message: 'Need at least two mesh objects. Shift+click to select multiple, or draw more pieces first.',
+    };
+  }
+  try {
+    const objectId = joinMeshObjects(document, ids, options.name ?? 'Combined Mesh');
+    return { ok: true, objectId, sourceCount: ids.length };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : 'Combine failed',
+    };
+  }
+}
+
 /** Move the object origin to its local bounds centre without moving visible geometry. */
 export function centreObjectOrigin(document: ModelDocument, objectId: ObjectId): void {
   const object = document.objects.get(objectId);
@@ -357,6 +408,16 @@ export function centreObjectOrigin(document: ModelDocument, objectId: ObjectId):
   mesh.geometryVersion += 1;
   mesh.dirty.positions = true;
   mesh.dirty.bounds = true;
+
+  const operation = readCurveOperation(object.metadata.curveOperation);
+  if (operation) {
+    object.metadata.curveOperation = serializeCurveOperation({
+      ...operation,
+      points: operation.points.map((point) => subVec3(point, centre)),
+      handlesIn: operation.handlesIn.map((point) => subVec3(point, centre)),
+      handlesOut: operation.handlesOut.map((point) => subVec3(point, centre)),
+    });
+  }
 
   const offset = new Matrix4().makeTranslation(centre.x, centre.y, centre.z);
   object.transform = matrixToTransform(matrixFromTransform(object.transform).multiply(offset));

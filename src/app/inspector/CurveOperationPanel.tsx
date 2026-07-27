@@ -8,6 +8,7 @@ import {
   defaultBezierHandles,
   evaluateCurveOperation,
   isPathStyle,
+  isWorkflowOperation,
   readCurveOperation,
   serializeCurveOperation,
   type CurveOperation,
@@ -42,6 +43,7 @@ export function CurveOperationPanel({ session, workspace, object, mesh, onRefres
   }, [object?.id, operation?.radius]);
 
   if (!object || !mesh || !operation || session.selection.state.mode !== 'object') return null;
+  if (isWorkflowOperation(operation)) return null;
 
   const update = (name: string, patch: Partial<CurveOperation>) => {
     const next: CurveOperation = { ...operation, ...patch };
@@ -392,7 +394,7 @@ export function CurveOperationPanel({ session, workspace, object, mesh, onRefres
             />
           </label>
           <p className="uv-hint">
-            Every anchor remains exact while the rounded solid rebuilds live.
+            Open strokes become rounded tubes. Close the outline to fill a standing vertical capsule solid.
           </p>
         </div>
       )}

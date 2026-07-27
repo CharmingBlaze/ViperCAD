@@ -212,7 +212,7 @@ export function PathSettingsControls({
   );
 }
 
-function CapButtons({
+export function CapButtons({
   label,
   selected,
   onChange,

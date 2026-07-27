@@ -15,12 +15,14 @@ import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
 import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
 import { KnifeTool } from '@/core/tools/KnifeTool';
 import { LoopCutTool } from '@/core/tools/LoopCutTool';
+import { PushPullTool } from '@/core/tools/PushPullTool';
 import { commitDeleteSelection } from '@/core/editor/DeleteSelection';
 import { exitGroupFocus } from '@/core/editor/GroupFocus';
 import { handleTransformHotkey } from '@/app/TransformHotkeys';
 import { clampTextureSplit } from '@/workspace/TextureWorkspace';
 import type { CameraAxes } from '@/core/transform/Orientation';
 import { importPngAsImagePlane } from '@/core/editor/ImagePlane';
+import { combineMeshObjects } from '@/core/editor/GameAssetTools';
 import { pushToast } from '@/app/Toast';
 import { ViewportNavToolbar, viewportNavToolbarRightInset } from '@/app/ViewportNavToolbar';
 import type { ViewportNavMode } from '@/workspace/WorkspaceController';
@@ -262,6 +264,31 @@ export function Viewport({ session, workspace }: Props) {
         syncUi();
         return;
       }
+      if (e.key === 'Escape' && tool instanceof PushPullTool) {
+        e.preventDefault();
+        if (tool.state.phase === 'dragging') {
+          tool.cancel(session.context());
+          workspace.input.end('tool');
+          viewportEngine.syncInputControls();
+        } else {
+          tool.cancel(session.context());
+          session.tools.setActive('select', session.context());
+          workspace.input.end('tool');
+          viewportEngine.syncInputControls();
+        }
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Enter' && tool instanceof PushPullTool && tool.state.phase === 'dragging') {
+        e.preventDefault();
+        tool.confirm(session.context());
+        workspace.input.end('tool');
+        viewportEngine.syncInputControls();
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
       if (
         e.key === 'Enter' &&
         tool instanceof LoopCutTool &&
@@ -346,6 +373,30 @@ export function Viewport({ session, workspace }: Props) {
         if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
         e.preventDefault();
         commitDeleteSelection(session);
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === 'j' &&
+        workspace.shellMode === 'model'
+      ) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        session.selection.setMode('object');
+        const result = combineMeshObjects(
+          session.document,
+          session.selection.state.selectedObjectIds,
+        );
+        if (!result.ok) {
+          pushToast(result.message, 'info');
+        } else {
+          session.selection.selectObjects([result.objectId], 'replace');
+          session.tools.setActive('select', session.context());
+          pushToast(`Combined ${result.sourceCount} objects into one mesh`, 'success');
+        }
         viewportEngine.invalidate();
         syncUi();
         return;

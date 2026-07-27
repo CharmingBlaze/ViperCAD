@@ -23,6 +23,7 @@ import {
   type LatheAxis,
 } from '@/core/mesh/builders/LatheBuilder';
 import type { EditableMesh } from '@/core/mesh/types';
+import type { ModelDocument, ObjectId } from '@/core/document/types';
 import type { CurveTipStyle } from '@/core/curves/SimpleTexture';
 import {
   buildPathOutput,
@@ -32,12 +33,18 @@ import {
 } from '@/core/mesh/builders/PathOutputBuilder';
 import type { CurveSweepCapStyle } from '@/core/mesh/builders/CurveSweepBuilder';
 import { finalizeCurveMeshUvs } from '@/core/mesh/builders/CurveMeshUv';
+import { buildWorkflowProfileSolid, buildWorkflowLimbBlockout } from '@/core/mesh/builders/WorkflowProfileSolidBuilder';
+import { isWorkflowOperation, isWorkflowStyle } from '@/core/curves/workflowCurve';
+
+export { isWorkflowOperation, isWorkflowStyle } from '@/core/curves/workflowCurve';
 
 export type CurveStyle =
   | 'soft'
   | 'sharp'
   | 'tube'
   | 'capsule'
+  | 'profile-solid'
+  | 'segmented-sweep'
   | 'ribbon'
   | 'hair'
   | 'hair-strip'
@@ -50,6 +57,7 @@ export type CurveResolution = 'low' | 'medium';
 export type CurveInputMode = 'sketch' | 'pen';
 export type CurveType = 'polyline' | 'catmull-rom' | 'bezier';
 export type CurveSolidMode = 'extrude' | 'lathe';
+export type WorkflowKind = 'freehand' | 'sketch' | 'profile-solid' | 'segmented-sweep';
 
 export type CurveOperation = {
   version: 1;
@@ -98,6 +106,8 @@ export type CurveOperation = {
   pathSeed: number;
   pathKeepInstances: boolean;
   pathSourceObjectId: string | null;
+  /** Set when created from Workflows mode; keeps curve evaluation separate from Curves mode. */
+  workflowKind?: WorkflowKind | null;
   /** Blob shoulder fullness 0–1 (blocky3D default 0.65). */
   blobInflation: number;
 };
@@ -152,6 +162,7 @@ export function curveOperationFromStroke(options: {
   pathKeepInstances?: boolean;
   pathSourceObjectId?: string | null;
   blobInflation?: number;
+  workflowKind?: WorkflowKind | null;
 }): CurveOperation {
   const radius = clampRadius(options.radius);
   let points = options.points.map((point) => ({ ...point }));
@@ -223,6 +234,10 @@ export function curveOperationFromStroke(options: {
     pathSourceObjectId:
       typeof options.pathSourceObjectId === 'string' ? options.pathSourceObjectId : null,
     blobInflation: clampRange(options.blobInflation, 0, 1, 0.65),
+    workflowKind:
+      isWorkflowStyle(options.style) && options.workflowKind != null
+        ? options.workflowKind
+        : null,
   };
 }
 
@@ -240,7 +255,8 @@ export function evaluateCurveOperation(
     const point = points[0] ?? v3();
     points = [point, addVec3(point, v3(radius * 2, 0, 0))];
   }
-  if (operation.smooth && operation.curveType === 'polyline') {
+  const exactPenOutline = operation.inputMode === 'pen' && operation.style === 'sharp';
+  if (operation.smooth && operation.curveType === 'polyline' && !exactPenOutline) {
     points = smoothCurvePoints(
       points,
       cyclic,
@@ -313,6 +329,35 @@ export function evaluateCurveOperation(
           pathSpacingScale: operation.resolution === 'medium' ? 0.7 : 1,
           name: curveOperationLabel(operation),
         });
+  } else if (operation.style === 'profile-solid' && isWorkflowOperation(operation)) {
+    const maxOutlineCorners = Math.max(8, Math.min(48, operation.pathRadialSegments * 2));
+    mesh = buildWorkflowProfileSolid({
+      points,
+      radius,
+      maxOutlineCorners,
+      cyclic,
+      outlineSegments: OUTLINE_SEGMENTS[operation.resolution],
+      exactOutline: operation.inputMode === 'pen' && operation.curveType === 'polyline',
+      widthScale: operation.profileWidth,
+      heightScale: operation.profileHeight,
+      uniformScale: operation.startScale,
+      roundness: Math.max(0, Math.min(0.45, operation.blobInflation * 0.45)),
+      depthSegments: Math.max(1, Math.min(6, Math.round(operation.pathCount / 2))),
+      name: operation.cyclic ? 'Outline' : 'Outline Path',
+    });
+  } else if (operation.style === 'segmented-sweep' && isWorkflowOperation(operation)) {
+    mesh = buildWorkflowLimbBlockout({
+      points,
+      radius,
+      segmentCount: Math.max(2, Math.min(16, operation.pathCount)),
+      sides: Math.max(4, Math.min(8, Math.round(operation.pathRadialSegments / 2))),
+      exactEdges: operation.inputMode === 'pen' && operation.curveType === 'polyline',
+      profileWidth: operation.profileWidth,
+      profileHeight: operation.profileHeight,
+      startScale: operation.startScale,
+      endScale: operation.endScale,
+      name: 'Limb',
+    });
   } else if (isSweepStyle(operation.style)) {
     const common = {
       points,
@@ -342,12 +387,13 @@ export function evaluateCurveOperation(
     const isBlob = operation.style === 'soft';
     mesh = buildInflatedDoodle({
       points,
-      thickness: isBlob ? radius * 1.35 : radius,
+      thickness: isBlob ? radius * 2 : radius,
       outlineSegments: OUTLINE_SEGMENTS[operation.resolution],
       profile: isBlob ? 'soft' : 'sharp',
       inflation: isBlob ? operation.blobInflation : 0,
       radialSegments: Math.max(12, operation.pathRadialSegments),
       closed: cyclic,
+      exactOutline: exactPenOutline,
       name:
         isBlob
           ? 'Soft Curve Profile'
@@ -359,6 +405,90 @@ export function evaluateCurveOperation(
 
   finalizeCurveMeshUvs(mesh, operation.style, cyclic);
   return mesh;
+}
+
+function meshBoundsCentre(mesh: EditableMesh): Vec3 {
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (const vertex of mesh.vertices.values()) {
+    const { x, y, z } = vertex.position;
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    minZ = Math.min(minZ, z);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+    maxZ = Math.max(maxZ, z);
+  }
+  if (!Number.isFinite(minX)) return v3();
+  return v3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
+}
+
+function offsetCurveOperationPoints(operation: CurveOperation, offset: Vec3): CurveOperation {
+  const localize = (point: Vec3) => subVec3(point, offset);
+  return {
+    ...operation,
+    points: operation.points.map(localize),
+    handlesIn: operation.handlesIn.map(localize),
+    handlesOut: operation.handlesOut.map(localize),
+  };
+}
+
+/**
+ * Convert freshly evaluated world-space curve geometry into object-local space.
+ * The returned position is the world-space object origin used for transform gizmos.
+ */
+export function localizeCurveMesh(
+  mesh: EditableMesh,
+  operation: CurveOperation,
+): { position: Vec3; operation: CurveOperation } {
+  const position = meshBoundsCentre(mesh);
+  for (const vertex of mesh.vertices.values()) {
+    vertex.position = subVec3(vertex.position, position);
+  }
+  mesh.geometryVersion += 1;
+  mesh.dirty.positions = mesh.dirty.normals = mesh.dirty.bounds = mesh.dirty.bvh = true;
+  return {
+    position,
+    operation: offsetCurveOperationPoints(operation, position),
+  };
+}
+
+/** Fix legacy curve objects that baked world-space geometry at the identity transform. */
+export function ensureCurveObjectLocalized(
+  document: ModelDocument,
+  objectId: ObjectId,
+): boolean {
+  const object = document.objects.get(objectId);
+  const operation = readCurveOperation(object?.metadata.curveOperation);
+  const mesh = object?.meshId ? document.meshes.get(object.meshId) : null;
+  if (!object || !operation || !mesh || mesh.vertices.size === 0) return false;
+
+  const meshCentre = meshBoundsCentre(mesh);
+  const meshOffset = Math.hypot(meshCentre.x, meshCentre.y, meshCentre.z);
+  const transformOffset = Math.hypot(
+    object.transform.position.x,
+    object.transform.position.y,
+    object.transform.position.z,
+  );
+  if (meshOffset < 0.25 || transformOffset > 1e-3) return false;
+
+  const localized = localizeCurveMesh(mesh, operation);
+  object.transform.position = localized.position;
+  object.metadata.curveOperation = serializeCurveOperation(localized.operation);
+  document.dirty = true;
+  return true;
+}
+
+export function ensureCurveObjectsLocalized(document: ModelDocument): number {
+  let fixed = 0;
+  for (const object of document.objects.values()) {
+    if (ensureCurveObjectLocalized(document, object.id)) fixed += 1;
+  }
+  return fixed;
 }
 
 export function serializeCurveOperation(operation: CurveOperation): string {
@@ -434,6 +564,9 @@ export function readCurveOperation(raw: string | undefined): CurveOperation | nu
       pathSourceObjectId:
         typeof parsed.pathSourceObjectId === 'string' ? parsed.pathSourceObjectId : null,
       blobInflation: clampRange(parsed.blobInflation, 0, 1, 0.65),
+      workflowKind: isWorkflowKind(parsed.workflowKind) && isWorkflowStyle(parsed.style)
+        ? parsed.workflowKind
+        : null,
       ...readHandles(parsed.points, parsed.handlesIn, parsed.handlesOut, parsed.cyclic === true),
     };
   } catch {
@@ -457,6 +590,8 @@ export function curveOperationLabel(operation: CurveOperation): string {
     return label[operation.pathOutput];
   }
   if (operation.style === 'capsule') return 'Capsule Path';
+  if (operation.style === 'profile-solid') return 'Outline';
+  if (operation.style === 'segmented-sweep') return 'Limb';
   if (operation.style === 'ribbon') return 'Ribbon Sweep';
   if (operation.style === 'hair') return 'Hair Path';
   if (operation.style === 'hair-strip') return 'Low-poly Hair Strip';
@@ -589,6 +724,8 @@ function isCurveStyle(value: unknown): value is CurveStyle {
     value === 'sharp' ||
     value === 'tube' ||
     value === 'capsule' ||
+    value === 'profile-solid' ||
+    value === 'segmented-sweep' ||
     value === 'ribbon' ||
     value === 'hair' ||
     value === 'hair-strip' ||
@@ -601,7 +738,16 @@ function isCurveStyle(value: unknown): value is CurveStyle {
 }
 
 function isSweepStyle(style: CurveStyle): boolean {
-  return style !== 'soft' && style !== 'sharp' && style !== 'tube';
+  return (
+    style === 'ribbon' ||
+    style === 'hair' ||
+    style === 'hair-strip' ||
+    style === 'rounded-hair' ||
+    style === 'tapered-tube' ||
+    style === 'rope' ||
+    style === 'square-sweep' ||
+    style === 'rail-sweep'
+  );
 }
 
 function sweepProfile(style: CurveStyle): CurveSweepProfile {
@@ -678,6 +824,41 @@ function isPathOutput(value: unknown): value is PathOutput {
 
 function isCapStyle(value: unknown): value is CurveSweepCapStyle {
   return value === 'flat' || value === 'round' || value === 'pointed' || value === 'open';
+}
+
+/** Workflow-only: complete open tube ends for freehand profile strokes. */
+function effectiveWorkflowCaps(
+  operation: CurveOperation,
+  cyclic: boolean,
+): { start: CurveSweepCapStyle; end: CurveSweepCapStyle } {
+  let start = operation.pathStartCap;
+  let end = operation.pathEndCap;
+  const freehandTube =
+    !cyclic &&
+    operation.smooth &&
+    operation.inputMode === 'sketch' &&
+    (operation.style === 'profile-solid');
+  if (freehandTube) {
+    if (start === 'open') start = 'round';
+    if (end === 'open') end = 'round';
+  }
+  return { start, end };
+}
+
+function workflowPathSpacingScale(operation: CurveOperation): number {
+  if (operation.smooth && operation.inputMode === 'sketch') {
+    return operation.resolution === 'medium' ? 0.42 : 0.5;
+  }
+  return operation.resolution === 'medium' ? 0.65 : 0.85;
+}
+
+function isWorkflowKind(value: unknown): value is WorkflowKind {
+  return (
+    value === 'freehand' ||
+    value === 'sketch' ||
+    value === 'profile-solid' ||
+    value === 'segmented-sweep'
+  );
 }
 
 function isPathProfile(value: unknown): value is PathProfile {

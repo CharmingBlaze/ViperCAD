@@ -8,6 +8,7 @@ const MODEL_KEYS = [
   ['Ctrl', 'Temporarily toggle vertex, edge, surface, increment, and angle snapping'],
   ['. / ,', 'Cycle orientation / pivot'],
   ['E', 'Extrude selection'],
+  ['P', 'Push/Pull · click face · move · click finish'],
   ['I', 'Inset faces'],
   ['K', 'Knife · click start/end · Enter confirm'],
   ['Ctrl+B', 'Bevel edges'],

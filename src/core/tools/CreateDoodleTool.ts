@@ -32,12 +32,15 @@ import {
   defaultBezierHandles,
   evaluateCurveOperation,
   isPathStyle,
+  isWorkflowStyle,
+  localizeCurveMesh,
   serializeCurveOperation,
   type CurveOperation,
   type CurveInputMode,
   type CurveSolidMode,
   type CurveStyle,
   type CurveType,
+  type WorkflowKind,
 } from '@/core/curves/CurveOperation';
 import type { LatheAxis } from '@/core/mesh/builders/LatheBuilder';
 export { smoothCurvePoints as smoothDoodlePoints } from '@/core/curves/CurveOperation';
@@ -89,6 +92,7 @@ export class CreateDoodleTool implements Tool {
   twist = 0;
   profileWidth = 1;
   profileHeight = 1;
+  blobInflation = 0.65;
   pathStartCap: CurveSweepCapStyle = 'flat';
   pathEndCap: CurveSweepCapStyle = 'flat';
   pathRadiusScale = 1;
@@ -113,11 +117,17 @@ export class CreateDoodleTool implements Tool {
   pathSourceMesh: EditableMesh | null = null;
   autoConnect = true;
   smoothDrawing = true;
+  /** Blockout → Poly mode: click-corner silhouette solids. */
+  blockoutPolyMode = false;
   simpleTextureSettings: SimpleTextureSettings = defaultSimpleTextureSettings();
+  /** Curves vs Workflows — workflow-only styles and mesh rules stay isolated. */
+  createContext: 'curves' | 'workflows' = 'curves';
+  workflowKind: WorkflowKind | null = null;
   state: DoodleToolState = this.emptyState();
   private previousSelection: SelectionState | null = null;
   private strokePlaneOrigin: Vec3 | null = null;
   private strokePlaneNormal: Vec3 | null = null;
+  private lastPointerPoint: Vec3 | null = null;
 
   activate(context: ModellingContext): void {
     this.cancel(context);
@@ -132,10 +142,72 @@ export class CreateDoodleTool implements Tool {
     this.touch(context);
   }
 
+  setCreateContext(
+    createContext: 'curves' | 'workflows',
+    workflowKind: WorkflowKind | null,
+    context: ModellingContext,
+  ): void {
+    this.createContext = createContext;
+    this.workflowKind = createContext === 'workflows' ? workflowKind : null;
+    if (createContext === 'curves') {
+      this.blockoutPolyMode = false;
+      if (isWorkflowStyle(this.style)) {
+        this.style = 'soft';
+      }
+      this.pathStartCap = 'flat';
+      this.pathEndCap = 'flat';
+      this.pathSpacing = 1;
+      this.pathCount = 8;
+      this.radius = 0.08;
+    } else {
+      this.style =
+        workflowKind === 'segmented-sweep' ? 'segmented-sweep' : 'profile-solid';
+      this.solidMode = 'extrude';
+      if (this.radius < 0.18) this.radius = 0.22;
+      if (this.style === 'segmented-sweep') {
+        this.pathStartCap = 'round';
+        this.pathEndCap = 'round';
+        this.pathCount = 4;
+        this.pathSpacing = Math.max(this.pathSpacing, 1.5);
+        this.pathRadialSegments = Math.max(8, Math.min(14, this.pathRadialSegments));
+      } else if (this.pathRadialSegments < 10) {
+        this.pathRadialSegments = 10;
+      }
+    }
+    this.touch(context);
+  }
+
   setStyle(style: DoodleStyle, context: ModellingContext): void {
+    if (this.createContext === 'curves' && isWorkflowStyle(style)) return;
+    if (this.createContext === 'workflows' && !isWorkflowStyle(style)) return;
     this.style = style;
+    if (style === 'sharp' && this.inputMode === 'pen') {
+      this.curveType = 'polyline';
+      this.smoothDrawing = false;
+    }
     if (style === 'capsule' && this.pathRadialSegments < 12) {
       this.pathRadialSegments = 12;
+    }
+    if (this.createContext === 'workflows') {
+      if (style === 'profile-solid') {
+        this.solidMode = 'extrude';
+        if (this.pathRadialSegments < 10) this.pathRadialSegments = 10;
+        this.pathCount = 6;
+        this.blobInflation = 0.55;
+        this.profileWidth = 1;
+        this.profileHeight = 1;
+        this.startScale = 1;
+        this.endScale = 1;
+      }
+      if (style === 'segmented-sweep') {
+        this.solidMode = 'extrude';
+        this.pathRadialSegments = Math.max(8, Math.min(14, this.pathRadialSegments));
+        this.pathCount = 4;
+        this.pathSpacing = Math.max(this.pathSpacing, 1.5);
+        if (this.radius < 0.18) this.radius = 0.22;
+        this.pathStartCap = 'round';
+        this.pathEndCap = 'round';
+      }
     }
     if (this.state.stage === 'drawing') {
       this.state.closed =
@@ -150,6 +222,10 @@ export class CreateDoodleTool implements Tool {
     if (mode === this.inputMode) return;
     this.cancel(context);
     this.inputMode = mode;
+    if (mode === 'pen' && this.style === 'sharp') {
+      this.curveType = 'polyline';
+      this.smoothDrawing = false;
+    }
     this.touch(context);
   }
 
@@ -228,6 +304,7 @@ export class CreateDoodleTool implements Tool {
       twist: number;
       profileWidth: number;
       profileHeight: number;
+      blobInflation: number;
       startCap: CurveSweepCapStyle;
       endCap: CurveSweepCapStyle;
       radiusScale: number;
@@ -259,6 +336,7 @@ export class CreateDoodleTool implements Tool {
     if (settings.twist != null) this.twist = clamp(settings.twist, -2160, 2160);
     if (settings.profileWidth != null) this.profileWidth = clamp(settings.profileWidth, 0.05, 4);
     if (settings.profileHeight != null) this.profileHeight = clamp(settings.profileHeight, 0.05, 4);
+    if (settings.blobInflation != null) this.blobInflation = clamp(settings.blobInflation, 0, 1);
     if (settings.startCap) this.pathStartCap = settings.startCap;
     if (settings.endCap) this.pathEndCap = settings.endCap;
     if (settings.radiusScale != null) this.pathRadiusScale = clamp(settings.radiusScale, 0.1, 4);
@@ -295,7 +373,7 @@ export class CreateDoodleTool implements Tool {
     this.state.points.pop();
     this.state.handlesIn.pop();
     this.state.handlesOut.pop();
-    this.state.closed = false;
+    this.state.closed = this.shouldFill(this.state.points);
     this.state.previewPoint = null;
     if (this.state.points.length === 0) {
       this.previousSelection = null;
@@ -313,18 +391,27 @@ export class CreateDoodleTool implements Tool {
     if (this.inputMode === 'pen' && this.state.stage === 'drawing') {
       const point = this.sampleOnStrokePlane(input);
       const first = this.state.points[0];
-      if (
+      const snapped = this.snapToStartIfClosing(this.state.points, point);
+      const closing =
         this.autoConnect &&
-        first &&
-        this.state.points.length >= 3 &&
-        this.detectClosed([...this.state.points, point])
-      ) {
+        !!first &&
+        this.canAutoCloseSketch() &&
+        samePoint(snapped, first);
+      if (closing) {
         this.state.closed = true;
-      } else {
-        this.state.points.push(point);
-        this.refreshDraftHandles();
-        this.state.closed = this.shouldFill(this.state.points);
+        this.state.previewPoint = null;
+        this.state.revision += 1;
+        // Blockout Sketch: clicking the start point finishes the closed outline.
+        if (this.createContext === 'workflows' && this.style === 'profile-solid') {
+          this.confirm(context);
+          return;
+        }
+        context.requestRedraw();
+        return;
       }
+      this.state.points.push(point);
+      this.refreshDraftHandles();
+      this.state.closed = false;
       this.state.previewPoint = null;
       this.state.revision += 1;
       context.requestRedraw();
@@ -336,6 +423,9 @@ export class CreateDoodleTool implements Tool {
     this.strokePlaneOrigin = { ...point };
     this.strokePlaneNormal = normalizeVec3(input.rayDirection);
     this.previousSelection = cloneSelection(context.selection.state);
+    if (this.inputMode === 'pen') {
+      context.selection.selectObjects([], 'replace');
+    }
     this.state = {
       stage: 'drawing',
       points: [point],
@@ -347,16 +437,22 @@ export class CreateDoodleTool implements Tool {
       handlesOut: [{ ...point }],
       strokeLocked: false,
     };
+    this.lastPointerPoint = { ...point };
     context.requestRedraw();
   }
 
   update(input: ToolPointerInput, context: ModellingContext): void {
     if (this.state.stage !== 'drawing') return;
     const point = this.sampleOnStrokePlane(input);
+    this.lastPointerPoint = { ...point };
     if (this.inputMode === 'pen') {
       const previewPoint = this.snapToStartIfClosing(this.state.points, point);
       this.state.previewPoint = previewPoint;
-      this.state.closed = this.shouldFill([...this.state.points, previewPoint]);
+      // Only show "closed" preview when snap actually latched to the start.
+      this.state.closed =
+        this.canAutoCloseSketch() &&
+        !!this.state.points[0] &&
+        samePoint(previewPoint, this.state.points[0]!);
       this.state.revision += 1;
       context.requestRedraw();
       return;
@@ -372,14 +468,24 @@ export class CreateDoodleTool implements Tool {
     }
     const minSpacing = this.radius * 0.55;
     const last = this.state.points[this.state.points.length - 1];
+    const closeProbe = this.snapToStartIfClosing(this.state.points, point);
+    const nearStart =
+      this.autoConnect &&
+      this.state.points.length >= 3 &&
+      samePoint(closeProbe, this.state.points[0]!);
+    if (nearStart) {
+      this.state.closed = this.shouldFill([...this.state.points.slice(0, -1), closeProbe]);
+      this.state.revision += 1;
+      context.requestRedraw();
+      return;
+    }
     if (!last || lengthSqVec3(subVec3(point, last)) >= minSpacing * minSpacing) {
       this.state.points.push(point);
-      this.state.closed = this.shouldFill(this.state.points);
+      this.state.closed = this.shouldFill(this.closeTestPoints(this.state.points));
       this.state.revision += 1;
       context.requestRedraw();
     } else {
-      // Still refresh close state when hovering near the start without adding a point.
-      const closed = this.shouldFill([...this.state.points, point]);
+      const closed = this.shouldFill(this.closeTestPoints(this.state.points, point));
       if (closed !== this.state.closed) {
         this.state.closed = closed;
         this.state.revision += 1;
@@ -395,7 +501,15 @@ export class CreateDoodleTool implements Tool {
     this.state.strokeLocked = true;
     this.state.previewPoint = null;
     this.refreshDraftHandles();
-    this.state.closed = this.shouldFill(this.state.points);
+    const finalized = this.isClassicCurvesCapsule()
+      ? {
+          points: this.state.points,
+          closed: this.state.closed || this.shouldFill(this.state.points),
+        }
+      : this.finalizeClosedPoints(this.state.points, this.lastPointerPoint);
+    this.state.points = finalized.points;
+    this.state.closed = finalized.closed;
+    this.lastPointerPoint = null;
     this.state.revision += 1;
     context.requestRedraw();
   }
@@ -423,20 +537,25 @@ export class CreateDoodleTool implements Tool {
   /** Finish stroke on pointer up (or Enter). */
   confirm(context: ModellingContext): void {
     if (this.state.stage !== 'drawing') return;
-    const points = [...this.state.points];
+    let points = [...this.state.points];
     if (points.length < 2) {
       const p = points[0] ?? v3();
       points.push(addVec3(p, v3(this.radius * 2, 0, 0)));
     }
 
-    const closed = this.state.closed || this.shouldFill(points);
-    const operation = curveOperationFromStroke({
+    const stroke = this.isClassicCurvesCapsule()
+      ? {
+          points,
+          closed: this.state.closed || this.shouldFill(points),
+        }
+      : this.finalizeClosedPoints(points, this.lastPointerPoint);
+    let operation = curveOperationFromStroke({
       style: this.style,
-      points,
+      points: stroke.points,
       radius: this.radius,
       resolution: this.preset,
       smooth: this.smoothDrawing,
-      cyclic: closed,
+      cyclic: stroke.closed,
       inputMode: this.inputMode,
       curveType: this.curveType,
       handlesIn: this.state.handlesIn,
@@ -459,17 +578,25 @@ export class CreateDoodleTool implements Tool {
       throw new Error(`Cannot create doodle: ${errors.map((i) => i.message).join('; ')}`);
     }
 
+    const localized = localizeCurveMesh(mesh, operation);
+    operation = localized.operation;
+
     const beforeSelection = this.previousSelection
       ? cloneSelection(this.previousSelection)
       : cloneSelection(context.selection.state);
     const label = this.objectLabel();
     const { objectId, meshId } = commitMeshObject(context.document, mesh, { name: label });
     const object = context.document.objects.get(objectId)!;
+    object.transform.position = localized.position;
     object.metadata.curveOperation = serializeCurveOperation(operation);
     applySimpleTextureToObject(context.document, object, this.simpleTextureSettings);
     const meshRef = context.document.meshes.get(meshId)!;
     context.selection.setMode('object');
-    context.selection.selectObjects([objectId], 'replace');
+    if (this.createContext === 'workflows' || this.inputMode !== 'pen') {
+      context.selection.selectObjects([objectId], 'replace');
+    } else {
+      context.selection.selectObjects([], 'replace');
+    }
     const afterSelection = cloneSelection(context.selection.state);
     let applied = true;
     context.history.execute({
@@ -503,6 +630,7 @@ export class CreateDoodleTool implements Tool {
     this.previousSelection = null;
     this.strokePlaneOrigin = null;
     this.strokePlaneNormal = null;
+    this.lastPointerPoint = null;
     this.state = this.emptyState(this.state.revision + 1);
     context.requestRedraw();
   }
@@ -512,6 +640,7 @@ export class CreateDoodleTool implements Tool {
     this.previousSelection = null;
     this.strokePlaneOrigin = null;
     this.strokePlaneNormal = null;
+    this.lastPointerPoint = null;
     this.state = this.emptyState(this.state.revision + 1);
     context.requestRedraw();
   }
@@ -535,7 +664,58 @@ export class CreateDoodleTool implements Tool {
         ? sourcePoints
         : [sourcePoints[0]!, addVec3(sourcePoints[0]!, v3(this.radius * 1.5, 0, 0))];
     const handles = this.draftHandlesFor(points);
-    return this.buildMesh(points, this.shouldFill(points), handles);
+    if (this.isClassicCurvesCapsule()) {
+      return this.buildMesh(points, this.shouldFill(points), handles);
+    }
+    const probe =
+      this.inputMode === 'pen'
+        ? this.state.previewPoint
+        : this.lastPointerPoint;
+    const { points: finalized, closed } = this.finalizeClosedPoints(points, probe);
+    return this.buildMesh(finalized, closed, handles);
+  }
+
+  /** Whether the current draft stroke should become a closed solid (not a tube). */
+  isClosedStroke(points: Vec3[] = this.state.points): boolean {
+    if (this.state.stage !== 'drawing' || points.length < 2) return false;
+    const probe =
+      this.inputMode === 'pen'
+        ? this.state.previewPoint
+        : this.lastPointerPoint;
+    return this.shouldFill(this.closeTestPoints(points, probe));
+  }
+
+  /**
+   * Force-close the current Sketch polyline onto its first point and commit.
+   * Used by Blockout Sketch "Close loop".
+   */
+  closeLoop(context: ModellingContext): boolean {
+    if (this.state.stage !== 'drawing' || this.state.points.length < 3) return false;
+    if (this.createContext === 'workflows' && this.style === 'segmented-sweep') return false;
+    this.autoConnect = true;
+    this.state.closed = true;
+    this.state.previewPoint = null;
+    const first = this.state.points[0]!;
+    const last = this.state.points[this.state.points.length - 1]!;
+    if (!samePoint(last, first)) {
+      this.state.points.push({ ...first });
+      this.refreshDraftHandles();
+    } else {
+      this.state.points[this.state.points.length - 1] = { ...first };
+    }
+    this.lastPointerPoint = { ...first };
+    this.state.revision += 1;
+    this.confirm(context);
+    return true;
+  }
+
+  /** True when Sketch has enough points to close into an outline. */
+  canCloseLoop(): boolean {
+    return (
+      this.state.stage === 'drawing' &&
+      this.state.points.length >= 3 &&
+      !(this.createContext === 'workflows' && this.style === 'segmented-sweep')
+    );
   }
 
   /** Stable procedural source shown while drawing and edited before a Vector Pen curve is committed. */
@@ -546,7 +726,13 @@ export class CreateDoodleTool implements Tool {
     ) {
       return null;
     }
-    const points = this.state.points;
+    const probe =
+      this.inputMode === 'pen'
+        ? this.state.previewPoint
+        : this.lastPointerPoint;
+    const { points, closed } = this.isClassicCurvesCapsule()
+      ? { points: this.state.points, closed: this.shouldFill(this.state.points) }
+      : this.finalizeClosedPoints(this.state.points, probe);
     const handles = this.draftHandlesFor(points);
     return curveOperationFromStroke({
       style: this.style,
@@ -554,7 +740,7 @@ export class CreateDoodleTool implements Tool {
       radius: this.radius,
       resolution: this.preset,
       smooth: this.smoothDrawing,
-      cyclic: this.state.closed,
+      cyclic: closed,
       inputMode: this.inputMode,
       curveType: this.curveType,
       handlesIn: handles.handlesIn,
@@ -662,14 +848,34 @@ export class CreateDoodleTool implements Tool {
   }
 
   private detectClosed(points: Vec3[]): boolean {
+    if (points.length < 3) return false;
+    const first = points[0]!;
+    const last = points[points.length - 1]!;
+    if (
+      this.createContext === 'workflows' &&
+      this.inputMode === 'pen' &&
+      this.style !== 'segmented-sweep'
+    ) {
+      // Blockout Sketch only treats as closed when last is truly on the start magnet —
+      // never from path length alone (that made 3-point previews look "done").
+      if (points.length < 4) return samePoint(first, last);
+      const prior = points.slice(0, -1);
+      const magnet = this.closeSnapDistance(prior, last);
+      return lengthSqVec3(subVec3(first, last)) <= magnet * magnet;
+    }
     const len = strokePathLength(points);
     return isStrokeClosed(points, doodleCloseDistance(this.radius, len));
   }
 
   private shouldFill(points: Vec3[]): boolean {
     if (this.solidMode === 'lathe') return false;
+    if (this.createContext === 'workflows' && this.style === 'segmented-sweep') return false;
     if (isPathStyle(this.style)) return this.autoConnect && this.detectClosed(points);
     if (points.length < 3) return false;
+    // Curves capsule matches GitHub: long strokes can fill; pen uses same rule.
+    if (this.inputMode === 'pen' && !this.isClassicCurvesCapsule()) {
+      return this.detectClosed(points);
+    }
     // Shape modes close the final segment automatically, like Paint 3D's
     // soft/sharp doodles. Near-start detection is still used for live feedback.
     return this.detectClosed(points) || strokePathLength(points) > this.radius * 4;
@@ -677,14 +883,93 @@ export class CreateDoodleTool implements Tool {
 
   private snapToStartIfClosing(points: Vec3[], point: Vec3): Vec3 {
     const first = points[0];
-    if (!this.autoConnect || !first || points.length < 3) return point;
-    const closeDistance = doodleCloseDistance(
-      this.radius,
-      strokePathLength([...points, point]),
-    );
-    return lengthSqVec3(subVec3(point, first)) <= closeDistance * closeDistance
-      ? { ...first }
-      : point;
+    if (!this.autoConnect || !first || !this.canAutoCloseSketch(points.length)) return point;
+    const closeDistance = this.closeSnapDistance(points, point);
+    const distToStartSq = lengthSqVec3(subVec3(point, first));
+    if (distToStartSq > closeDistance * closeDistance) return point;
+
+    // Prefer placing a new corner over closing: if closer to the last point, don't snap.
+    const last = points[points.length - 1]!;
+    const distToLastSq = lengthSqVec3(subVec3(point, last));
+    if (distToLastSq <= distToStartSq) return point;
+
+    // Also skip if clearly nearer another existing corner than the start.
+    for (let index = 1; index < points.length - 1; index++) {
+      if (lengthSqVec3(subVec3(point, points[index]!)) < distToStartSq) return point;
+    }
+    return { ...first };
+  }
+
+  /**
+   * Blockout Sketch needs ≥4 corners before hover/click can auto-close.
+   * Triangles still work via the Close loop button.
+   */
+  private canAutoCloseSketch(pointCount = this.state.points.length): boolean {
+    if (this.createContext === 'workflows' && this.inputMode === 'pen') {
+      return pointCount >= 4;
+    }
+    return pointCount >= 3;
+  }
+
+  /** Tight magnet around the first corner — not thickness-based (that closed early). */
+  private closeSnapDistance(points: Vec3[], point: Vec3): number {
+    const pathLen = strokePathLength([...points, point]);
+    const base = doodleCloseDistance(this.radius, pathLen);
+    if (this.createContext !== 'workflows' || this.inputMode !== 'pen') {
+      return base;
+    }
+    if (this.style === 'segmented-sweep') return base;
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (const sample of points) {
+      minX = Math.min(minX, sample.x);
+      maxX = Math.max(maxX, sample.x);
+      minY = Math.min(minY, sample.y);
+      maxY = Math.max(maxY, sample.y);
+      minZ = Math.min(minZ, sample.z);
+      maxZ = Math.max(maxZ, sample.z);
+    }
+    const diagonal = Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
+    // ~6% of silhouette, capped — easy to hit start without stealing the 4th corner.
+    const magnet = Math.max(base * 1.15, diagonal * 0.06, pathLen * 0.035);
+    return Math.min(magnet, Math.max(diagonal * 0.1, base * 1.5));
+  }
+
+  private closeTestPoints(points: Vec3[], probe?: Vec3 | null): Vec3[] {
+    if (!probe || points.length < 2) return points;
+    const last = points[points.length - 1]!;
+    if (lengthSqVec3(subVec3(probe, last)) < 1e-10) return points;
+    return [...points, this.snapToStartIfClosing(points, probe)];
+  }
+
+  private isClassicCurvesCapsule(): boolean {
+    return this.createContext === 'curves' && this.style === 'capsule';
+  }
+
+  private finalizeClosedPoints(
+    points: Vec3[],
+    probe?: Vec3 | null,
+  ): { points: Vec3[]; closed: boolean } {
+    const closed = this.shouldFill(this.closeTestPoints(points, probe));
+    if (!closed || points.length < 3) {
+      return { points, closed };
+    }
+    // Append the start — never replace the last corner. Replacing turned
+    // squares [A,B,C,D] into triangles [A,B,C,A] when closing by clicking start.
+    const finalized = points.map((point) => ({ ...point }));
+    const first = finalized[0]!;
+    const last = finalized[finalized.length - 1]!;
+    if (!samePoint(last, first)) {
+      finalized.push({ ...first });
+    } else {
+      finalized[finalized.length - 1] = { ...first };
+    }
+    return { points: finalized, closed: true };
   }
 
   private buildMesh(
@@ -755,6 +1040,8 @@ export class CreateDoodleTool implements Tool {
     if (this.style === 'sharp') return 'Sharp Curve';
     if (this.style === 'tube') return 'Tube Sweep';
     if (this.style === 'capsule') return 'Capsule Path';
+    if (this.style === 'profile-solid') return this.blockoutPolyMode ? 'Poly' : 'Outline';
+    if (this.style === 'segmented-sweep') return 'Limb';
     if (this.style === 'ribbon') return 'Ribbon Sweep';
     if (this.style === 'hair') return 'Hair Path';
     if (this.style === 'hair-strip') return 'Hair Strip';
@@ -778,6 +1065,7 @@ export class CreateDoodleTool implements Tool {
       twist: this.twist,
       profileWidth: this.profileWidth,
       profileHeight: this.profileHeight,
+      blobInflation: this.blobInflation,
       pathStartCap: this.pathStartCap,
       pathEndCap: this.pathEndCap,
       pathRadiusScale: this.pathRadiusScale,
@@ -799,6 +1087,7 @@ export class CreateDoodleTool implements Tool {
       pathSeed: this.pathSeed,
       pathKeepInstances: this.pathKeepInstances,
       pathSourceObjectId: this.pathSourceObjectId,
+      workflowKind: this.createContext === 'workflows' ? this.workflowKind : null,
     };
   }
 }

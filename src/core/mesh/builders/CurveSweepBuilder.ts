@@ -68,7 +68,7 @@ export function buildCurveSweep(options: CurveSweepOptions): EditableMesh {
 }
 
 /**
- * Rounded capsule sweep with true hemispherical start and finish ends.
+ * Classic Curves capsule — true hemispherical ends with low-poly spacing.
  * Closed paths become a seamless round tube without overlapping end caps.
  */
 export function buildCurveCapsule(options: CurveSweepOptions): EditableMesh {
@@ -100,7 +100,7 @@ export function buildCurveCapsule(options: CurveSweepOptions): EditableMesh {
   const start = path[0]!;
   const startTangent = guide.tangents[0]!;
   for (let ring = 0; ring < capRings; ring++) {
-    const angle = ring / capRings * Math.PI * 0.5;
+    const angle = (ring / capRings) * Math.PI * 0.5;
     expandedPath.push(addVec3(start, scaleVec3(startTangent, -Math.cos(angle) * radius)));
     ringScales.push(Math.max(0.015, Math.sin(angle)));
   }
@@ -111,7 +111,7 @@ export function buildCurveCapsule(options: CurveSweepOptions): EditableMesh {
   const end = path[path.length - 1]!;
   const endTangent = guide.tangents[guide.tangents.length - 1]!;
   for (let ring = 1; ring <= capRings; ring++) {
-    const angle = ring / capRings * Math.PI * 0.5;
+    const angle = (ring / capRings) * Math.PI * 0.5;
     expandedPath.push(addVec3(end, scaleVec3(endTangent, Math.sin(angle) * radius)));
     ringScales.push(Math.max(0.015, Math.cos(angle)));
   }
@@ -130,6 +130,83 @@ export function buildCurveCapsule(options: CurveSweepOptions): EditableMesh {
       capEnd: true,
       startCapStyle: 'flat',
       endCapStyle: 'flat',
+      startScale: 1,
+      endScale: 1,
+      ringScales,
+    },
+  );
+  return builder.build();
+}
+
+/** Workflow profile tubes with selectable end cap styles. */
+export function buildStyledCurveCapsule(options: CurveSweepOptions): EditableMesh {
+  const radius = Math.max(1e-4, options.radius);
+  const path = resampleStrokePoints(
+    options.points,
+    radius * 0.35 * Math.max(0.25, options.pathSpacingScale ?? 1),
+  );
+  if (path.length < 2) path.push(addVec3(path[0] ?? v3(), v3(radius * 2, 0, 0)));
+  const cyclic = options.cyclic === true && path.length > 2;
+  if (cyclic) {
+    path.push({ ...path[0]! });
+    const builder = new MeshBuilder(options.name ?? 'Curve Capsule', false);
+    appendSweep(builder, buildFrames(path), profilePoints('round', Math.max(12, options.radialSegments)), {
+      ...options,
+      points: path,
+      profile: 'round',
+      cyclic: true,
+      capStart: false,
+      capEnd: false,
+    });
+    return builder.build();
+  }
+
+  const startCap = options.startCapStyle ?? 'round';
+  const endCap = options.endCapStyle ?? 'round';
+  const guide = buildFrames(path);
+  const radialSegments = Math.max(10, Math.min(16, options.radialSegments));
+  const capRings = Math.max(3, Math.min(8, Math.ceil(radialSegments / 3)));
+  const expandedPath: Vec3[] = [];
+  const ringScales: number[] = [];
+  if (startCap === 'round') {
+    const start = path[0]!;
+    const startTangent = guide.tangents[0]!;
+    for (let ring = 1; ring <= capRings; ring++) {
+      const angle = (ring / capRings) * Math.PI * 0.5;
+      expandedPath.push(addVec3(start, scaleVec3(startTangent, -Math.cos(angle) * radius)));
+      ringScales.push(Math.max(0.04, Math.sin(angle)));
+    }
+  }
+  for (const point of path) {
+    expandedPath.push({ ...point });
+    ringScales.push(1);
+  }
+  if (endCap === 'round') {
+    const end = path[path.length - 1]!;
+    const endTangent = guide.tangents[guide.tangents.length - 1]!;
+    for (let ring = 1; ring <= capRings; ring++) {
+      const angle = (ring / capRings) * Math.PI * 0.5;
+      expandedPath.push(addVec3(end, scaleVec3(endTangent, Math.sin(angle) * radius)));
+      ringScales.push(Math.max(0.04, Math.cos(angle)));
+    }
+  }
+
+  const builder = new MeshBuilder(options.name ?? 'Curve Capsule', false);
+  appendSweep(
+    builder,
+    buildFrames(expandedPath),
+    profilePoints('round', radialSegments),
+    {
+      ...options,
+      points: expandedPath,
+      profile: 'round',
+      cyclic: false,
+      startCapStyle: startCap === 'round' ? 'flat' : startCap,
+      endCapStyle: endCap === 'round' ? 'flat' : endCap,
+      capStart: startCap === 'flat',
+      capEnd: endCap === 'flat',
+      taperStart: startCap === 'pointed',
+      taperEnd: endCap === 'pointed',
       startScale: 1,
       endScale: 1,
       ringScales,

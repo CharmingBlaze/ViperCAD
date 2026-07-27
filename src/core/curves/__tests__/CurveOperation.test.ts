@@ -5,11 +5,34 @@ import {
   curveOperationFromStroke,
   evaluateCurvePath,
   evaluateCurveOperation,
+  localizeCurveMesh,
   readCurveOperation,
   serializeCurveOperation,
 } from '@/core/curves/CurveOperation';
 
 describe('CurveOperation', () => {
+  it('localizes evaluated curve geometry around the object origin', () => {
+    const operation = curveOperationFromStroke({
+      style: 'soft',
+      points: [v3(4, 0, 4), v3(4.8, 0.2, 4), v3(4.2, -0.3, 4), v3(3.9, 0.1, 4)],
+      radius: 0.1,
+      resolution: 'low',
+      smooth: false,
+      cyclic: true,
+    });
+    const mesh = evaluateCurveOperation(operation);
+    const localized = localizeCurveMesh(mesh, operation);
+    expect(Math.hypot(localized.position.x, localized.position.y, localized.position.z))
+      .toBeGreaterThan(3);
+    const centre = localized.operation.points.reduce(
+      (acc, point) => v3(acc.x + point.x, acc.y + point.y, acc.z + point.z),
+      v3(),
+    );
+    expect(Math.hypot(centre.x, centre.y, centre.z)).toBeLessThan(1.5);
+    const zs = [...mesh.vertices.values()].map((vertex) => vertex.position.z);
+    expect(Math.max(...zs) - Math.min(...zs)).toBeLessThan(1);
+  });
+
   it('round-trips editable tube source data and evaluates a valid mesh', () => {
     const operation = curveOperationFromStroke({
         style: 'tube',
@@ -53,6 +76,8 @@ describe('CurveOperation', () => {
   it.each([
     'ribbon',
     'hair',
+    'hair-strip',
+    'rounded-hair',
     'rope',
     'square-sweep',
     'rail-sweep',
@@ -112,6 +137,24 @@ describe('CurveOperation', () => {
     expect(validateMeshFull(evaluateCurveOperation(operation)).ok).toBe(true);
   });
 
+  it('curves capsule always uses true rounded ends', () => {
+    const operation = curveOperationFromStroke({
+      style: 'capsule',
+      points: [v3(0, 0, 0), v3(1, 0.25, 0), v3(2, 0, 0)],
+      radius: 0.2,
+      resolution: 'medium',
+      smooth: true,
+      cyclic: false,
+      inputMode: 'sketch',
+      pathStartCap: 'flat',
+      pathEndCap: 'open',
+    });
+    const mesh = evaluateCurveOperation(operation);
+    const xs = [...mesh.vertices.values()].map((vertex) => vertex.position.x);
+    expect(Math.min(...xs)).toBeLessThan(-0.15);
+    expect(Math.max(...xs)).toBeGreaterThan(2.15);
+  });
+
   it('builds Capsule paths with true rounded ends and editable side precision', () => {
     const operation = curveOperationFromStroke({
       style: 'capsule',
@@ -123,6 +166,8 @@ describe('CurveOperation', () => {
       inputMode: 'pen',
       curveType: 'polyline',
       pathRadialSegments: 16,
+      pathStartCap: 'round',
+      pathEndCap: 'round',
     });
     const mesh = evaluateCurveOperation(operation);
     const xs = [...mesh.vertices.values()].map((vertex) => vertex.position.x);
@@ -182,6 +227,33 @@ describe('CurveOperation', () => {
     }
   });
 
+  it('extrudes vector pen outlines as exact flat prisms', () => {
+    const points = [v3(0, 0, 0), v3(2, 0, 0), v3(2, 1, 0), v3(0, 1, 0)];
+    const sketchOutline = evaluateCurveOperation(curveOperationFromStroke({
+      style: 'sharp',
+      points,
+      radius: 0.08,
+      resolution: 'low',
+      smooth: false,
+      cyclic: true,
+    }));
+    const penOutline = evaluateCurveOperation(curveOperationFromStroke({
+      style: 'sharp',
+      inputMode: 'pen',
+      curveType: 'polyline',
+      points,
+      radius: 0.08,
+      resolution: 'low',
+      smooth: false,
+      cyclic: true,
+    }));
+    expect(penOutline.vertices.size).toBe(8);
+    expect(penOutline.vertices.size).toBeLessThan(sketchOutline.vertices.size);
+    const zs = [...penOutline.vertices.values()].map((vertex) => vertex.position.z);
+    expect(Math.max(...zs) - Math.min(...zs)).toBeCloseTo(0.16, 3);
+    expect(validateMeshFull(penOutline).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+  });
+
   it('stores a drawn lathe profile and rebuilds it at different precision', () => {
     const operation = curveOperationFromStroke({
       style: 'sharp',
@@ -218,6 +290,49 @@ describe('CurveOperation', () => {
     const high = evaluateCurveOperation({ ...restored, latheSegments: 32 });
     expect(high.vertices.size).toBeGreaterThan(low.vertices.size);
     expect(validateMeshFull(high).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+  });
+
+  it('builds freehand blockout profile solids from closed outlines', () => {
+    const ring = [
+      v3(0, 0, 0),
+      v3(0.5, 0.8, 0),
+      v3(1, 0.9, 0),
+      v3(1.5, 0.5, 0),
+      v3(1.4, 0, 0),
+      v3(0.7, -0.2, 0),
+      v3(0, 0, 0),
+    ];
+    const mesh = evaluateCurveOperation(curveOperationFromStroke({
+      style: 'profile-solid',
+      points: ring,
+      radius: 0.15,
+      resolution: 'low',
+      smooth: false,
+      cyclic: true,
+      inputMode: 'pen',
+      curveType: 'polyline',
+      pathRadialSegments: 12,
+      workflowKind: 'sketch',
+    }));
+    expect(mesh.vertices.size).toBeGreaterThanOrEqual(12);
+    expect(mesh.faces.size).toBeGreaterThanOrEqual(8);
+    expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+  });
+
+  it('builds open workflow blockout ribbons as flat extrusions', () => {
+    const path = [v3(0, 0, 0), v3(2, 0.1, 0), v3(4, 0, 0)];
+    const mesh = evaluateCurveOperation(curveOperationFromStroke({
+      style: 'profile-solid',
+      points: path,
+      radius: 0.15,
+      resolution: 'low',
+      smooth: true,
+      cyclic: false,
+      inputMode: 'sketch',
+      workflowKind: 'freehand',
+    }));
+    expect(mesh.vertices.size).toBeGreaterThan(8);
+    expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
   });
 
   it('round-trips the complete editable Path Settings suite', () => {

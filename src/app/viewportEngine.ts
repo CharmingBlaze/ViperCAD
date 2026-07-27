@@ -65,6 +65,7 @@ import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
 import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
 import { KnifeTool } from '@/core/tools/KnifeTool';
 import { LoopCutTool } from '@/core/tools/LoopCutTool';
+import { PushPullTool } from '@/core/tools/PushPullTool';
 import { TileDrawTool } from '@/core/tools/TileDrawTool';
 import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
 import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
@@ -776,6 +777,7 @@ export class ViewportEngine {
     const modalMeshTool =
       (activeTool instanceof KnifeTool && activeTool.state.dragging) ||
       activeTool instanceof LoopCutTool ||
+      activeTool instanceof PushPullTool ||
       (activeTool instanceof TerrainSculptTool && activeTool.dragging) ||
       (activeTool instanceof MeshSculptTool && activeTool.dragging) ||
       (activeTool instanceof TerrainObjectTool && activeTool.dragging) ||
@@ -1094,6 +1096,16 @@ export class ViewportEngine {
       this.invalidate();
       return;
     }
+    if (id && tool instanceof PushPullTool) {
+      if (tool.state.phase === 'hover') {
+        tool.setViewportPick(this.resolveKnifePick(e, id));
+      }
+      tool.update(this.pointerInput(e, id), this.session!.context());
+      this.interactionOverlay.updateTransform(e, tool.getStatusLine());
+      if (this.renderer) this.renderer.domElement.style.cursor = 'crosshair';
+      this.invalidate();
+      return;
+    }
     if (id && tool instanceof LoopCutTool) {
       tool.setViewportPick(this.resolveLoopCutPick(e, id));
       tool.update(this.pointerInput(e, id), this.session!.context());
@@ -1169,6 +1181,7 @@ export class ViewportEngine {
       && !(tool instanceof TileDrawTool)
       && !(tool instanceof KnifeTool)
       && !(tool instanceof LoopCutTool)
+      && !(tool instanceof PushPullTool)
       && !(tool instanceof TerrainSculptTool)
       && !(tool instanceof MeshSculptTool)
       && !(tool instanceof TerrainObjectTool)
@@ -1237,11 +1250,26 @@ export class ViewportEngine {
     if (this.tryBeginViewportNav(e, id)) return;
 
     const tool = this.session?.tools.getActive();
-    if (!this.workspace.curveNodeEditMode && this.tryStartGizmoTransform(e, id)) {
+    const vectorPenDrawing =
+      tool instanceof CreateDoodleTool &&
+      tool.inputMode === 'pen' &&
+      tool.state.stage === 'drawing';
+    const vectorPenIdle =
+      tool instanceof CreateDoodleTool &&
+      tool.inputMode === 'pen' &&
+      tool.state.stage === 'idle';
+    if (
+      !this.workspace.curveNodeEditMode &&
+      !vectorPenDrawing &&
+      this.tryStartGizmoTransform(e, id)
+    ) {
       this.invalidate();
       return;
     }
-    const curveTarget = this.workspace.curveNodeEditMode ? this.pickCurveControl(e, id) : null;
+    const curveTarget =
+      this.workspace.curveNodeEditMode && !vectorPenIdle
+        ? this.pickCurveControl(e, id)
+        : null;
     if (curveTarget && this.beginCurvePointDrag(e, id, curveTarget)) return;
 
     if (this.workspace.texture.seamPaintMode !== 'off') {
@@ -1263,6 +1291,7 @@ export class ViewportEngine {
       !(tool instanceof TileDrawTool) &&
       !(tool instanceof KnifeTool) &&
       !(tool instanceof LoopCutTool) &&
+      !(tool instanceof PushPullTool) &&
       !(tool instanceof TerrainSculptTool) &&
       !(tool instanceof MeshSculptTool) &&
       !(tool instanceof TerrainObjectTool) &&
@@ -1341,19 +1370,25 @@ export class ViewportEngine {
         this.invalidate();
         return;
       } else if (tool.state.stage === 'idle') {
-        if (this.tryStartGizmoTransform(e, id)) {
-          this.invalidate();
-          return;
+        if (tool.inputMode === 'pen') {
+          this.workspace.setCurveNodeEditMode(false);
+          this.workspace.setSelectedCurvePointIndex(0);
         }
-        const hit = this.resolvePointerHit(e, id);
-        if (hit) {
-          this.pickSelection(e, id);
-          if (this.workspace.curveNodeEditMode) {
-            this.workspace.setCurveNodeEditMode(false);
+        if (tool.inputMode !== 'pen') {
+          if (this.tryStartGizmoTransform(e, id)) {
+            this.invalidate();
+            return;
           }
-          this.syncGizmo();
-          this.invalidate();
-          return;
+          const hit = this.resolvePointerHit(e, id);
+          if (hit) {
+            this.pickSelection(e, id);
+            if (this.workspace.curveNodeEditMode) {
+              this.workspace.setCurveNodeEditMode(false);
+            }
+            this.syncGizmo();
+            this.invalidate();
+            return;
+          }
         }
         e.preventDefault();
         if (tool.inputMode === 'sketch') {
@@ -1372,6 +1407,8 @@ export class ViewportEngine {
         this.invalidate();
         return;
       }
+      this.invalidate();
+      return;
     }
 
     if (tool instanceof DrawPolyTool) {
@@ -1409,6 +1446,27 @@ export class ViewportEngine {
         this.workspace.input.end('tool');
         this.syncOrbitEnabled();
       }
+      this.invalidate();
+      return;
+    }
+
+    if (tool instanceof PushPullTool) {
+      e.preventDefault();
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      this.rebindActiveControls();
+      if (tool.state.phase === 'hover') {
+        tool.setViewportPick(this.resolveKnifePick(e, id));
+      }
+      const wasDragging = tool.state.phase === 'dragging';
+      this.workspace.input.begin('tool');
+      this.syncOrbitEnabled();
+      tool.begin(this.pointerInput(e, id), this.session!.context());
+      if (wasDragging && tool.state.phase === 'hover') {
+        this.workspace.input.end('tool');
+        this.interactionOverlay.updateTransform(null, '');
+        this.syncOrbitEnabled();
+      }
+      this.interactionOverlay.updateTransform(e, tool.getStatusLine());
       this.invalidate();
       return;
     }
@@ -1584,6 +1642,10 @@ export class ViewportEngine {
       !doodle.state.strokeLocked &&
       e.button === 0
     ) {
+      const paneId = this.workspace.hoveredViewportId ?? this.workspace.activeViewportId;
+      if (paneId) {
+        doodle.update(this.pointerInput(e, paneId), this.session.context());
+      }
       doodle.lockSketchStroke(this.session.context());
       this.workspace.input.end('tool');
       this.syncOrbitEnabled();
@@ -3281,8 +3343,13 @@ export class ViewportEngine {
       activeTool instanceof MeshSculptTool ||
       activeTool instanceof TerrainObjectTool ||
       activeTool instanceof TerrainFeatureTool;
+    const vectorPenDrawing =
+      activeTool instanceof CreateDoodleTool &&
+      activeTool.inputMode === 'pen' &&
+      activeTool.state.stage === 'drawing';
     const show =
       !terrainEditing &&
+      !vectorPenDrawing &&
       !this.isTextureFaceEditing() &&
       selectionHasTransformTarget(sel);
 

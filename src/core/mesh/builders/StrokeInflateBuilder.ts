@@ -12,6 +12,7 @@ import { unwrapUvAuto } from '@/core/uv/UvOperations';
 import { buildCurveCapsule } from '@/core/mesh/builders/CurveSweepBuilder';
 import {
   capBoundaryPoints,
+  lightCleanupBoundary,
   prepareOutlineBoundary,
   preparePathCenterline,
 } from '@/core/mesh/builders/OutlineBoundary';
@@ -37,12 +38,14 @@ export type InflateDoodleOptions = {
   inflation?: number;
   radialSegments?: number;
   closed?: boolean;
+  /** Vector pen outline: exact clicked path as a flat prism extrusion. */
+  exactOutline?: boolean;
   name?: string;
 };
 
 /** True when the stroke end returns near the start (Paint 3D “connect”). */
 export function isStrokeClosed(points: Vec3[], closeDistance: number): boolean {
-  if (points.length < 4) return false;
+  if (points.length < 3) return false;
   const a = points[0]!;
   const b = points[points.length - 1]!;
   if (lengthSqVec3(subVec3(a, b)) > closeDistance * closeDistance) return false;
@@ -95,7 +98,8 @@ export function buildInflatedDoodle(options: InflateDoodleOptions): EditableMesh
   const name = options.name ?? 'Doodle';
   const profile = options.profile ?? 'sharp';
   const closed = options.closed !== false;
-  const highFidelity = profile === 'sharp' || profile === 'soft';
+  const exactOutline = options.exactOutline === true && profile === 'sharp';
+  const highFidelity = !exactOutline && (profile === 'sharp' || profile === 'soft');
   const path = prepareStrokePath(options.points, thickness, highFidelity);
   const plane = fitStrokePlane(path);
 
@@ -109,8 +113,42 @@ export function buildInflatedDoodle(options: InflateDoodleOptions): EditableMesh
   }
 
   const ring2d = path.map((point) => toLocalPoint(point, plane));
-  const depth = Math.max(1e-4, thickness * 2);
+  const depth =
+    profile === 'soft'
+      ? Math.max(1e-4, thickness * 3.5)
+      : Math.max(1e-4, thickness * 2);
   const inflation = profile === 'soft' ? (options.inflation ?? 0.65) : 0;
+  const footprint =
+    profile === 'soft' && closed
+      ? expandBoundaryOutward(ring2d, thickness * 0.75)
+      : ring2d;
+
+  if (exactOutline) {
+    if (closed) {
+      const boundary = lightCleanupBoundary(ring2d, true, 1e-4);
+      if (boundary.length >= 3) {
+        return buildSilhouetteExtrude({
+          boundary,
+          plane,
+          depth,
+          name: name ?? 'Outline Profile',
+        });
+      }
+    } else {
+      const centerline = lightCleanupBoundary(ring2d, false, 1e-4);
+      if (centerline.length >= 2) {
+        const ribbon = strokeToFlatOutline(centerline, Math.max(thickness, thickness * 0.85));
+        if (ribbon && ribbon.length >= 3) {
+          return buildSilhouetteExtrude({
+            boundary: ribbon,
+            plane,
+            depth,
+            name: name ?? 'Outline Path',
+          });
+        }
+      }
+    }
+  }
 
   if (!closed) {
     const centerline = preparePathCenterline(ring2d, outlineTarget);
@@ -161,10 +199,10 @@ export function buildInflatedDoodle(options: InflateDoodleOptions): EditableMesh
     });
   }
 
-  const boundary = boundaryForProfile(ring2d, outlineTarget, profile);
+  const boundary = boundaryForProfile(footprint, outlineTarget, profile);
   if (!boundary || boundary.length < 3) {
     return buildSoftInflateDome({
-      boundary: ring2d,
+      boundary: footprint,
       plane,
       depth,
       rings: ringCountForBudget(outlineTarget) + (profile === 'soft' ? 2 : 0),
@@ -180,6 +218,29 @@ export function buildInflatedDoodle(options: InflateDoodleOptions): EditableMesh
     rings: ringCountForBudget(outlineTarget) + (profile === 'soft' ? 2 : 0),
     inflation,
     name,
+  });
+}
+
+function expandBoundaryOutward(
+  points: { u: number; v: number }[],
+  amount: number,
+): { u: number; v: number }[] {
+  if (amount <= 0 || points.length < 3) return points;
+  let cx = 0;
+  let cy = 0;
+  for (const point of points) {
+    cx += point.u;
+    cy += point.v;
+  }
+  cx /= points.length;
+  cy /= points.length;
+  return points.map((point) => {
+    const dx = point.u - cx;
+    const dy = point.v - cy;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-8) return { ...point };
+    const scale = (len + amount) / len;
+    return { u: cx + dx * scale, v: cy + dy * scale };
   });
 }
 
