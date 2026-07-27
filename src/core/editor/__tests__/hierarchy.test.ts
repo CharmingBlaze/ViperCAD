@@ -5,6 +5,11 @@ import {
 } from '@/core/editor/Clipboard';
 import { groupObjects } from '@/core/editor/GameAssetTools';
 import {
+  enterGroupFocus,
+  exitGroupFocus,
+  isObjectInFocusScope,
+} from '@/core/editor/GroupFocus';
+import {
   commitGroupSelection,
   commitUngroupSelection,
 } from '@/core/editor/HierarchyCommands';
@@ -98,5 +103,18 @@ describe('object groups', () => {
 
     expect(getObjectWorldTransform(session.document, a.objectId).position.x).toBeCloseTo(3);
     expect(getObjectWorldTransform(session.document, b.objectId).position.x).toBeCloseTo(beforeB + 3);
+  });
+
+  it('scopes selection to a focused group', () => {
+    const { session, a, b } = twoBoxes();
+    const groupId = groupObjects(session.document, [a.objectId], 'Interior');
+    session.selection.selectObjects([b.objectId], 'replace');
+    expect(enterGroupFocus(session, groupId)).toBe(true);
+    expect(isObjectInFocusScope(session.document, a.objectId, session.focusGroupId)).toBe(true);
+    expect(isObjectInFocusScope(session.document, b.objectId, session.focusGroupId)).toBe(false);
+    session.selection.selectObjects([b.objectId], 'replace');
+    expect(session.selection.state.selectedObjectIds.has(b.objectId)).toBe(false);
+    expect(exitGroupFocus(session)).toBe(true);
+    expect(session.focusGroupId).toBeNull();
   });
 });

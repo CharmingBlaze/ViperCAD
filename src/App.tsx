@@ -29,9 +29,16 @@ import { sculptableObjects } from '@/core/sculpt/MeshSculptTarget';
 import type { GizmoMode, TransformOrientation, TransformPivotMode } from '@/core/transform/types';
 import { WorkspaceController } from '@/workspace/WorkspaceController';
 import { VIEW_LABELS } from '@/workspace/types';
-import { deserializeProject, serializeProject } from '@/core/persistence/ProjectSerializer';
+import { deserializeViperProject, serializeProject } from '@/core/persistence/ProjectSerializer';
 import { exportObj, importObj } from '@/core/io/ObjAdapter';
-import { commitMeshObject, createEmptyDocument } from '@/core/document/ModelDocument';
+import { commitMeshObject } from '@/core/document/ModelDocument';
+import { createEmptyProject, clearProjectDirty, projectIsDirty } from '@/core/document/ViperProject';
+import { DocumentTabs } from '@/app/DocumentTabs';
+import { enterGroupFocus, exitGroupFocus, exitToDocumentRoot } from '@/core/editor/GroupFocus';
+import { placeModelQuick } from '@/app/outliner/placeModelWorkflow';
+import { modelHasPlaceableGeometry } from '@/core/editor/ModelInstances';
+import { getViperDocument } from '@/core/document/ViperProject';
+import { isGroupObject } from '@/core/editor/Hierarchy';
 import { ensurePaintableUvs } from '@/core/uv/EnsurePaintableUvs';
 import { commitCopySelection, commitPasteClipboard } from '@/core/editor/Clipboard';
 import {
@@ -70,6 +77,7 @@ export default function App() {
   const workspace = useMemo(() => new WorkspaceController(), []);
   const [, setTick] = useState(0);
   const [outlinerOpen, setOutlinerOpen] = useState(true);
+  const [outlinerTab, setOutlinerTab] = useState<'scene' | 'models' | 'levels'>('scene');
   const [terrainObjectsOpen, setTerrainObjectsOpen] = useState(true);
   const [autosaveOffers, setAutosaveOffers] = useState<AutosavePayload[]>([]);
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
@@ -91,15 +99,15 @@ export default function App() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (!session.document.dirty) return;
-      void writeAutosave(serializeProject(session.document), session.document.name || 'Autosave');
+      if (!projectIsDirty(session.project)) return;
+      void writeAutosave(serializeProject(session.document), session.project.name || 'Autosave');
     }, 5000);
     return () => window.clearInterval(timer);
   }, [session]);
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (!session.document.dirty) return;
+      if (!projectIsDirty(session.project)) return;
       event.preventDefault();
       event.returnValue = '';
     };
@@ -199,15 +207,20 @@ export default function App() {
   });
 
   const confirmReplaceDirtyProject = () =>
-    !session.document.dirty ||
+    !projectIsDirty(session.project) ||
     window.confirm('Discard unsaved changes and replace the current project?');
 
   const newProject = () => {
     if (!confirmReplaceDirtyProject()) return;
-    session.loadDocument(createEmptyDocument('Untitled'));
+    session.loadProject(createEmptyProject());
     projectFileToken.current = null;
     void clearAutomaticAutosaves();
-    pushToast('New project', 'success');
+    pushToast('New project — Main Level is active', 'success');
+    refresh();
+  };
+
+  const openDocumentById = (documentId: string) => {
+    session.openDocument(documentId);
     refresh();
   };
 
@@ -225,8 +238,8 @@ export default function App() {
         'application/json',
       );
       projectFileToken.current = target.token;
-      session.document.name = target.name.replace(/\.viper$/i, '') || session.document.name;
-      session.document.dirty = false;
+      session.project.name = target.name.replace(/\.viper$/i, '') || session.project.name;
+      clearProjectDirty(session.project);
       void clearAutomaticAutosaves();
       pushToast(`Saved ${target.name}`, 'success');
       refresh();
@@ -240,9 +253,9 @@ export default function App() {
     try {
       const selected = await openNativeFile({ types: [VIPER_PROJECT_FILE] });
       if (!selected) return;
-      session.loadDocument(deserializeProject(await selected.file.text()));
-      session.document.name =
-        selected.file.name.replace(/\.(?:viper|json)$/i, '') || session.document.name;
+      const { project, activeDocumentId } = deserializeViperProject(await selected.file.text());
+      session.loadProject(project, activeDocumentId);
+      session.project.name = selected.file.name.replace(/\.(?:viper|json)$/i, '') || session.project.name;
       projectFileToken.current = selected.token;
       void clearAutomaticAutosaves();
       pushToast(`Opened ${selected.file.name}`, 'success');
@@ -406,8 +419,9 @@ export default function App() {
 
   const restoreAutosave = (autosave: AutosavePayload) => {
     try {
-      session.loadDocument(deserializeProject(autosave.project));
-      session.document.dirty = true;
+      const loaded = deserializeViperProject(autosave.project);
+      session.loadProject(loaded.project, loaded.activeDocumentId);
+      session.project.dirty = true;
       void clearAutosave(autosave.id);
       setAutosaveOffers((items) => items.filter((item) => item.id !== autosave.id));
       pushToast('Autosave restored', 'success');
@@ -551,8 +565,25 @@ export default function App() {
   };
 
   useEffect(() => {
-    document.title = `${session.document.dirty ? '● ' : ''}${session.document.name} — Viper CAD`;
+    document.title = `${projectIsDirty(session.project) ? '● ' : ''}${session.document.name} — Viper CAD`;
   });
+
+  const focusGroupTargetId = (): string | null => {
+    for (const id of session.selection.state.selectedObjectIds) {
+      const object = session.document.objects.get(id);
+      if (object && isGroupObject(object)) return id;
+    }
+    const active = session.selection.state.activeObjectId;
+    if (active && isGroupObject(session.document.objects.get(active)!)) return active;
+    return null;
+  };
+
+  const placeModelInActiveLevel = (modelDocumentId: string) => {
+    placeModelQuick(session, modelDocumentId, {
+      onRefresh: refresh,
+      onPlaced: () => setOutlinerTab('scene'),
+    });
+  };
 
   const menus: DesktopMenuDefinition[] = [
     {
@@ -576,6 +607,25 @@ export default function App() {
           label: 'Save As…',
           shortcut: 'Ctrl+Shift+S',
           action: () => void saveProject(true),
+        },
+        { kind: 'separator' },
+        {
+          kind: 'command',
+          label: 'New Model',
+          action: () => {
+            const id = session.projectEditor.newModel(`Model ${session.project.modelDocumentIds.length + 1}`);
+            openDocumentById(id);
+            pushToast('New Model — edit reusable assets here', 'success');
+          },
+        },
+        {
+          kind: 'command',
+          label: 'New Level',
+          action: () => {
+            const id = session.projectEditor.newLevel(`Level ${session.project.levelDocumentIds.length + 1}`);
+            openDocumentById(id);
+            pushToast('New Level — place content in the environment', 'success');
+          },
         },
         { kind: 'separator' },
         {
@@ -695,10 +745,101 @@ export default function App() {
             refresh();
           },
         },
+      ],
+    },
+    {
+      label: 'Documents',
+      entries: [
+        {
+          kind: 'command',
+          label: 'New Model',
+          action: () => {
+            const id = session.projectEditor.newModel(`Model ${session.project.modelDocumentIds.length + 1}`);
+            openDocumentById(id);
+            pushToast('New Model — edit reusable assets here', 'success');
+          },
+        },
+        {
+          kind: 'command',
+          label: 'New Level',
+          action: () => {
+            const id = session.projectEditor.newLevel(`Level ${session.project.levelDocumentIds.length + 1}`);
+            openDocumentById(id);
+            pushToast('New Level — place content in the environment', 'success');
+          },
+        },
+        ...(session.document.kind === 'level'
+          ? [
+              { kind: 'separator' as const },
+              ...session.project.modelDocumentIds.map((modelId) => {
+                const modelDoc = getViperDocument(session.project, modelId);
+                return {
+                  kind: 'command' as const,
+                  label: `Place ${modelDoc.name} in Level`,
+                  disabled: !modelHasPlaceableGeometry(modelDoc),
+                  action: () => placeModelInActiveLevel(modelId),
+                };
+              }),
+            ]
+          : []),
         { kind: 'separator' },
         {
           kind: 'command',
-          label: 'Group Selection',
+          label: 'Rename Active Document',
+          action: () => {
+            const docId = session.documentId;
+            const doc = session.project.documents.get(docId);
+            if (!doc) return;
+            const next = window.prompt('Rename', doc.name);
+            if (!next?.trim()) return;
+            session.projectEditor.renameDocument(docId, next.trim());
+            refresh();
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Delete Active Document',
+          action: () => {
+            const docId = session.documentId;
+            const doc = session.project.documents.get(docId);
+            if (!doc) return;
+            const list = doc.kind === 'model' ? session.project.modelDocumentIds : session.project.levelDocumentIds;
+            if (list.length <= 1) {
+              pushToast(`Cannot delete the last ${doc.kind === 'model' ? 'Model' : 'Level'}`, 'error');
+              return;
+            }
+            if (!window.confirm(`Delete ${doc.kind} "${doc.name}"?`)) return;
+            if (!session.projectEditor.deleteDocument(docId)) return;
+            if (session.projectEditor.activeDocumentId) session.openDocument(session.projectEditor.activeDocumentId);
+            pushToast(`Deleted ${doc.name}`, 'info');
+            refresh();
+          },
+        },
+        { kind: 'separator' },
+        {
+          kind: 'command',
+          label: 'Browse Models in Outliner',
+          action: () => {
+            setOutlinerTab('models');
+            setOutlinerOpen(true);
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Browse Levels in Outliner',
+          action: () => {
+            setOutlinerTab('levels');
+            setOutlinerOpen(true);
+          },
+        },
+      ],
+    },
+    {
+      label: 'Object',
+      entries: [
+        {
+          kind: 'command',
+          label: 'Group',
           shortcut: 'Ctrl+G',
           action: () => {
             if (!commitGroupSelection(session)) pushToast('Select objects to group', 'error');
@@ -707,11 +848,39 @@ export default function App() {
         },
         {
           kind: 'command',
-          label: 'Ungroup Selection',
+          label: 'Ungroup',
           shortcut: 'Ctrl+Shift+G',
           action: () => {
             if (!commitUngroupSelection(session)) pushToast('Select a group to ungroup', 'error');
             refresh();
+          },
+        },
+        { kind: 'separator' },
+        {
+          kind: 'command',
+          label: 'Enter Group',
+          disabled: !focusGroupTargetId(),
+          action: () => {
+            const id = focusGroupTargetId();
+            if (!id || !enterGroupFocus(session, id)) pushToast('Select a group to focus', 'error');
+            else pushToast(`Focused Group: ${session.document.objects.get(id)?.name}`, 'info');
+            refresh();
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Exit Group',
+          disabled: !session.focusGroupId,
+          action: () => {
+            if (exitGroupFocus(session)) refresh();
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Exit to Document Root',
+          disabled: !session.focusGroupId,
+          action: () => {
+            if (exitToDocumentRoot(session)) refresh();
           },
         },
       ],
@@ -722,8 +891,35 @@ export default function App() {
         {
           kind: 'command',
           label: 'Scene Outliner',
-          checked: outlinerOpen,
-          action: () => setOutlinerOpen((open) => !open),
+          checked: outlinerOpen && outlinerTab === 'scene',
+          action: () => {
+            setOutlinerTab('scene');
+            setOutlinerOpen(true);
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Models in Outliner',
+          checked: outlinerOpen && outlinerTab === 'models',
+          action: () => {
+            setOutlinerTab('models');
+            setOutlinerOpen(true);
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Levels in Outliner',
+          checked: outlinerOpen && outlinerTab === 'levels',
+          action: () => {
+            setOutlinerTab('levels');
+            setOutlinerOpen(true);
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Hide Outliner',
+          checked: !outlinerOpen,
+          action: () => setOutlinerOpen(false),
         },
         {
           kind: 'command',
@@ -989,7 +1185,7 @@ export default function App() {
     },
   ];
 
-  const leftMenus = menus.slice(0, 5);
+  const leftMenus = menus.slice(0, 6);
   const rightMenus = menus.slice(5);
 
   return (
@@ -1086,6 +1282,14 @@ export default function App() {
             ))}
           </div>
         </div>
+        <DocumentTabs
+          session={session}
+          onRefresh={refresh}
+          onBrowseOutliner={(tab) => {
+            setOutlinerTab(tab);
+            setOutlinerOpen(true);
+          }}
+        />
         <div className="bar-right">
           <DesktopMenuBar menus={rightMenus} align="end" />
           <span className="meta dim">{viewHint}</span>
@@ -1129,6 +1333,8 @@ export default function App() {
       {workspace.shellMode === 'model' && outlinerOpen && (
         <FloatingOutliner
           session={session}
+          activeTab={outlinerTab}
+          onTabChange={setOutlinerTab}
           onClose={() => setOutlinerOpen(false)}
           onRefresh={refresh}
         />

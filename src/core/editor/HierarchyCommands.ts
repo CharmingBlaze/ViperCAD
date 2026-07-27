@@ -1,8 +1,9 @@
 import { createSceneObject, addObjectToDocument } from '@/core/document/ModelDocument';
+import { isGroupObject } from '@/core/document/SceneObjectKind';
 import type { ObjectId } from '@/core/document/types';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { groupObjects, ungroupObject } from '@/core/editor/GameAssetTools';
-import { isGroupObject, topmostObjectIds } from '@/core/editor/Hierarchy';
+import { topmostObjectIds } from '@/core/editor/Hierarchy';
 import { cloneTransform } from '@/core/math/Transform';
 import { cloneSelection } from '@/core/selection/SelectionManager';
 
@@ -69,6 +70,7 @@ export function commitUngroupSelection(session: HierarchySession): ObjectId[] | 
   const beforeSelection = cloneSelection(session.selection.state);
   const groupSnap = {
     name: group.name,
+    kind: group.kind,
     parentId: group.parentId,
     transform: cloneTransform(group.transform),
     metadata: { ...group.metadata },
@@ -103,10 +105,10 @@ export function commitUngroupSelection(session: HierarchySession): ObjectId[] | 
     undo: () => {
       if (!applied) return;
       // Rebuild the group and restore child locals under it.
-      const rebuilt = createSceneObject(groupSnap.name);
+      const rebuilt = createSceneObject(groupSnap.name, null, [], { kind: 'group' });
       rebuilt.parentId = groupSnap.parentId;
       rebuilt.transform = cloneTransform(groupSnap.transform);
-      rebuilt.metadata = { ...groupSnap.metadata, prefab: 'true' };
+      rebuilt.metadata = { ...groupSnap.metadata };
       rebuilt.visible = groupSnap.visible;
       rebuilt.locked = groupSnap.locked;
       rebuilt.materialSlotIds = [...groupSnap.materialSlotIds];

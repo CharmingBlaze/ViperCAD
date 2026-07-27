@@ -142,48 +142,51 @@ export class SelectionOverlaySystem {
     }
 
     for (const id of needed) {
-      const handle = handles.get(id);
-      if (!handle) continue;
+      const matchingHandles = [...handles.values()].filter((handle) => handle.objectId === id);
+      if (!matchingHandles.length) continue;
 
-      let line = this.outlinePool.get(id);
-      if (!line) {
-        line = new LineSegments(
-          handle.edgeOverlay.geometry.clone(),
-          new LineBasicMaterial({
-            color: SELECTION_COLORS.objectOutline,
-            depthTest: true,
-            depthWrite: false,
-            transparent: true,
-            opacity: 0.95,
-          }),
-        );
-        line.renderOrder = 12;
-        line.raycast = () => {};
-        this.outlinePool.set(id, line);
-      } else {
-        line.geometry.dispose();
-        line.geometry = handle.edgeOverlay.geometry.clone();
-      }
+      for (const handle of matchingHandles) {
+        const poolKey = matchingHandles.length > 1 ? `${id}::${handle.meshId}` : id;
+        let line = this.outlinePool.get(poolKey);
+        if (!line) {
+          line = new LineSegments(
+            handle.edgeOverlay.geometry.clone(),
+            new LineBasicMaterial({
+              color: SELECTION_COLORS.objectOutline,
+              depthTest: true,
+              depthWrite: false,
+              transparent: true,
+              opacity: 0.95,
+            }),
+          );
+          line.renderOrder = 12;
+          line.raycast = () => {};
+          this.outlinePool.set(poolKey, line);
+        } else {
+          line.geometry.dispose();
+          line.geometry = handle.edgeOverlay.geometry.clone();
+        }
 
-      if (line.parent !== handle.group) {
-        handle.group.add(line);
-      }
+        if (line.parent !== handle.group) {
+          handle.group.add(line);
+        }
 
-      const mat = line.material as LineBasicMaterial;
-      const isActive = selection.activeObjectId === id;
-      const isHover =
-        selection.hoveredObjectId === id && !selection.selectedObjectIds.has(id);
-      if (isHover) {
-        mat.color.copy(SELECTION_COLORS.objectHover);
-        mat.opacity = 0.75;
-      } else if (isActive) {
-        mat.color.copy(SELECTION_COLORS.active);
-        mat.opacity = 1;
-      } else {
-        mat.color.copy(SELECTION_COLORS.objectOutline);
-        mat.opacity = 0.9;
+        const mat = line.material as LineBasicMaterial;
+        const isActive = selection.activeObjectId === id;
+        const isHover =
+          selection.hoveredObjectId === id && !selection.selectedObjectIds.has(id);
+        if (isHover) {
+          mat.color.copy(SELECTION_COLORS.objectHover);
+          mat.opacity = 0.75;
+        } else if (isActive) {
+          mat.color.copy(SELECTION_COLORS.active);
+          mat.opacity = 1;
+        } else {
+          mat.color.copy(SELECTION_COLORS.objectOutline);
+          mat.opacity = 0.9;
+        }
+        line.visible = true;
       }
-      line.visible = true;
     }
   }
 

@@ -1,5 +1,6 @@
 import { addObjectToDocument, createSceneObject, removeObject } from '@/core/document/ModelDocument';
-import type { ModelDocument, ObjectId, SceneObject } from '@/core/document/types';
+import type { ModelDocument, ObjectId, SceneObject, SceneObjectKind } from '@/core/document/types';
+import { migrateSceneObjectKind } from '@/core/document/SceneObjectKind';
 import { isGroupObject, topmostObjectIds } from '@/core/editor/Hierarchy';
 import type { CommandHistory } from '@/core/history/CommandHistory';
 import { createId } from '@/core/ids/IdService';
@@ -12,6 +13,7 @@ import { cloneSelection, type SelectionManager } from '@/core/selection/Selectio
 
 type ObjectClipboardNode = {
   name: string;
+  kind: SceneObjectKind;
   transform: SceneObject['transform'];
   visible: boolean;
   locked: boolean;
@@ -61,6 +63,7 @@ function snapshotObjectTree(doc: ModelDocument, objectId: ObjectId): ObjectClipb
   const mesh = src.meshId ? doc.meshes.get(src.meshId) : null;
   return {
     name: src.name,
+    kind: migrateSceneObjectKind(src),
     transform: cloneTransform(src.transform),
     visible: src.visible,
     locked: src.locked,
@@ -129,6 +132,7 @@ function materializeObjectTree(
     isRoot ? `${node.name}_copy` : node.name,
     meshId,
     [...node.materialSlotIds],
+    { kind: node.kind },
   );
   object.transform = cloneTransform(node.transform);
   if (isRoot) {

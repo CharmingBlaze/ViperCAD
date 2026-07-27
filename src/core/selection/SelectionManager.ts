@@ -90,6 +90,8 @@ function applySetOp<T>(set: Set<T>, ids: Iterable<T>, op: SelectionOp): void {
 }
 
 export class SelectionManager {
+  /** When set, object selection ignores ids that fail this predicate. */
+  objectScopeFilter: ((objectId: ObjectId) => boolean) | null = null;
   state: SelectionState;
   private modeCache: ModeCache = {
     vertexIds: new Set(),
@@ -205,8 +207,18 @@ export class SelectionManager {
   }
 
   selectObjects(ids: ObjectId[], op: SelectionOp = 'replace'): void {
-    applySetOp(this.state.selectedObjectIds, ids, op);
-    this.state.activeObjectId = ids[ids.length - 1] ?? [...this.state.selectedObjectIds][0] ?? null;
+    const scoped = this.objectScopeFilter
+      ? ids.filter((id) => this.objectScopeFilter!(id))
+      : ids;
+    if (!scoped.length) {
+      if (op === 'replace') {
+        this.state.selectedObjectIds.clear();
+        this.state.activeObjectId = null;
+      }
+      return;
+    }
+    applySetOp(this.state.selectedObjectIds, scoped, op);
+    this.state.activeObjectId = scoped[scoped.length - 1] ?? [...this.state.selectedObjectIds][0] ?? null;
   }
 
   selectVertices(ids: VertexId[], op: SelectionOp = 'replace'): void {

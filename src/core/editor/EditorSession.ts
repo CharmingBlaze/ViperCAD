@@ -1,5 +1,10 @@
-import { createEmptyDocument } from '@/core/document/ModelDocument';
-import type { ModelDocument, SceneObject } from '@/core/document/types';
+import {
+  createEmptyProject,
+  projectFromLegacyDocument,
+} from '@/core/document/ViperProject';
+import type { DocumentId, ModelDocument, ObjectId, SceneObject, ViperProject } from '@/core/document/types';
+import { syncFocusScopeFilter } from '@/core/editor/GroupFocus';
+import { ProjectEditor, type OpenDocumentSession } from '@/core/editor/ProjectEditor';
 import { CommandHistory } from '@/core/history/CommandHistory';
 import { SelectionManager } from '@/core/selection/SelectionManager';
 import { resolveSnap, WORLD_XY_PLANE, WORLD_XZ_PLANE, WORLD_YZ_PLANE, type ConstructionPlane } from '@/core/snap/SnapEngine';
@@ -35,49 +40,112 @@ type SnapIndexCache = {
   index: UniformGridIndex;
 };
 
-/** Central modelling session wiring document, selection, history, and tools. */
+/** Central modelling session: shared project assets, per-document selection/history/focus. */
 export class EditorSession {
-  document: ModelDocument;
-  selection: SelectionManager;
-  history: CommandHistory;
+  projectEditor: ProjectEditor;
   tools: ToolController;
   transform: TransformSystem;
-  /** UV face-corner selection used by the UV / Pixel editor. */
-  uvSelection: UvSelection;
-  /** Identifies which editor surface made the latest component selection. */
-  selectionSource: 'viewport' | 'uv' | 'system' = 'system';
-  constructionPlane: ConstructionPlane = WORLD_XZ_PLANE;
-  constructionPlaneId = 'top';
+  document: ModelDocument;
   private redrawListeners = new Set<() => void>();
   private snapIndexCache = new Map<string, SnapIndexCache>();
   private snapBvhCache = new Map<string, MeshBvh>();
 
-  constructor(document?: ModelDocument) {
-    this.document = document ?? createEmptyDocument('ViperCAD');
-    this.selection = new SelectionManager();
-    this.history = new CommandHistory();
+  constructor(projectOrDocument?: ViperProject | ModelDocument) {
+    if (projectOrDocument && 'documents' in projectOrDocument) {
+      this.projectEditor = new ProjectEditor(projectOrDocument);
+    } else if (projectOrDocument) {
+      this.projectEditor = new ProjectEditor(projectFromLegacyDocument(projectOrDocument));
+    } else {
+      this.projectEditor = new ProjectEditor(createEmptyProject());
+    }
+    this.document = this.projectEditor.activeDocumentView();
     this.tools = new ToolController();
-    this.uvSelection = new UvSelection();
-    this.selectionSource = 'system';
-    this.transform = new TransformSystem(
-      this.document,
-      this.selection,
-      this.history,
-      () => this.requestRedraw(),
-      (query) => this.resolveDocumentSnap(query),
-    );
-    this.tools.register(new SelectTool());
-    this.tools.register(new CreatePrimitiveTool());
-    this.tools.register(new CreateDoodleTool());
-    this.tools.register(new DrawPolyTool());
-    this.tools.register(new TileDrawTool());
-    this.tools.register(new KnifeTool());
-    this.tools.register(new LoopCutTool());
-    this.tools.register(new TerrainSculptTool());
-    this.tools.register(new MeshSculptTool());
-    this.tools.register(new TerrainObjectTool());
-    this.tools.register(new TerrainFeatureTool());
-    this.tools.setActive('create-primitive', this.context());
+    this.transform = this.createTransformSystem(this.projectEditor.activeSession());
+    this.registerTools();
+    const open = this.projectEditor.activeSession();
+    this.tools.setActive(open.activeToolId || 'create-primitive', this.context());
+    syncFocusScopeFilter(this);
+  }
+
+  get project(): ViperProject {
+    return this.projectEditor.project;
+  }
+
+  get documentId(): DocumentId {
+    return this.projectEditor.activeDocumentId!;
+  }
+
+  get selection(): SelectionManager {
+    return this.projectEditor.activeSession().selection;
+  }
+
+  get history(): CommandHistory {
+    return this.projectEditor.activeSession().history;
+  }
+
+  get uvSelection(): UvSelection {
+    return this.projectEditor.activeSession().uvSelection;
+  }
+
+  get focusGroupId(): ObjectId | null {
+    return this.projectEditor.activeSession().focusGroupId;
+  }
+
+  set focusGroupId(value: ObjectId | null) {
+    this.projectEditor.activeSession().focusGroupId = value;
+  }
+
+  get selectionSource(): 'viewport' | 'uv' | 'system' {
+    return this.projectEditor.activeSession().selectionSource;
+  }
+
+  set selectionSource(value: 'viewport' | 'uv' | 'system') {
+    this.projectEditor.activeSession().selectionSource = value;
+  }
+
+  get constructionPlane(): ConstructionPlane {
+    return this.projectEditor.activeSession().constructionPlane;
+  }
+
+  set constructionPlane(value: ConstructionPlane) {
+    this.projectEditor.activeSession().constructionPlane = value;
+  }
+
+  get constructionPlaneId(): string {
+    return this.projectEditor.activeSession().constructionPlaneId;
+  }
+
+  set constructionPlaneId(value: string) {
+    this.projectEditor.activeSession().constructionPlaneId = value;
+  }
+
+  openDocument(documentId: DocumentId): void {
+    if (this.projectEditor.activeDocumentId === documentId) return;
+    const active = this.tools.getActive();
+    if (active) this.projectEditor.activeSession().activeToolId = active.id;
+    this.projectEditor.openDocument(documentId);
+    this.document = this.projectEditor.activeDocumentView();
+    this.transform = this.createTransformSystem(this.projectEditor.activeSession());
+    this.tools.setActive(this.projectEditor.activeSession().activeToolId || 'select', this.context());
+    syncFocusScopeFilter(this);
+    this.snapIndexCache.clear();
+    this.snapBvhCache.clear();
+    this.requestRedraw();
+  }
+
+  closeDocument(documentId: DocumentId): void {
+    if (this.projectEditor.openDocuments.size <= 1) return;
+    this.projectEditor.closeDocument(documentId);
+    if (this.projectEditor.activeDocumentId) {
+      this.document = this.projectEditor.activeDocumentView();
+      this.transform = this.createTransformSystem(this.projectEditor.activeSession());
+      syncFocusScopeFilter(this);
+    }
+    this.requestRedraw();
+  }
+
+  syncFocusScope(): void {
+    syncFocusScopeFilter(this);
   }
 
   context(): ModellingContext {
@@ -114,16 +182,12 @@ export class EditorSession {
     const previous = Number(this.constructionPlaneId.match(/@(-?[\d.]+)$/)?.[1] ?? 0);
     this.constructionPlane = {
       ...this.constructionPlane,
-      origin: addVec3(
-        this.constructionPlane.origin,
-        scaleVec3(this.constructionPlane.normal, distance - previous),
-      ),
+      origin: addVec3(this.constructionPlane.origin, scaleVec3(this.constructionPlane.normal, distance - previous)),
     };
     this.constructionPlaneId = this.constructionPlaneId.replace(/@.*$/, '') + `@${distance}`;
     this.requestRedraw();
   }
 
-  /** Use the active face as an exact user construction plane. */
   setConstructionPlaneFromSelection(): boolean {
     const objectId = this.selection.state.activeObjectId;
     const faceId = this.selection.state.activeFaceId;
@@ -161,25 +225,54 @@ export class EditorSession {
     return ok;
   }
 
-  /** Replace the active project and rebuild systems that retain document references. */
-  loadDocument(document: ModelDocument): void {
+  loadProject(project: ViperProject, activeDocumentId?: DocumentId): void {
     this.tools.getActive()?.cancel?.(this.context());
-    this.document = document;
-    this.selection = new SelectionManager();
-    this.history.clear();
+    this.projectEditor = new ProjectEditor(project);
+    const active = activeDocumentId ?? project.activeDocumentId ?? project.levelDocumentIds[0] ?? project.modelDocumentIds[0];
+    if (!active) throw new Error('Project has no documents');
+    this.projectEditor.openDocuments.clear();
+    this.projectEditor.openDocument(active);
+    this.document = this.projectEditor.activeDocumentView();
+    const open = this.projectEditor.activeSession();
+    open.selection = new SelectionManager();
+    open.history = new CommandHistory();
+    open.uvSelection = new UvSelection();
+    open.focusGroupId = null;
+    open.selectionSource = 'system';
+    this.transform = this.createTransformSystem(open);
     this.snapIndexCache.clear();
     this.snapBvhCache.clear();
-    this.uvSelection = new UvSelection();
-    this.selectionSource = 'system';
-    this.transform = new TransformSystem(
+    this.tools.setActive('select', this.context());
+    syncFocusScopeFilter(this);
+    this.requestRedraw();
+  }
+
+  loadDocument(document: ModelDocument): void {
+    this.loadProject(projectFromLegacyDocument(document), document.id);
+  }
+
+  private registerTools(): void {
+    this.tools.register(new SelectTool());
+    this.tools.register(new CreatePrimitiveTool());
+    this.tools.register(new CreateDoodleTool());
+    this.tools.register(new DrawPolyTool());
+    this.tools.register(new TileDrawTool());
+    this.tools.register(new KnifeTool());
+    this.tools.register(new LoopCutTool());
+    this.tools.register(new TerrainSculptTool());
+    this.tools.register(new MeshSculptTool());
+    this.tools.register(new TerrainObjectTool());
+    this.tools.register(new TerrainFeatureTool());
+  }
+
+  private createTransformSystem(open: OpenDocumentSession): TransformSystem {
+    return new TransformSystem(
       this.document,
-      this.selection,
-      this.history,
+      open.selection,
+      open.history,
       () => this.requestRedraw(),
       (query) => this.resolveDocumentSnap(query),
     );
-    this.tools.setActive('select', this.context());
-    this.requestRedraw();
   }
 
   private resolveDocumentSnap(query: SnapQuery): SnapResult {
@@ -229,42 +322,24 @@ export class EditorSession {
       if (elementId && query.excludedElementIds?.includes(elementId)) return;
       const distance = distanceOverride ?? lengthVec3(subVec3(position, query.rawPosition));
       if (distance > maxDist) return;
-      result.push({
-        snapped: true,
-        position,
-        targetType,
-        targetObjectId: objectId,
-        targetElementId: elementId,
-        distance,
-        confidence: 1,
-        worldNormal,
-      });
+      result.push({ snapped: true, position, targetType, targetObjectId: objectId, targetElementId: elementId, distance, confidence: 1, worldNormal });
     };
 
     if (query.allowed.includes('origin')) push({ x: 0, y: 0, z: 0 }, 'origin');
 
-    const needsSpatial = query.allowed.some(
-      (t) => t === 'vertex' || t === 'edge' || t === 'edgeMid' || t === 'faceCentre',
-    );
+    const needsSpatial = query.allowed.some((t) => t === 'vertex' || t === 'edge' || t === 'edgeMid' || t === 'faceCentre');
     const needsSurface = query.allowed.includes('face') && query.pointerRayOrigin && query.pointerRayDirection;
-    let surfaceBest:
-      | { position: Vec3; objectId: string; faceId: string; normal: Vec3; rayDistance: number }
-      | null = null;
+    let surfaceBest: { position: Vec3; objectId: string; faceId: string; normal: Vec3; rayDistance: number } | null = null;
 
     for (const object of this.document.objects.values()) {
       if (query.excludedObjectIds?.includes(object.id) || !object.visible || !object.meshId) continue;
       const mesh = this.document.meshes.get(object.meshId);
       if (!mesh) continue;
 
-      if (query.allowed.includes('origin')) {
-        push({ ...object.transform.position }, 'origin', object.id, object.id);
-      }
+      if (query.allowed.includes('origin')) push({ ...object.transform.position }, 'origin', object.id, object.id);
       if (needsSurface) {
         let bvh = this.snapBvhCache.get(mesh.id);
-        if (!bvh) {
-          bvh = new MeshBvh();
-          this.snapBvhCache.set(mesh.id, bvh);
-        }
+        if (!bvh) { bvh = new MeshBvh(); this.snapBvhCache.set(mesh.id, bvh); }
         const localOrigin = inverseTransformPointApprox(query.pointerRayOrigin!, object.transform);
         const rayPoint = addVec3(query.pointerRayOrigin!, query.pointerRayDirection!);
         const localRayPoint = inverseTransformPointApprox(rayPoint, object.transform);
@@ -277,41 +352,20 @@ export class EditorSession {
           const worldPosition = transformPoint(hit.position, object.transform);
           const rayDistance = lengthVec3(subVec3(worldPosition, query.pointerRayOrigin!));
           if (!surfaceBest || rayDistance < surfaceBest.rayDistance) {
-            surfaceBest = {
-              position: worldPosition,
-              objectId: object.id,
-              faceId: hit.faceId,
-              normal: normalizeVec3(subVec3(worldNormalPoint, worldOrigin)),
-              rayDistance,
-            };
+            surfaceBest = { position: worldPosition, objectId: object.id, faceId: hit.faceId, normal: normalizeVec3(subVec3(worldNormalPoint, worldOrigin)), rayDistance };
           }
         }
       }
       if (!needsSpatial) continue;
 
-      const nearby = this.getSnapIndex(object, mesh).querySphere(query.rawPosition, maxDist);
-      for (const entry of nearby) {
-        if (entry.kind === 'vertex' && query.allowed.includes('vertex')) {
-          push(entry.position, 'vertex', object.id, entry.id);
-        } else if (entry.kind === 'edgeMid' && query.allowed.includes('edgeMid')) {
-          push(entry.position, 'edgeMid', object.id, entry.id);
-        } else if (entry.kind === 'edge' && query.allowed.includes('edge')) {
-          push(closestPointSegment(query.rawPosition, entry.a, entry.b), 'edge', object.id, entry.id);
-        } else if (entry.kind === 'faceCentre' && query.allowed.includes('faceCentre')) {
-          push(entry.position, 'faceCentre', object.id, entry.id);
-        }
+      for (const entry of this.getSnapIndex(object, mesh).querySphere(query.rawPosition, maxDist)) {
+        if (entry.kind === 'vertex' && query.allowed.includes('vertex')) push(entry.position, 'vertex', object.id, entry.id);
+        else if (entry.kind === 'edgeMid' && query.allowed.includes('edgeMid')) push(entry.position, 'edgeMid', object.id, entry.id);
+        else if (entry.kind === 'edge' && query.allowed.includes('edge')) push(closestPointSegment(query.rawPosition, entry.a, entry.b), 'edge', object.id, entry.id);
+        else if (entry.kind === 'faceCentre' && query.allowed.includes('faceCentre')) push(entry.position, 'faceCentre', object.id, entry.id);
       }
     }
-    if (surfaceBest) {
-      push(
-        surfaceBest.position,
-        'face',
-        surfaceBest.objectId,
-        surfaceBest.faceId,
-        surfaceBest.normal,
-        0,
-      );
-    }
+    if (surfaceBest) push(surfaceBest.position, 'face', surfaceBest.objectId, surfaceBest.faceId, surfaceBest.normal, 0);
     return result;
   }
 }
@@ -326,15 +380,5 @@ function closestPointSegment(p: Vec3, a: Vec3, b: Vec3): Vec3 {
 
 function transformCacheKey(object: SceneObject): string {
   const t = object.transform;
-  return [
-    t.position.x,
-    t.position.y,
-    t.position.z,
-    t.rotation.x,
-    t.rotation.y,
-    t.rotation.z,
-    t.scale.x,
-    t.scale.y,
-    t.scale.z,
-  ].join(',');
+  return [t.position.x, t.position.y, t.position.z, t.rotation.x, t.rotation.y, t.rotation.z, t.scale.x, t.scale.y, t.scale.z].join(',');
 }

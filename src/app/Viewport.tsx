@@ -16,6 +16,7 @@ import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
 import { KnifeTool } from '@/core/tools/KnifeTool';
 import { LoopCutTool } from '@/core/tools/LoopCutTool';
 import { commitDeleteSelection } from '@/core/editor/DeleteSelection';
+import { exitGroupFocus } from '@/core/editor/GroupFocus';
 import { handleTransformHotkey } from '@/app/TransformHotkeys';
 import { clampTextureSplit } from '@/workspace/TextureWorkspace';
 import type { CameraAxes } from '@/core/transform/Orientation';
@@ -187,6 +188,19 @@ export function Viewport({ session, workspace }: Props) {
           viewportEngine.syncGizmo();
           viewportEngine.invalidate();
         }
+        syncUi();
+        return;
+      }
+      if (e.key === 'Escape' && viewportEngine.getModelPlacement()) {
+        e.preventDefault();
+        viewportEngine.cancelModelPlacement();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Escape' && session.focusGroupId && workspace.input.owner === 'none') {
+        e.preventDefault();
+        exitGroupFocus(session);
+        viewportEngine.invalidate();
         syncUi();
         return;
       }

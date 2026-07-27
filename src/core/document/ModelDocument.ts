@@ -5,6 +5,10 @@ import { cloneMeshPreserveIds } from '@/core/mesh/EditableMesh';
 import { normalizeMaterialAsset } from '@/core/material/MaterialPresets';
 import type { EditableMesh, MeshId } from '@/core/mesh/types';
 import {
+  inferKindForNewObject,
+  normalizeSceneObject,
+} from './SceneObjectKind';
+import {
   DEFAULT_PROJECT_SETTINGS,
   type ImageAsset,
   type MaterialAsset,
@@ -12,6 +16,7 @@ import {
   type ModelDocument,
   type ObjectId,
   type SceneObject,
+  type SceneObjectKind,
   type TextureAsset,
 } from './types';
 
@@ -121,14 +126,18 @@ export function createSceneObject(
   name: string,
   meshId: MeshId | null = null,
   materialSlotIds: MaterialId[] = [],
+  options: { kind?: SceneObjectKind } = {},
 ): SceneObject {
+  const kind = inferKindForNewObject(meshId, options);
   return {
     id: createId('obj'),
     name,
+    kind,
     parentId: null,
     childIds: [],
     transform: defaultTransform(),
     meshId,
+    instanceSourceModelId: null,
     materialSlotIds,
     visible: true,
     locked: false,
@@ -143,6 +152,7 @@ export function addMeshToDocument(doc: ModelDocument, mesh: EditableMesh): MeshI
 }
 
 export function addObjectToDocument(doc: ModelDocument, object: SceneObject): ObjectId {
+  normalizeSceneObject(object);
   doc.objects.set(object.id, object);
   if (!object.parentId) {
     doc.rootObjectIds.push(object.id);
@@ -166,7 +176,7 @@ export function commitMeshObject(
   if (!materialId) throw new Error('Document has no materials');
   mesh.name = options.name ?? mesh.name;
   addMeshToDocument(doc, mesh);
-  const object = createSceneObject(options.name ?? mesh.name, mesh.id, [materialId]);
+  const object = createSceneObject(options.name ?? mesh.name, mesh.id, [materialId], { kind: 'mesh' });
   addObjectToDocument(doc, object);
   return { objectId: object.id, meshId: mesh.id };
 }
@@ -191,11 +201,12 @@ export function duplicateObject(doc: ModelDocument, objectId: ObjectId, uniqueMe
     }
   }
 
-  const copy = createSceneObject(`${src.name}_copy`, meshId, [...src.materialSlotIds]);
+  const copy = createSceneObject(`${src.name}_copy`, meshId, [...src.materialSlotIds], { kind: src.kind });
   copy.transform = cloneTransform(src.transform);
   copy.visible = src.visible;
   copy.locked = src.locked;
   copy.metadata = { ...src.metadata };
+  copy.instanceSourceModelId = src.instanceSourceModelId;
   addObjectToDocument(doc, copy);
   return copy.id;
 }

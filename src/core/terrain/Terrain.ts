@@ -94,6 +94,7 @@ export function createTerrain(session: EditorSession, options: TerrainOptions = 
 
   const committed = commitMeshObject(document, mesh, { name, materialId: material.id });
   const object = document.objects.get(committed.objectId)!;
+  object.kind = 'terrain';
   object.metadata.terrain = 'true';
   object.metadata.terrainSize = String(size);
   object.metadata.terrainResolution = String(resolution);

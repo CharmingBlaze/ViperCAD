@@ -57,7 +57,7 @@ describe('game asset tools', () => {
     expect(render.geometry.getAttribute('uv1').count).toBe(render.geometry.getAttribute('position').count);
   });
 
-  it('groups selected objects into a reusable prefab hierarchy', () => {
+  it('groups selected objects into an explicit group hierarchy', () => {
     const document = createEmptyDocument();
     const first = commitMeshObject(document, buildBox({ width: 1, height: 1, depth: 1 }));
     const second = commitMeshObject(document, buildBox({ width: 2, height: 1, depth: 1 }));
@@ -65,7 +65,8 @@ describe('game asset tools', () => {
     const groupId = groupObjects(document, [first.objectId, second.objectId]);
     const group = document.objects.get(groupId)!;
 
-    expect(group.metadata.prefab).toBe('true');
+    expect(group.kind).toBe('group');
+    expect(group.metadata.prefab).toBeUndefined();
     expect(group.childIds).toEqual([first.objectId, second.objectId]);
     expect(document.rootObjectIds).toEqual([groupId]);
     expect(document.objects.get(first.objectId)?.parentId).toBe(groupId);

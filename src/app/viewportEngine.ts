@@ -23,10 +23,8 @@ import {
 } from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { EditorSession } from '@/core/editor/EditorSession';
-import {
-  expandGroupsToDescendants,
-  findOutermostGroupAncestor,
-} from '@/core/editor/Hierarchy';
+import { enterGroupFocusFromPick, isObjectInFocusScope } from '@/core/editor/GroupFocus';
+import { expandGroupsToDescendants } from '@/core/editor/Hierarchy';
 import {
   pickLogicalFace,
   type ObjectRenderHandle,
@@ -73,7 +71,9 @@ import { raycastSculptTarget } from '@/core/sculpt/MeshSculptTarget';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
 import type { ToolPointerInput } from '@/core/tools/Tool';
-import { WORLD_XY_PLANE, WORLD_XZ_PLANE, WORLD_YZ_PLANE } from '@/core/snap/SnapEngine';
+import { WORLD_XY_PLANE, WORLD_XZ_PLANE, WORLD_YZ_PLANE, rayPlaneIntersection } from '@/core/snap/SnapEngine';
+import { commitPlaceModelInLevel } from '@/core/editor/ModelInstances';
+import type { DocumentId } from '@/core/document/types';
 import { inverseTransformPointApprox, cloneTransform } from '@/core/math/Transform';
 import { PrimitivePreviewHandle } from '@/renderer/PrimitivePreviewAdapter';
 import { TileDrawOverlay } from '@/renderer/TileDrawOverlay';
@@ -231,6 +231,11 @@ export class ViewportEngine {
   } | null = null;
   /** Double-click a grouped mesh to select its parent group. */
   private lastObjectPick: { objectId: ObjectId; time: number } | null = null;
+  private modelPlacement: {
+    modelDocumentId: DocumentId;
+    modelName: string;
+    onPlaced?: () => void;
+  } | null = null;
 
   attach(
     host: HTMLElement,
@@ -1225,6 +1230,8 @@ export class ViewportEngine {
 
     this.workspace.setActiveViewport(id);
 
+    if (this.modelPlacement && this.tryPlaceModelAtPointer(e, id)) return;
+
     if (this.tryBeginViewportNav(e, id)) return;
 
     const tool = this.session?.tools.getActive();
@@ -1907,16 +1914,21 @@ export class ViewportEngine {
 
     if (selMode === 'object') {
       const ids: ObjectId[] = [];
-      for (const [objectId, handle] of this.handles) {
+      const focusId = this.session.focusGroupId;
+      for (const [, handle] of this.handles) {
+        const objectId = handle.objectId;
+        if (!isObjectInFocusScope(this.session.document, objectId, focusId)) continue;
         const object = this.session.document.objects.get(objectId);
-        const mesh = object?.meshId ? this.session.document.meshes.get(object.meshId) : null;
+        const mesh = object?.meshId
+          ? this.session.document.meshes.get(object.meshId)
+          : this.session.document.meshes.get(handle.meshId);
         if (!mesh) continue;
         const pts: { x: number; y: number }[] = [];
         for (const vid of mesh.vertices.keys()) {
           const p = projectVertex(mesh, handle, pane.camera, viewport, vid);
           if (p) pts.push(p);
         }
-        if (pointsSatisfyMarquee(pts, rect, mode)) ids.push(objectId);
+        if (pointsSatisfyMarquee(pts, rect, mode) && !ids.includes(objectId)) ids.push(objectId);
       }
       this.session.selection.selectObjects(ids, op);
       return;
@@ -2387,8 +2399,20 @@ export class ViewportEngine {
           this.lastObjectPick.objectId === hit.objectId &&
           now - this.lastObjectPick.time < 400;
         if (isDouble && op === 'replace') {
-          const groupId = findOutermostGroupAncestor(this.session.document, hit.objectId);
-          if (groupId) targetId = groupId;
+          if (enterGroupFocusFromPick(this.session, hit.objectId)) {
+            this.lastObjectPick = null;
+            this.session.requestRedraw();
+            return;
+          }
+        }
+        if (
+          this.session.focusGroupId &&
+          !isObjectInFocusScope(this.session.document, targetId, this.session.focusGroupId)
+        ) {
+          if (op === 'replace') this.session.selection.clear();
+          this.lastObjectPick = null;
+          this.session.requestRedraw();
+          return;
         }
         this.lastObjectPick = { objectId: hit.objectId, time: now };
         this.session.selection.selectObjects([targetId], op);
@@ -2543,12 +2567,16 @@ export class ViewportEngine {
     pane.camera.updateMatrixWorld(true);
     const raycaster = new Raycaster();
     raycaster.setFromCamera(ndc, pane.camera);
-    const meshes = [...this.handles.values()].map((h) => h.mesh);
+    const focusId = this.session.focusGroupId;
+    const pickHandles = [...this.handles.entries()].filter(([objectId]) =>
+      isObjectInFocusScope(this.session!.document, objectId, focusId),
+    );
+    const meshes = pickHandles.map(([, h]) => h.mesh);
     const allowBackfaces =
       this.session.selection.state.mode === 'face' &&
       this.session.selection.state.selectBackfaces;
     const materials = allowBackfaces
-      ? [...this.handles.values()].flatMap((handle) => handle.materials)
+      ? pickHandles.flatMap(([, handle]) => handle.materials)
       : [];
     const originalSides = materials.map((material) => material.side);
     if (allowBackfaces) materials.forEach((material) => (material.side = DoubleSide));
@@ -3527,6 +3555,59 @@ export class ViewportEngine {
   private stopLoop(): void {
     cancelAnimationFrame(this.frame);
     this.frame = 0;
+  }
+
+  getModelPlacement() {
+    return this.modelPlacement;
+  }
+
+  setModelPlacement(request: {
+    modelDocumentId: DocumentId;
+    modelName: string;
+    onPlaced?: () => void;
+  } | null): void {
+    this.modelPlacement = request;
+    this.interactionOverlay.updateTransform(
+      null,
+      request ? `Click to place ${request.modelName} · Esc cancel` : '',
+    );
+    this.invalidate();
+  }
+
+  cancelModelPlacement(): void {
+    if (!this.modelPlacement) return;
+    this.setModelPlacement(null);
+  }
+
+  private groundRayHit(e: PointerEvent, paneId: ViewId) {
+    const input = this.pointerInput(e, paneId);
+    return rayPlaneIntersection(input.rayOrigin, input.rayDirection, WORLD_XZ_PLANE);
+  }
+
+  private tryPlaceModelAtPointer(e: PointerEvent, paneId: ViewId): boolean {
+    if (!this.modelPlacement || !this.session || this.session.document.kind !== 'level') return false;
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.altKey) return false;
+
+    const point = this.groundRayHit(e, paneId);
+    if (!point) return false;
+
+    const snap = this.session.document.settings.snapIncrement ?? 0.25;
+    if (snap > 0) {
+      point.x = Math.round(point.x / snap) * snap;
+      point.y = Math.round(point.y / snap) * snap;
+      point.z = Math.round(point.z / snap) * snap;
+    }
+
+    const request = this.modelPlacement;
+    const objectId = commitPlaceModelInLevel(this.session, request.modelDocumentId, { position: point });
+    if (!objectId) return false;
+
+    this.session.tools.setActive('select', this.session.context());
+    this.setModelPlacement(null);
+    request.onPlaced?.();
+    this.session.requestRedraw();
+    this.invalidate();
+    return true;
   }
 }
 

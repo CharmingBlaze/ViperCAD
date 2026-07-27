@@ -5,24 +5,56 @@ import {
   commitUngroupSelection,
 } from '@/core/editor/HierarchyCommands';
 import {
+  enterGroupFocus,
+  exitGroupFocus,
+  exitToDocumentRoot,
+  getFocusBreadcrumb,
+  getFocusGroupChain,
+  isObjectInFocusScope,
+} from '@/core/editor/GroupFocus';
+import {
   duplicateObjectSubtree,
   isGroupObject,
   reparentObject,
 } from '@/core/editor/Hierarchy';
 import { removeObject } from '@/core/document/ModelDocument';
 import type { ObjectId } from '@/core/document/types';
+import { OutlinerDocumentList } from '@/app/outliner/OutlinerDocumentList';
+import { AddModelMenu } from '@/app/outliner/AddModelMenu';
+import { SceneContextBar } from '@/app/outliner/SceneContextBar';
+
+type OutlinerTab = 'scene' | 'models' | 'levels';
 
 type Props = {
   session: EditorSession;
   onClose: () => void;
   onRefresh: () => void;
+  activeTab?: OutlinerTab;
+  onTabChange?: (tab: OutlinerTab) => void;
+  initialTab?: OutlinerTab;
 };
 
 type DragState = { pointerId: number; offsetX: number; offsetY: number };
 
-export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
+export function FloatingOutliner({
+  session,
+  onClose,
+  onRefresh,
+  activeTab,
+  onTabChange,
+  initialTab = 'scene',
+}: Props) {
+  const [internalTab, setInternalTab] = useState<OutlinerTab>(initialTab);
+  const tab = activeTab ?? internalTab;
+  const selectTab = (next: OutlinerTab) => {
+    if (activeTab === undefined) setInternalTab(next);
+    onTabChange?.(next);
+  };
   const [minimized, setMinimized] = useState(false);
-  const [position, setPosition] = useState({ x: 18, y: 92 });
+  const [position, setPosition] = useState(() => ({
+    x: 12,
+    y: Math.max(52, window.innerHeight - 300),
+  }));
   const [collapsed, setCollapsed] = useState<Set<ObjectId>>(() => new Set());
   const [dragObjectId, setDragObjectId] = useState<ObjectId | null>(null);
   const [dropTargetId, setDropTargetId] = useState<ObjectId | null>(null);
@@ -52,11 +84,6 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
     };
   }, []);
 
-  let groupCount = 0;
-  for (const object of session.document.objects.values()) {
-    if (isGroupObject(object)) groupCount += 1;
-  }
-
   const visibleObjectIds: ObjectId[] = [];
   const collectVisible = (ids: ObjectId[]) => {
     for (const id of ids) {
@@ -77,6 +104,7 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
   const select = (objectId: ObjectId, event?: React.MouseEvent) => {
     const object = session.document.objects.get(objectId);
     if (!object) return;
+    if (!isObjectInFocusScope(session.document, objectId, session.focusGroupId)) return;
     session.tools.setActive('select', session.context());
     session.selection.setMode('object');
     const additive = !!event && (event.ctrlKey || event.metaKey);
@@ -128,6 +156,21 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
   const canUngroup = [...session.selection.state.selectedObjectIds].some((id) =>
     isGroupObject(session.document.objects.get(id)),
   );
+
+  const focusCrumb = getFocusBreadcrumb(
+    session.document,
+    session.document.name,
+    session.focusGroupId,
+  );
+
+  const afterModelPlaced = () => {
+    selectTab('scene');
+    touch();
+  };
+
+  const browseTab = (next: 'models' | 'levels') => {
+    selectTab(next);
+  };
 
   const rows = (ids: ObjectId[], depth = 0): React.ReactNode =>
     ids.map((id) => {
@@ -197,6 +240,14 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
               }
             }}
             onClick={(event) => select(id, event)}
+            onDoubleClick={(event) => {
+              event.stopPropagation();
+              if (group && hasChildren) {
+                enterGroupFocus(session, id);
+                touch();
+                return;
+              }
+            }}
             onKeyDown={(event) => {
               if ((event.target as HTMLElement).closest('input, button, select, textarea')) return;
               if (event.key === 'ArrowDown') {
@@ -284,47 +335,49 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
                 touch();
               }}
             />
-            <button
-              type="button"
-              className={`outliner-icon${object.locked ? ' is-active' : ''}`}
-              title={object.locked ? 'Unlock object' : 'Lock object'}
-              aria-label={object.locked ? `Unlock ${object.name}` : `Lock ${object.name}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                object.locked = !object.locked;
-                touch();
-              }}
-            >
-              {object.locked ? 'L' : 'U'}
-            </button>
-            <button
-              type="button"
-              className="outliner-icon"
-              title={group ? 'Duplicate group' : 'Duplicate object'}
-              aria-label={`Duplicate ${object.name}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                const copyId = duplicateObjectSubtree(session.document, id, true);
-                select(copyId);
-                touch();
-              }}
-            >
-              +
-            </button>
-            <button
-              type="button"
-              className="outliner-icon danger"
-              title="Delete object"
-              aria-label={`Delete ${object.name}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                removeObject(session.document, id);
-                session.selection.prune(session.document);
-                touch();
-              }}
-            >
-              ×
-            </button>
+            <div className="outliner-row-actions">
+              <button
+                type="button"
+                className={`outliner-icon${object.locked ? ' is-active' : ''}`}
+                title={object.locked ? 'Unlock object' : 'Lock object'}
+                aria-label={object.locked ? `Unlock ${object.name}` : `Lock ${object.name}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  object.locked = !object.locked;
+                  touch();
+                }}
+              >
+                {object.locked ? 'L' : 'U'}
+              </button>
+              <button
+                type="button"
+                className="outliner-icon"
+                title={group ? 'Duplicate group' : 'Duplicate object'}
+                aria-label={`Duplicate ${object.name}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  const copyId = duplicateObjectSubtree(session.document, id, true);
+                  select(copyId);
+                  touch();
+                }}
+              >
+                +
+              </button>
+              <button
+                type="button"
+                className="outliner-icon danger"
+                title="Delete object"
+                aria-label={`Delete ${object.name}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  removeObject(session.document, id);
+                  session.selection.prune(session.document);
+                  touch();
+                }}
+              >
+                ×
+              </button>
+            </div>
           </div>
           {hasChildren && !isCollapsed && rows(object.childIds, depth + 1)}
         </div>
@@ -336,7 +389,7 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
       ref={panel}
       className={`floating-outliner${minimized ? ' is-minimized' : ''}`}
       style={{ left: position.x, top: position.y }}
-      aria-label="Scene outliner"
+      aria-label="Outliner"
       onDragOver={(event) => {
         if (!dragObjectId) return;
         // Allow dropping onto empty body / root.
@@ -370,40 +423,30 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
         }}
       >
         <div>
-          <strong>Scene</strong>
-          <span>
-            {session.document.objects.size} objects
-            {groupCount ? ` · ${groupCount} groups` : ''}
-            {session.selection.state.selectedObjectIds.size
-              ? ` · ${session.selection.state.selectedObjectIds.size} selected`
-              : ''}
-          </span>
+          <strong>Outliner</strong>
+          {tab !== 'scene' && (
+            <span>
+              {tab === 'models'
+                ? `${session.project.modelDocumentIds.length} models`
+                : `${session.project.levelDocumentIds.length} levels`}
+            </span>
+          )}
         </div>
         <div className="outliner-actions">
-          <button
-            type="button"
-            className="outliner-icon"
-            aria-label="Group selection"
-            title="Group (Ctrl+G)"
-            disabled={!canGroup}
-            onClick={() => {
-              if (commitGroupSelection(session)) touch();
-            }}
-          >
-            G
-          </button>
-          <button
-            type="button"
-            className="outliner-icon"
-            aria-label="Ungroup selection"
-            title="Ungroup (Ctrl+Shift+G)"
-            disabled={!canUngroup}
-            onClick={() => {
-              if (commitUngroupSelection(session)) touch();
-            }}
-          >
-            ↗
-          </button>
+          {tab === 'scene' && session.focusGroupId ? (
+            <button
+              type="button"
+              className="outliner-icon"
+              aria-label="Exit group focus"
+              title="Exit Group (Escape)"
+              onClick={() => {
+                exitGroupFocus(session);
+                touch();
+              }}
+            >
+              ↑
+            </button>
+          ) : null}
           <button
             type="button"
             className="outliner-icon"
@@ -425,11 +468,110 @@ export function FloatingOutliner({ session, onClose, onRefresh }: Props) {
         </div>
       </header>
       {!minimized && (
-        <div className="outliner-body" role="tree" aria-label="Scene objects">
-          {session.document.rootObjectIds.length
-            ? rows(session.document.rootObjectIds)
-            : <p className="outliner-empty">No objects yet</p>}
+        <nav className="outliner-tabs" aria-label="Outliner views">
+          {([
+            ['scene', 'Scene', null],
+            ['models', 'Models', session.project.modelDocumentIds.length],
+            ['levels', 'Levels', session.project.levelDocumentIds.length],
+          ] as const).map(([id, label, count]) => (
+            <button
+              key={id}
+              type="button"
+              className={`outliner-tab${tab === id ? ' is-active' : ''}`}
+              aria-selected={tab === id}
+              onClick={() => selectTab(id)}
+            >
+              {label}
+              {count !== null ? <span className="outliner-tab-count">{count}</span> : null}
+            </button>
+          ))}
+        </nav>
+      )}
+      {!minimized && tab === 'scene' && (
+        <div className="outliner-scene-panel">
+          <SceneContextBar session={session} onBrowseTab={browseTab} />
+          <div className="scene-toolbar">
+            <AddModelMenu
+              session={session}
+              onRefresh={onRefresh}
+              onPlaced={afterModelPlaced}
+              onBrowseTab={browseTab}
+            />
+            <div className="scene-toolbar-group">
+              <button
+                type="button"
+                className="scene-toolbar-btn"
+                aria-label="Group selection"
+                title="Group (Ctrl+G)"
+                disabled={!canGroup}
+                onClick={() => {
+                  if (commitGroupSelection(session)) touch();
+                }}
+              >
+                Group
+              </button>
+              <button
+                type="button"
+                className="scene-toolbar-btn"
+                aria-label="Ungroup selection"
+                title="Ungroup (Ctrl+Shift+G)"
+                disabled={!canUngroup}
+                onClick={() => {
+                  if (commitUngroupSelection(session)) touch();
+                }}
+              >
+                Ungroup
+              </button>
+            </div>
+          </div>
+          {session.focusGroupId ? (
+            <nav className="scene-focus-crumb" aria-label="Group focus breadcrumb">
+              {focusCrumb.map((label, index) => (
+                <span key={`${label}-${index}`}>
+                  {index > 0 ? ' › ' : ''}
+                  {index === focusCrumb.length - 1 ? (
+                    <strong>{label}</strong>
+                  ) : (
+                    <button
+                      type="button"
+                      className="outliner-crumb"
+                      onClick={() => {
+                        if (index === 0) {
+                          exitToDocumentRoot(session);
+                        } else {
+                          const chain = getFocusGroupChain(session.document, session.focusGroupId);
+                          const targetId = chain[index - 1];
+                          if (targetId) session.focusGroupId = targetId;
+                          else exitToDocumentRoot(session);
+                        }
+                        touch();
+                      }}
+                    >
+                      {label}
+                    </button>
+                  )}
+                </span>
+              ))}
+            </nav>
+          ) : null}
+          <div className="outliner-body" role="tree" aria-label="Scene objects">
+            {session.document.rootObjectIds.length
+              ? rows(session.document.rootObjectIds)
+              : (
+                <p className="outliner-empty">
+                  {session.document.kind === 'level'
+                    ? 'Empty level — use Add Model or create geometry in the viewport'
+                    : 'Empty model — add meshes to build a reusable asset'}
+                </p>
+              )}
+          </div>
         </div>
+      )}
+      {!minimized && tab === 'models' && (
+        <OutlinerDocumentList session={session} kind="model" onRefresh={onRefresh} onPlaced={afterModelPlaced} />
+      )}
+      {!minimized && tab === 'levels' && (
+        <OutlinerDocumentList session={session} kind="level" onRefresh={onRefresh} />
       )}
     </aside>
   );

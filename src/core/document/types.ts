@@ -4,17 +4,49 @@ import type { Vec3 } from '@/core/math/Vec3';
 import type { EditableMesh, MeshId } from '@/core/mesh/types';
 
 export type ObjectId = ElementId;
+export type DocumentId = ElementId;
 export type MaterialId = ElementId;
 export type TextureId = ElementId;
 export type ImageId = ElementId;
 
+export type DocumentKind = 'model' | 'level';
+
+export type DocumentSettings = {
+  origin?: Transform;
+  thumbnailImageId?: ImageId | null;
+};
+
+export type ViperDocument = {
+  id: DocumentId;
+  name: string;
+  kind: DocumentKind;
+  objects: Map<ObjectId, SceneObject>;
+  rootObjectIds: ObjectId[];
+  revision: number;
+  dirty: boolean;
+  settings: DocumentSettings;
+};
+
+export type SceneObjectKind =
+  | 'mesh'
+  | 'group'
+  | 'instance'
+  | 'empty'
+  | 'terrain'
+  | 'camera'
+  | 'light'
+  | 'collision';
+
 export type SceneObject = {
   id: ObjectId;
   name: string;
+  kind: SceneObjectKind;
   parentId: ObjectId | null;
   childIds: ObjectId[];
   transform: Transform;
   meshId: MeshId | null;
+  /** Source model document when kind is `instance`. */
+  instanceSourceModelId: DocumentId | null;
   /** Ordered material slot → material asset. */
   materialSlotIds: MaterialId[];
   visible: boolean;
@@ -113,8 +145,25 @@ export type ModelDocument = {
   id: ElementId;
   name: string;
   version: number;
+  kind?: DocumentKind;
   objects: Map<ObjectId, SceneObject>;
   rootObjectIds: ObjectId[];
+  meshes: Map<MeshId, EditableMesh>;
+  materials: Map<MaterialId, MaterialAsset>;
+  textures: Map<TextureId, TextureAsset>;
+  images: Map<ImageId, ImageAsset>;
+  settings: ProjectSettings;
+  dirty: boolean;
+};
+
+export type ViperProject = {
+  id: ElementId;
+  name: string;
+  version: number;
+  documents: Map<DocumentId, ViperDocument>;
+  modelDocumentIds: DocumentId[];
+  levelDocumentIds: DocumentId[];
+  activeDocumentId: DocumentId | null;
   meshes: Map<MeshId, EditableMesh>;
   materials: Map<MaterialId, MaterialAsset>;
   textures: Map<TextureId, TextureAsset>;

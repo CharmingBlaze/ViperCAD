@@ -6,6 +6,7 @@ import {
   removeObject,
 } from '@/core/document/ModelDocument';
 import type { ModelDocument, ObjectId, SceneObject } from '@/core/document/types';
+import { isGroupObject } from '@/core/document/SceneObjectKind';
 import {
   getObjectWorldMatrix,
   matrixFromTransform,
@@ -82,6 +83,7 @@ export function generateBoxCollider(document: ModelDocument, sourceObjectId: Obj
   });
   const collider = document.objects.get(committed.objectId)!;
   collider.transform = cloneTransform(source.transform);
+  collider.kind = 'collision';
   collider.metadata.gameRole = 'collision';
   collider.metadata.collision = 'box';
   collider.metadata.collisionFor = source.id;
@@ -98,6 +100,7 @@ export function generateMeshCollider(document: ModelDocument, sourceObjectId: Ob
   const id = duplicateObject(document, sourceObjectId, true);
   const collider = document.objects.get(id)!;
   collider.name = `UCX_${source.name}`;
+  collider.kind = 'collision';
   collider.metadata.gameRole = 'collision';
   collider.metadata.collision = 'mesh';
   collider.metadata.collisionFor = source.id;
@@ -150,6 +153,7 @@ export function generateConvexCollider(document: ModelDocument, sourceObjectId: 
   });
   const collider = document.objects.get(committed.objectId)!;
   collider.transform = cloneTransform(source.transform);
+  collider.kind = 'collision';
   collider.metadata.gameRole = 'collision';
   collider.metadata.collision = 'convex';
   collider.metadata.collisionFor = source.id;
@@ -171,9 +175,8 @@ export function groupObjects(document: ModelDocument, objectIds: ObjectId[], nam
   const commonParent = selected.every((object) => object.parentId === selected[0]!.parentId)
     ? selected[0]!.parentId
     : null;
-  const group = createSceneObject(name);
+  const group = createSceneObject(name, null, [], { kind: 'group' });
   group.parentId = commonParent;
-  group.metadata.prefab = 'true';
   addObjectToDocument(document, group);
   const inverseGroupWorld = getObjectWorldMatrix(document, group.id).invert();
 
@@ -198,7 +201,7 @@ export function groupObjects(document: ModelDocument, objectIds: ObjectId[], nam
 /** Remove a group container without deleting its children. */
 export function ungroupObject(document: ModelDocument, groupId: ObjectId): ObjectId[] {
   const group = document.objects.get(groupId);
-  if (!group || group.meshId || group.childIds.length === 0) {
+  if (!group || !isGroupObject(group) || group.childIds.length === 0) {
     throw new Error('Select a group with children');
   }
   const parentId = group.parentId;

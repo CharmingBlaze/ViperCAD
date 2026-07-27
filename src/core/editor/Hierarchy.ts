@@ -2,7 +2,8 @@ import {
   addObjectToDocument,
   createSceneObject,
 } from '@/core/document/ModelDocument';
-import type { ModelDocument, ObjectId, SceneObject } from '@/core/document/types';
+import { isGroupObject } from '@/core/document/SceneObjectKind';
+import type { ModelDocument, ObjectId } from '@/core/document/types';
 import { cloneTransform, type Transform } from '@/core/math/Transform';
 import { createId } from '@/core/ids/IdService';
 import { cloneMeshPreserveIds } from '@/core/mesh/EditableMesh';
@@ -10,11 +11,7 @@ import type { MeshId } from '@/core/mesh/types';
 import { Euler, Matrix4, Quaternion, Vector3 } from 'three';
 import { v3 } from '@/core/math/Vec3';
 
-/** Empty container (prefab group) — no mesh, used as a hierarchy parent. */
-export function isGroupObject(object: SceneObject | null | undefined): boolean {
-  if (!object) return false;
-  return !object.meshId && (object.childIds.length > 0 || object.metadata.prefab === 'true');
-}
+export { isGroupObject } from '@/core/document/SceneObjectKind';
 
 /** Nearest group ancestor, or null if the object is not inside a group. */
 export function findGroupAncestor(document: ModelDocument, objectId: ObjectId): ObjectId | null {
@@ -195,11 +192,14 @@ export function duplicateObjectSubtree(
         meshId = clone.id;
       }
     }
-    const copy = createSceneObject(`${source.name}_copy`, meshId, [...source.materialSlotIds]);
+    const copy = createSceneObject(`${source.name}_copy`, meshId, [...source.materialSlotIds], {
+      kind: source.kind,
+    });
     copy.transform = cloneTransform(source.transform);
     copy.visible = source.visible;
     copy.locked = source.locked;
     copy.metadata = { ...source.metadata };
+    copy.instanceSourceModelId = source.instanceSourceModelId;
     copy.parentId = parentId;
     addObjectToDocument(document, copy);
     idMap.set(sourceId, copy.id);
