@@ -53,6 +53,20 @@ describe('StrokeInflateBuilder', () => {
     expect(mid.vertices.size).toBeGreaterThan(low.vertices.size);
   });
 
+  it('extrudes blob depth from brush thickness, not a fixed minimum', () => {
+    const thickness = 0.1;
+    const mesh = buildInflatedDoodle({
+      points: circlePoints(20, 1),
+      thickness,
+      outlineSegments: 16,
+      profile: 'soft',
+    });
+    const zs = [...mesh.vertices.values()].map((vertex) => vertex.position.z);
+    const height = Math.max(...zs) - Math.min(...zs);
+    expect(height).toBeCloseTo(thickness * 2, 1);
+    expect(height).toBeLessThan(1);
+  });
+
   it('builds a valid soft blob dome with quad rings and cap transitions', () => {
     const outline = buildInflatedDoodle({
       points: circlePoints(30, 1),

@@ -109,7 +109,7 @@ export function buildInflatedDoodle(options: InflateDoodleOptions): EditableMesh
   }
 
   const ring2d = path.map((point) => toLocalPoint(point, plane));
-  const depth = Math.max(4, thickness * 2);
+  const depth = Math.max(1e-4, thickness * 2);
   const inflation = profile === 'soft' ? (options.inflation ?? 0.65) : 0;
 
   if (!closed) {
