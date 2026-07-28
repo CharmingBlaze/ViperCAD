@@ -1,60 +1,64 @@
 import {
   Color,
   type Material,
-  type MeshBasicMaterial,
-  type MeshPhysicalMaterial,
-  type MeshStandardMaterial,
+  type Texture,
 } from 'three';
 import { normalizeShadingMode, type ShadingMode } from '@/workspace/types';
 import type { ObjectRenderHandle } from '@/renderer/MeshRenderAdapter';
 
-type StandardLike = MeshStandardMaterial | MeshPhysicalMaterial | MeshBasicMaterial;
+type StyledMaterial = Material & {
+  wireframe: boolean;
+  color: Color;
+  map: Texture | null;
+  flatShading?: boolean;
+  normalMap?: Texture | null;
+  roughnessMap?: Texture | null;
+  metalnessMap?: Texture | null;
+  emissiveMap?: Texture | null;
+};
 
 type MaterialBaseline = {
   wireframe: boolean;
   flatShading: boolean;
   color: number;
-  map: Material['map'];
-  normalMap: StandardLike['normalMap'];
-  roughnessMap: StandardLike['roughnessMap'];
-  metalnessMap: StandardLike['metalnessMap'];
-  emissiveMap: StandardLike['emissiveMap'];
+  map: Texture | null;
+  normalMap: Texture | null;
+  roughnessMap: Texture | null;
+  metalnessMap: Texture | null;
+  emissiveMap: Texture | null;
 };
 
-function asStandardLike(material: Material): StandardLike | null {
-  if ('roughness' in material || 'normalMap' in material || material.type === 'MeshBasicMaterial') {
-    return material as StandardLike;
+function asStyledMaterial(material: Material): StyledMaterial | null {
+  if ('wireframe' in material && 'color' in material && 'map' in material) {
+    return material as StyledMaterial;
   }
   return null;
 }
 
-function ensureBaseline(material: Material): MaterialBaseline {
+function ensureBaseline(material: StyledMaterial): MaterialBaseline {
   const existing = material.userData.viperRenderBaseline as MaterialBaseline | undefined;
   if (existing) return existing;
 
-  const standard = asStandardLike(material);
   const baseline: MaterialBaseline = {
     wireframe: material.wireframe,
-    flatShading: standard && 'flatShading' in standard ? standard.flatShading : false,
+    flatShading: material.flatShading ?? false,
     color: material.color.getHex(),
     map: material.map,
-    normalMap: standard?.normalMap ?? null,
-    roughnessMap: standard?.roughnessMap ?? null,
-    metalnessMap: standard?.metalnessMap ?? null,
-    emissiveMap: standard?.emissiveMap ?? null,
+    normalMap: material.normalMap ?? null,
+    roughnessMap: material.roughnessMap ?? null,
+    metalnessMap: material.metalnessMap ?? null,
+    emissiveMap: material.emissiveMap ?? null,
   };
   material.userData.viperRenderBaseline = baseline;
   return baseline;
 }
 
-function restoreMaps(material: Material, baseline: MaterialBaseline): void {
+function restoreMaps(material: StyledMaterial, baseline: MaterialBaseline): void {
   material.map = baseline.map;
-  const standard = asStandardLike(material);
-  if (!standard) return;
-  standard.normalMap = baseline.normalMap;
-  standard.roughnessMap = baseline.roughnessMap;
-  standard.metalnessMap = baseline.metalnessMap;
-  standard.emissiveMap = baseline.emissiveMap;
+  if ('normalMap' in material) material.normalMap = baseline.normalMap;
+  if ('roughnessMap' in material) material.roughnessMap = baseline.roughnessMap;
+  if ('metalnessMap' in material) material.metalnessMap = baseline.metalnessMap;
+  if ('emissiveMap' in material) material.emissiveMap = baseline.emissiveMap;
 }
 
 export function applyViewportRenderStyle(
@@ -63,16 +67,17 @@ export function applyViewportRenderStyle(
 ): void {
   const mode = normalizeShadingMode(modeInput);
 
-  for (const material of handle.materials) {
+  for (const rawMaterial of handle.materials) {
+    const material = asStyledMaterial(rawMaterial);
+    if (!material) continue;
     const baseline = ensureBaseline(material);
-    const standard = asStandardLike(material);
 
     material.wireframe = mode === 'wireframe';
     material.color.setHex(baseline.color);
     restoreMaps(material, baseline);
 
-    if (standard && 'flatShading' in standard) {
-      standard.flatShading = mode === 'game' ? true : baseline.flatShading;
+    if ('flatShading' in material) {
+      material.flatShading = mode === 'game' ? true : baseline.flatShading;
     }
 
     material.needsUpdate = true;

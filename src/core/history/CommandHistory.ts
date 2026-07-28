@@ -77,4 +77,25 @@ export class CommandHistory {
   getUndoNames(): string[] {
     return this.undoStack.map((c) => c.name);
   }
+
+  getRedoNames(): string[] {
+    return this.redoStack.map((c) => c.name);
+  }
+
+  /** A compact, presentation-ready view of the most recent editing steps. */
+  getTimeline(limit = 12): { id: string; name: string; timestamp: number; state: 'done' | 'redo' }[] {
+    const done = this.undoStack.map((command) => ({
+      id: command.id,
+      name: command.name,
+      timestamp: command.timestamp,
+      state: 'done' as const,
+    }));
+    const redo = [...this.redoStack].reverse().map((command) => ({
+      id: command.id,
+      name: command.name,
+      timestamp: command.timestamp,
+      state: 'redo' as const,
+    }));
+    return [...done, ...redo].slice(-Math.max(1, limit));
+  }
 }

@@ -36,6 +36,7 @@ import { createEmptyProject, clearProjectDirty, projectIsDirty } from '@/core/do
 import { DocumentTabs } from '@/app/DocumentTabs';
 import { enterGroupFocus, exitGroupFocus, exitToDocumentRoot } from '@/core/editor/GroupFocus';
 import { placeModelQuick } from '@/app/outliner/placeModelWorkflow';
+import { renameProjectDocument } from '@/app/outliner/documentActions';
 import { modelHasPlaceableGeometry } from '@/core/editor/ModelInstances';
 import { getViperDocument } from '@/core/document/ViperProject';
 import { isGroupObject } from '@/core/editor/Hierarchy';
@@ -70,6 +71,7 @@ import {
   DesktopMenuBar,
   type DesktopMenuDefinition,
 } from '@/app/DesktopMenuBar';
+import { CommandPalette } from '@/app/CommandPalette';
 import './App.css';
 
 export default function App() {
@@ -77,14 +79,30 @@ export default function App() {
   const workspace = useMemo(() => new WorkspaceController(), []);
   const [, setTick] = useState(0);
   const [outlinerOpen, setOutlinerOpen] = useState(true);
-  const [outlinerTab, setOutlinerTab] = useState<'scene' | 'models' | 'levels'>('scene');
+  const [outlinerTab, setOutlinerTab] = useState<'scene' | 'assets' | 'models' | 'levels'>('scene');
   const [terrainObjectsOpen, setTerrainObjectsOpen] = useState(true);
   const [autosaveOffers, setAutosaveOffers] = useState<AutosavePayload[]>([]);
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [renderQuality, setRenderQuality] = useState<'performance' | 'balanced' | 'high'>('balanced');
   const [exportProfileId, setExportProfileId] = useState<ExportProfile['id']>('godot');
   const projectFileToken = useRef<FileToken | null>(null);
   const toasts = useToasts();
   const refresh = () => setTick((t) => t + 1);
+  const chooseRenderQuality = (quality: 'performance' | 'balanced' | 'high') => {
+    setRenderQuality(quality);
+    viewportEngine.setRenderQuality(
+      quality === 'performance' ? 0.6 : quality === 'high' ? 1.35 : 1,
+    );
+    pushToast(
+      quality === 'performance'
+        ? 'Performance viewport enabled'
+        : quality === 'high'
+          ? 'High-quality viewport enabled'
+          : 'Balanced viewport enabled',
+      'info',
+    );
+  };
 
   useEffect(() => session.onRedraw(refresh), [session]);
   useEffect(() => workspace.subscribe(refresh), [workspace]);
@@ -123,6 +141,16 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setCommandPaletteOpen((open) => !open);
+        return;
+      }
+      if (event.key === 'Escape' && commandPaletteOpen) {
+        event.preventDefault();
+        setCommandPaletteOpen(false);
+        return;
+      }
       if (isTypingTarget(event.target)) return;
       if (workspace.input.owner === 'transform' || workspace.input.owner === 'text') return;
 
@@ -648,7 +676,8 @@ export default function App() {
           label: 'New Model',
           action: () => {
             const id = session.projectEditor.newModel(`Model ${session.project.modelDocumentIds.length + 1}`);
-            openDocumentById(id);
+            session.openDocument(id);
+            refresh();
             pushToast('New Model — edit reusable assets here', 'success');
           },
         },
@@ -657,7 +686,8 @@ export default function App() {
           label: 'New Level',
           action: () => {
             const id = session.projectEditor.newLevel(`Level ${session.project.levelDocumentIds.length + 1}`);
-            openDocumentById(id);
+            session.openDocument(id);
+            refresh();
             pushToast('New Level — place content in the environment', 'success');
           },
         },
@@ -789,7 +819,8 @@ export default function App() {
           label: 'New Model',
           action: () => {
             const id = session.projectEditor.newModel(`Model ${session.project.modelDocumentIds.length + 1}`);
-            openDocumentById(id);
+            session.openDocument(id);
+            refresh();
             pushToast('New Model — edit reusable assets here', 'success');
           },
         },
@@ -798,7 +829,8 @@ export default function App() {
           label: 'New Level',
           action: () => {
             const id = session.projectEditor.newLevel(`Level ${session.project.levelDocumentIds.length + 1}`);
-            openDocumentById(id);
+            session.openDocument(id);
+            refresh();
             pushToast('New Level — place content in the environment', 'success');
           },
         },
@@ -810,7 +842,7 @@ export default function App() {
                 return {
                   kind: 'command' as const,
                   label: `Place ${modelDoc.name} in Level`,
-                  disabled: !modelHasPlaceableGeometry(modelDoc),
+                  disabled: !modelHasPlaceableGeometry(modelDoc, session.project),
                   action: () => placeModelInActiveLevel(modelId),
                 };
               }),
@@ -826,8 +858,7 @@ export default function App() {
             if (!doc) return;
             const next = window.prompt('Rename', doc.name);
             if (!next?.trim()) return;
-            session.projectEditor.renameDocument(docId, next.trim());
-            refresh();
+            renameProjectDocument(session, docId, next, refresh);
           },
         },
         {
@@ -1062,6 +1093,25 @@ export default function App() {
           checked: sel.xRay,
           action: toggleXRay,
         },
+        { kind: 'separator' },
+        {
+          kind: 'command',
+          label: 'Viewport Quality: Performance',
+          checked: renderQuality === 'performance',
+          action: () => chooseRenderQuality('performance'),
+        },
+        {
+          kind: 'command',
+          label: 'Viewport Quality: Balanced',
+          checked: renderQuality === 'balanced',
+          action: () => chooseRenderQuality('balanced'),
+        },
+        {
+          kind: 'command',
+          label: 'Viewport Quality: High',
+          checked: renderQuality === 'high',
+          action: () => chooseRenderQuality('high'),
+        },
       ],
     },
     {
@@ -1243,6 +1293,12 @@ export default function App() {
       entries: [
         {
           kind: 'command',
+          label: 'Find a Command…',
+          shortcut: 'Ctrl+K',
+          action: () => setCommandPaletteOpen(true),
+        },
+        {
+          kind: 'command',
           label: 'Keyboard Shortcuts',
           shortcut: '?',
           action: () => setHotkeysOpen(true),
@@ -1411,12 +1467,17 @@ export default function App() {
             workspace={workspace}
             onRefresh={refresh}
             onOpenSceneObjects={() => setTerrainObjectsOpen(true)}
+            onOpenOutliner={() => {
+              setOutlinerTab('models');
+              setOutlinerOpen(true);
+            }}
             sceneObjectsOpen={terrainObjectsOpen}
+            outlinerOpen={outlinerOpen}
           />
         )}
       </main>
 
-      {workspace.shellMode === 'model' && outlinerOpen && (
+      {(workspace.shellMode === 'model' || workspace.shellMode === 'terrain') && outlinerOpen && (
         <FloatingOutliner
           session={session}
           activeTab={outlinerTab}
@@ -1428,8 +1489,11 @@ export default function App() {
       {workspace.shellMode === 'terrain' && terrainObjectsOpen && (
         <FloatingTerrainObjects
           session={session}
-          workspace={workspace}
           onClose={() => setTerrainObjectsOpen(false)}
+          onOpenOutliner={() => {
+            setOutlinerTab('models');
+            setOutlinerOpen(true);
+          }}
           onRefresh={refresh}
         />
       )}
@@ -1524,6 +1588,11 @@ export default function App() {
         />
       )}
       <HotkeyHelpOverlay open={hotkeysOpen} onClose={() => setHotkeysOpen(false)} />
+      <CommandPalette
+        open={commandPaletteOpen}
+        menus={menus}
+        onClose={() => setCommandPaletteOpen(false)}
+      />
       <ToastStack toasts={toasts} />
     </div>
   );

@@ -1,7 +1,7 @@
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { commitMeshObject } from '@/core/document/ModelDocument';
 import { buildSphere } from '@/core/mesh/builders/SphereBuilder';
-import { bumpTopology } from '@/core/mesh/EditableMesh';
+import { bumpTopology, cloneMeshPreserveIds } from '@/core/mesh/EditableMesh';
 import { subdivideFaces } from '@/core/mesh/ops/subdivide';
 import { validateMeshFull } from '@/core/mesh/Validation';
 import { sculptableObjects } from '@/core/sculpt/MeshSculptTarget';
@@ -18,6 +18,7 @@ type Props = {
 
 const BRUSHES: { mode: MeshBrushMode; label: string; hint: string }[] = [
   { mode: 'grab', label: 'Grab', hint: 'Pull surface' },
+  { mode: 'clay', label: 'Clay', hint: 'Build broad planar form' },
   { mode: 'inflate', label: 'Inflate', hint: 'Push / pull volume' },
   { mode: 'smooth', label: 'Smooth', hint: 'Blend detail' },
   { mode: 'flatten', label: 'Flatten', hint: 'Level to plane' },
@@ -40,6 +41,13 @@ function BrushIcon({ mode }: { mode: MeshBrushMode }) {
         <svg viewBox="0 0 20 20" aria-hidden>
           <circle cx="10" cy="10" r="4.5" />
           <path d="M10 3.5v3M10 13.5v3M3.5 10h3M13.5 10h3" />
+        </svg>
+      );
+    case 'clay':
+      return (
+        <svg viewBox="0 0 20 20" aria-hidden>
+          <path d="M4 13.5c2.2-1.7 3.5-3.8 5.8-3.8 2.1 0 3.4 1.5 6.2 1.5" />
+          <path d="M4 15.5h12M7 6.5h6M10 3.5v6" />
         </svg>
       );
     case 'smooth':
@@ -114,10 +122,30 @@ export function SculptPanel({ session, onRefresh }: Props) {
 
   const subdivideActive = () => {
     if (!activeMesh) return;
+    const before = cloneMeshPreserveIds(activeMesh);
     const result = subdivideFaces(activeMesh, [...activeMesh.faces.keys()], 1);
     if (!result.ok) return;
     bumpTopology(activeMesh);
+    const after = cloneMeshPreserveIds(activeMesh);
     session.document.dirty = true;
+    let applied = true;
+    session.history.execute({
+      name: 'Subdivide Sculpt Mesh',
+      execute: () => {
+        if (applied) return;
+        session.document.meshes.set(activeMesh.id, cloneMeshPreserveIds(after));
+        session.document.dirty = true;
+        session.requestRedraw();
+        applied = true;
+      },
+      undo: () => {
+        if (!applied) return;
+        session.document.meshes.set(activeMesh.id, cloneMeshPreserveIds(before));
+        session.document.dirty = true;
+        session.requestRedraw();
+        applied = false;
+      },
+    });
     session.requestRedraw();
     onRefresh();
   };
@@ -234,6 +262,72 @@ export function SculptPanel({ session, onRefresh }: Props) {
 
           <label className="sculpt-slider">
             <span className="sculpt-slider-label">
+              Hardness
+              <b>{Math.round(tool.hardness * 100)}%</b>
+            </span>
+            <input
+              className="sculpt-range"
+              aria-label="Brush hardness"
+              type="range"
+              min={0}
+              max={0.9}
+              step={0.05}
+              value={tool.hardness}
+              onChange={(event) => {
+                tool.hardness = Number(event.target.value);
+                tool.revision += 1;
+                session.requestRedraw();
+                onRefresh();
+              }}
+            />
+          </label>
+
+          <label className="sculpt-slider">
+            <span className="sculpt-slider-label">
+              Stroke spacing
+              <b>{Math.round(tool.spacing * 100)}%</b>
+            </span>
+            <input
+              className="sculpt-range"
+              aria-label="Stroke spacing"
+              type="range"
+              min={0.05}
+              max={0.5}
+              step={0.01}
+              value={tool.spacing}
+              onChange={(event) => {
+                tool.spacing = Number(event.target.value);
+                tool.revision += 1;
+                onRefresh();
+              }}
+            />
+          </label>
+
+          {(tool.mode === 'clay' || tool.mode === 'inflate' || tool.mode === 'noise') && (
+            <label className="sculpt-slider">
+              <span className="sculpt-slider-label">
+                Build-up
+                <b>{tool.buildUp.toFixed(2)}</b>
+              </span>
+              <input
+                className="sculpt-range"
+                aria-label="Brush build-up"
+                type="range"
+                min={0.2}
+                max={2}
+                step={0.05}
+                value={tool.buildUp}
+                onChange={(event) => {
+                  tool.buildUp = Number(event.target.value);
+                  tool.revision += 1;
+                  onRefresh();
+                }}
+              />
+            </label>
+          )}
+
+          <label className="sculpt-slider">
+            <span className="sculpt-slider-label">
               Strength
               <b>{tool.strength.toFixed(2)}</b>
             </span>
@@ -273,15 +367,101 @@ export function SculptPanel({ session, onRefresh }: Props) {
             </div>
           </div>
 
+          {tool.mode === 'smooth' && (
+            <label className="sculpt-slider">
+              <span className="sculpt-slider-label">
+                Preserve volume
+                <b>{Math.round(tool.preserveVolume * 100)}%</b>
+              </span>
+              <input
+                className="sculpt-range"
+                aria-label="Smooth preserve volume"
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={tool.preserveVolume}
+                onChange={(event) => {
+                  tool.preserveVolume = Number(event.target.value);
+                  tool.revision += 1;
+                  onRefresh();
+                }}
+              />
+            </label>
+          )}
+
+          <div className="sculpt-toggle-grid">
+            <label>
+              <input
+                type="checkbox"
+                checked={tool.frontFacesOnly}
+                onChange={(event) => {
+                  tool.frontFacesOnly = event.target.checked;
+                  tool.revision += 1;
+                  onRefresh();
+                }}
+              />
+              Front faces
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={tool.usePressure}
+                onChange={(event) => {
+                  tool.usePressure = event.target.checked;
+                  tool.revision += 1;
+                  onRefresh();
+                }}
+              />
+              Pen pressure
+            </label>
+          </div>
+
           {tool.mode === 'flatten' && (
             <p className="sculpt-tip">Alt+click the surface to sample the flatten plane.</p>
           )}
+        </section>
+
+        <section className="sculpt-controls">
+          <div className="sculpt-section-head">
+            <span className="sculpt-section-label">Symmetry</span>
+            <span className="sculpt-active-brush">
+              {(['x', 'y', 'z'] as const)
+                .filter((axis) => session.document.settings.symmetry[axis])
+                .map((axis) => axis.toUpperCase())
+                .join(' + ') || 'Off'}
+            </span>
+          </div>
+          <div className="sculpt-axis-grid" role="group" aria-label="Sculpt symmetry axes">
+            {(['x', 'y', 'z'] as const).map((axis) => (
+              <button
+                key={axis}
+                type="button"
+                className={session.document.settings.symmetry[axis] ? 'is-active' : ''}
+                aria-pressed={session.document.settings.symmetry[axis]}
+                onClick={() => {
+                  const settings = session.document.settings.symmetry;
+                  settings[axis] = !settings[axis];
+                  if (settings[axis]) settings.liveMirror = true;
+                  session.document.dirty = true;
+                  session.requestRedraw();
+                  onRefresh();
+                }}
+              >
+                {axis.toUpperCase()}
+              </button>
+            ))}
+          </div>
+          <p className="sculpt-tip">
+            Symmetry uses the object origin. Keep the centre seam near the selected axis.
+          </p>
         </section>
 
         <footer className="sculpt-shortcuts">
           <span>LMB sculpt</span>
           <span>Shift invert</span>
           <span>Wheel size</span>
+          <span>Ctrl+wheel strength</span>
           <span>RMB orbit</span>
         </footer>
       </div>

@@ -118,6 +118,29 @@ export function handleTransformHotkey(
     return false;
   }
 
+  // A · toggle Select All / Deselect All for the current selection mode.
+  // Alt+A · deselect · Ctrl/Cmd+A · select all.
+  if ((key === 'a' || key === 'A') && !e.shiftKey) {
+    const sel = session.selection;
+    const objectId = sel.state.activeObjectId ?? [...sel.state.selectedObjectIds][0] ?? null;
+    const object = objectId ? session.document.objects.get(objectId) : null;
+    const mesh = object?.meshId ? session.document.meshes.get(object.meshId) : undefined;
+    if (sel.state.mode !== 'object' && !mesh) return false;
+
+    e.preventDefault();
+    if (e.altKey && !e.ctrlKey && !e.metaKey) {
+      sel.deselectAll();
+    } else if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      sel.selectAll(mesh, session.document);
+    } else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+      sel.toggleSelectAll(mesh, session.document);
+    } else {
+      return false;
+    }
+    session.requestRedraw();
+    return true;
+  }
+
   // Blender-style Extrude
   if (key === 'e' || key === 'E') {
     const mode = session.selection.state.mode;

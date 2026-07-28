@@ -22,8 +22,9 @@ import type { ObjectId } from '@/core/document/types';
 import { OutlinerDocumentList } from '@/app/outliner/OutlinerDocumentList';
 import { AddModelMenu } from '@/app/outliner/AddModelMenu';
 import { SceneContextBar } from '@/app/outliner/SceneContextBar';
+import { AssetBrowser } from '@/app/outliner/AssetBrowser';
 
-type OutlinerTab = 'scene' | 'models' | 'levels';
+type OutlinerTab = 'scene' | 'assets' | 'models' | 'levels';
 
 type Props = {
   session: EditorSession;
@@ -59,6 +60,7 @@ export function FloatingOutliner({
   const [dragObjectId, setDragObjectId] = useState<ObjectId | null>(null);
   const [dropTargetId, setDropTargetId] = useState<ObjectId | null>(null);
   const [renamingId, setRenamingId] = useState<ObjectId | null>(null);
+  const [sceneQuery, setSceneQuery] = useState('');
   const drag = useRef<DragState | null>(null);
   const panel = useRef<HTMLElement>(null);
 
@@ -84,13 +86,25 @@ export function FloatingOutliner({
     };
   }, []);
 
+  const normalizedSceneQuery = sceneQuery.trim().toLocaleLowerCase();
+  const matchingObjectIds = new Set<ObjectId>();
+  const markMatches = (id: ObjectId): boolean => {
+    const object = session.document.objects.get(id);
+    if (!object) return false;
+    const childMatches = object.childIds.some(markMatches);
+    const matches = !normalizedSceneQuery || object.name.toLocaleLowerCase().includes(normalizedSceneQuery);
+    if (matches || childMatches) matchingObjectIds.add(id);
+    return matches || childMatches;
+  };
+  for (const id of session.document.rootObjectIds) markMatches(id);
+
   const visibleObjectIds: ObjectId[] = [];
   const collectVisible = (ids: ObjectId[]) => {
     for (const id of ids) {
       const object = session.document.objects.get(id);
-      if (!object) continue;
+      if (!object || !matchingObjectIds.has(id)) continue;
       visibleObjectIds.push(id);
-      if (object.childIds.length > 0 && !collapsed.has(id)) collectVisible(object.childIds);
+      if (object.childIds.length > 0 && (!collapsed.has(id) || normalizedSceneQuery)) collectVisible(object.childIds);
     }
   };
   collectVisible(session.document.rootObjectIds);
@@ -175,7 +189,7 @@ export function FloatingOutliner({
   const rows = (ids: ObjectId[], depth = 0): React.ReactNode =>
     ids.map((id) => {
       const object = session.document.objects.get(id);
-      if (!object) return null;
+      if (!object || !matchingObjectIds.has(id)) return null;
       const selected = session.selection.state.selectedObjectIds.has(id);
       const active = session.selection.state.activeObjectId === id;
       const group = isGroupObject(object);
@@ -379,7 +393,7 @@ export function FloatingOutliner({
               </button>
             </div>
           </div>
-          {hasChildren && !isCollapsed && rows(object.childIds, depth + 1)}
+          {hasChildren && (!isCollapsed || !!normalizedSceneQuery) && rows(object.childIds, depth + 1)}
         </div>
       );
     });
@@ -428,7 +442,9 @@ export function FloatingOutliner({
             <span>
               {tab === 'models'
                 ? `${session.project.modelDocumentIds.length} models`
-                : `${session.project.levelDocumentIds.length} levels`}
+                : tab === 'levels'
+                  ? `${session.project.levelDocumentIds.length} levels`
+                  : `${session.project.materials.size + session.project.textures.size + session.project.images.size} assets`}
             </span>
           )}
         </div>
@@ -471,6 +487,7 @@ export function FloatingOutliner({
         <nav className="outliner-tabs" aria-label="Outliner views">
           {([
             ['scene', 'Scene', null],
+            ['assets', 'Assets', session.project.materials.size + session.project.textures.size + session.project.images.size],
             ['models', 'Models', session.project.modelDocumentIds.length],
             ['levels', 'Levels', session.project.levelDocumentIds.length],
           ] as const).map(([id, label, count]) => (
@@ -524,6 +541,18 @@ export function FloatingOutliner({
               </button>
             </div>
           </div>
+          <label className="outliner-scene-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              value={sceneQuery}
+              onChange={(event) => setSceneQuery(event.target.value)}
+              placeholder="Find objects, groups, or instances"
+              aria-label="Search scene objects"
+            />
+            {sceneQuery ? (
+              <button type="button" onClick={() => setSceneQuery('')} aria-label="Clear scene search">×</button>
+            ) : null}
+          </label>
           {session.focusGroupId ? (
             <nav className="scene-focus-crumb" aria-label="Group focus breadcrumb">
               {focusCrumb.map((label, index) => (
@@ -555,11 +584,13 @@ export function FloatingOutliner({
             </nav>
           ) : null}
           <div className="outliner-body" role="tree" aria-label="Scene objects">
-            {session.document.rootObjectIds.length
+            {session.document.rootObjectIds.length && visibleObjectIds.length
               ? rows(session.document.rootObjectIds)
               : (
                 <p className="outliner-empty">
-                  {session.document.kind === 'level'
+                  {normalizedSceneQuery
+                    ? `No scene objects match “${sceneQuery.trim()}”`
+                    : session.document.kind === 'level'
                     ? 'Empty level — use Add Model or create geometry in the viewport'
                     : 'Empty model — add meshes to build a reusable asset'}
                 </p>
@@ -569,6 +600,9 @@ export function FloatingOutliner({
       )}
       {!minimized && tab === 'models' && (
         <OutlinerDocumentList session={session} kind="model" onRefresh={onRefresh} onPlaced={afterModelPlaced} />
+      )}
+      {!minimized && tab === 'assets' && (
+        <AssetBrowser session={session} onRefresh={onRefresh} onPlaced={afterModelPlaced} />
       )}
       {!minimized && tab === 'levels' && (
         <OutlinerDocumentList session={session} kind="level" onRefresh={onRefresh} />

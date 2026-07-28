@@ -1,9 +1,11 @@
 import {
   addObjectToDocument,
+  createSceneObject,
   duplicateObject,
   removeObject,
 } from '@/core/document/ModelDocument';
 import type {
+  DocumentId,
   ObjectId,
   SceneObject,
 } from '@/core/document/types';
@@ -34,8 +36,12 @@ export class TerrainObjectTool implements Tool {
   mode: TerrainObjectBrushMode = 'place';
   terrainObjectId: ObjectId | null = null;
   sourceObjectId: ObjectId | null = null;
+  sourceModelDocumentId: DocumentId | null = null;
+  sourceModelName = '';
+  sourceModelBaseOffset = 0;
+  sourceModelRadius = 0.5;
   preset: TerrainPropPreset = 'tree';
-  usePreset = true;
+  usePreset = false;
   radius = 3;
   spacing = 1.5;
   density = 4;
@@ -43,7 +49,18 @@ export class TerrainObjectTool implements Tool {
   randomScale = 0.22;
   alignToSlope = false;
   placementMode: TerrainObjectPlacementMode = 'terrain';
+  /** Prefer already-placed model surfaces over terrain for single placement. */
+  stackModels = false;
   heightOffset = 0;
+  placementYaw = 0;
+  placementScale = 1;
+  scatterSeed = 1;
+  collisionAvoidance = true;
+  collisionPadding = 0.15;
+  maskEnabled = false;
+  minimumHeight = -1000;
+  maximumHeight = 1000;
+  maximumSlopeDegrees = 55;
   /** Prevent the object's lowest face from occupying the terrain's exact depth. */
   groundClearance = 0.03;
   dragging = false;
@@ -79,12 +96,42 @@ export class TerrainObjectTool implements Tool {
     this.preset = preset;
     this.usePreset = true;
     this.sourceObjectId = null;
+    this.sourceModelDocumentId = null;
     this.revision += 1;
     context.requestRedraw();
   }
 
   setSourceObject(objectId: ObjectId, context: ModellingContext): void {
     this.sourceObjectId = objectId;
+    this.sourceModelDocumentId = null;
+    this.usePreset = false;
+    this.revision += 1;
+    context.requestRedraw();
+  }
+
+  setSourceModel(
+    documentId: DocumentId,
+    name: string,
+    baseOffset: number,
+    radius: number,
+    context: ModellingContext,
+  ): void {
+    this.sourceModelDocumentId = documentId;
+    this.sourceModelName = name;
+    this.sourceModelBaseOffset = Math.max(0, Number(baseOffset) || 0);
+    this.sourceModelRadius = Math.max(0.05, Number(radius) || 0.5);
+    this.sourceObjectId = null;
+    this.usePreset = false;
+    this.revision += 1;
+    context.requestRedraw();
+  }
+
+  clearSource(context: ModellingContext): void {
+    this.sourceObjectId = null;
+    this.sourceModelDocumentId = null;
+    this.sourceModelName = '';
+    this.sourceModelBaseOffset = 0;
+    this.sourceModelRadius = 0.5;
     this.usePreset = false;
     this.revision += 1;
     context.requestRedraw();
@@ -97,8 +144,10 @@ export class TerrainObjectTool implements Tool {
     this.created = [];
     this.erased = [];
     this.lastStamp = null;
-    this.strokeSeed = Math.floor(input.screenX * 73856093 + input.screenY * 19349663);
-    this.applyAt(input.worldPosition, context);
+    this.strokeSeed = this.mode === 'scatter'
+      ? Math.max(1, Math.round(this.scatterSeed))
+      : Math.floor(input.screenX * 73856093 + input.screenY * 19349663);
+    this.applyAt(input.worldPosition, context, input.surfaceObjectId);
   }
 
   update(input: ToolPointerInput, context: ModellingContext): void {
@@ -114,7 +163,7 @@ export class TerrainObjectTool implements Tool {
         input.worldPosition.z - this.lastStamp.z,
       ) < threshold
     ) return;
-    this.applyAt(input.worldPosition, context);
+    this.applyAt(input.worldPosition, context, input.surfaceObjectId);
   }
 
   endStroke(context: ModellingContext): boolean {
@@ -180,13 +229,23 @@ export class TerrainObjectTool implements Tool {
     if (this.mode === 'scatter') {
       return `scatter on ${this.placementMode === 'terrain' ? 'terrain surface' : 'base plane'} · radius ${this.radius.toFixed(1)} · density ${this.density}`;
     }
-    return `place on ${this.placementMode === 'terrain' ? 'terrain surface' : 'base plane'} · click terrain · RMB orbit`;
+    return `place on ${
+      this.stackModels
+        ? 'models or terrain'
+        : this.placementMode === 'terrain'
+          ? 'terrain surface'
+          : 'base plane'
+    } · wheel rotate · Shift+wheel scale · click`;
   }
 
   getAllowedSelectionModes() { return ['object'] as const; }
   getSnapPolicy() { return [] as const; }
 
-  private applyAt(worldPoint: Vec3, context: ModellingContext): void {
+  private applyAt(
+    worldPoint: Vec3,
+    context: ModellingContext,
+    surfaceObjectId?: string | null,
+  ): void {
     if (!this.terrainObjectId) return;
     const target = terrainTarget(context, this.terrainObjectId);
     if (!target) return;
@@ -222,28 +281,59 @@ export class TerrainObjectTool implements Tool {
       if (Math.abs(x) > halfSize || Math.abs(z) > halfSize) continue;
       // Every scattered point samples independently so objects remain grounded
       // when one brush stroke crosses valleys, slopes, and mountain peaks.
-      const y = this.placementMode === 'terrain'
-        ? terrainHeightAtLocalPoint(target.object, target.mesh, x, z)
-        : 0;
+      const stackedPlacement =
+        this.mode === 'place' &&
+        this.stackModels &&
+        !!surfaceObjectId &&
+        surfaceObjectId !== this.terrainObjectId;
+      const y = stackedPlacement
+        ? localCentre.y
+        : this.placementMode === 'terrain'
+          ? terrainHeightAtLocalPoint(target.object, target.mesh, x, z)
+          : 0;
+      if (this.maskEnabled) {
+        if (y < this.minimumHeight || y > this.maximumHeight) continue;
+        const normal = terrainNormalAtLocalPoint(target.object, target.mesh, x, z);
+        const slope = Math.acos(Math.max(-1, Math.min(1, normal.y))) * 180 / Math.PI;
+        if (slope > this.maximumSlopeDegrees) continue;
+      }
       const position = transformPoint({ x, y, z }, target.object.transform);
+      const candidateRadius =
+        this.sourceModelDocumentId
+          ? this.sourceModelRadius * this.placementScale
+          : Math.max(0.1, this.spacing * 0.5);
       if (
-        this.mode === 'scatter' &&
+        this.collisionAvoidance &&
+        !stackedPlacement &&
         terrainPlacedObjects(context.document, this.terrainObjectId).some(
-          (object) =>
-            Math.hypot(
+          (object) => {
+            const existingRadius = Number(object.metadata.terrainCollisionRadius) || 0.25;
+            return Math.hypot(
               object.transform.position.x - position.x,
               object.transform.position.z - position.z,
-            ) < this.spacing,
+            ) < candidateRadius + existingRadius + this.collisionPadding;
+          },
         )
       ) continue;
-      const placed = this.placeOne(position, context);
+      const placed = this.placeOne(
+        position,
+        context,
+        stackedPlacement ? surfaceObjectId : null,
+      );
       if (placed) this.created.push(cloneSceneObject(placed));
     }
     context.document.dirty = true;
     context.requestRedraw();
   }
 
-  private placeOne(position: Vec3, context: ModellingContext): SceneObject | null {
+  private placeOne(
+    position: Vec3,
+    context: ModellingContext,
+    stackedOnId: string | null,
+  ): SceneObject | null {
+    if (this.sourceModelDocumentId) {
+      return this.placeModelInstance(position, context, stackedOnId);
+    }
     const source = this.usePreset
       ? ensureTerrainPresetSource(context.document, this.preset)
       : this.sourceObjectId
@@ -252,10 +342,11 @@ export class TerrainObjectTool implements Tool {
     if (!source || !source.meshId || source.metadata.terrain === 'true') return null;
     const id = duplicateObject(context.document, source.id, false);
     const copy = context.document.objects.get(id)!;
-    const scaleVariation =
+    const scaleVariation = this.placementScale * (
       this.mode === 'scatter'
         ? 1 + (seededRandom(this.strokeSeed++) * 2 - 1) * this.randomScale
-        : 1;
+        : 1
+    );
     const baseOffset = Number(source.metadata.terrainBaseOffset) || meshBaseOffset(context, source);
     copy.name = `${source.name.replace(/ Brush$/, '')} ${placedCount(context) + 1}`;
     copy.visible = true;
@@ -270,6 +361,10 @@ export class TerrainObjectTool implements Tool {
       ),
       terrainHeightOffset: String(this.heightOffset),
       terrainAlignToSlope: this.alignToSlope && this.placementMode === 'terrain' ? 'true' : 'false',
+      terrainCollisionRadius: String(Math.max(0.1, this.spacing * 0.5) * scaleVariation),
+      ...(stackedOnId
+        ? { terrainStacked: 'true', terrainStackedOnId: stackedOnId }
+        : {}),
     };
     copy.transform.position = {
       x: position.x,
@@ -280,15 +375,18 @@ export class TerrainObjectTool implements Tool {
         this.heightOffset,
       z: position.z,
     };
-    copy.transform.rotation.y = this.randomYaw
-      ? seededRandom(this.strokeSeed++) * Math.PI * 2
-      : source.transform.rotation.y;
+    copy.transform.rotation.y =
+      this.placementYaw +
+      (this.mode === 'scatter' && this.randomYaw
+        ? seededRandom(this.strokeSeed++) * Math.PI * 2
+        : source.transform.rotation.y);
     copy.transform.scale = {
       x: source.transform.scale.x * scaleVariation,
       y: source.transform.scale.y * scaleVariation,
       z: source.transform.scale.z * scaleVariation,
     };
-    if (this.alignToSlope && this.placementMode === 'terrain' && this.terrainObjectId) {
+    if (stackedOnId) recordStackOffset(context, copy, stackedOnId);
+    if (this.alignToSlope && this.placementMode === 'terrain' && !stackedOnId && this.terrainObjectId) {
       const target = terrainTarget(context, this.terrainObjectId);
       if (target) {
         const local = inverseTransformPointApprox(copy.transform.position, target.object.transform);
@@ -308,12 +406,103 @@ export class TerrainObjectTool implements Tool {
     }
     return copy;
   }
+
+  private placeModelInstance(
+    position: Vec3,
+    context: ModellingContext,
+    stackedOnId: string | null,
+  ): SceneObject {
+    const modelDocumentId = this.sourceModelDocumentId!;
+    const modelName = this.sourceModelName.trim() || 'Model';
+    const copy = createSceneObject(modelName, null, [], { kind: 'instance' });
+    copy.kind = 'instance';
+    copy.instanceSourceModelId = modelDocumentId;
+    copy.name = `${modelName} ${placedCount(context) + 1}`;
+    const scaleVariation = this.placementScale * (
+      this.mode === 'scatter'
+        ? 1 + (seededRandom(this.strokeSeed++) * 2 - 1) * this.randomScale
+        : 1
+    );
+    copy.metadata = {
+      terrainPlaced: 'true',
+      terrainOwnerId: this.terrainObjectId!,
+      terrainSourceModelId: modelDocumentId,
+      terrainBaseOffset: String(this.sourceModelBaseOffset),
+      terrainGroundClearance: String(
+        this.placementMode === 'terrain' ? this.groundClearance : 0,
+      ),
+      terrainHeightOffset: String(this.heightOffset),
+      terrainAlignToSlope: this.alignToSlope && this.placementMode === 'terrain' ? 'true' : 'false',
+      terrainCollisionRadius: String(this.sourceModelRadius * scaleVariation),
+      ...(stackedOnId
+        ? { terrainStacked: 'true', terrainStackedOnId: stackedOnId }
+        : {}),
+    };
+    copy.transform.position = {
+      x: position.x,
+      y:
+        position.y +
+        this.sourceModelBaseOffset * scaleVariation +
+        (this.placementMode === 'terrain' ? this.groundClearance : 0) +
+        this.heightOffset,
+      z: position.z,
+    };
+    copy.transform.rotation.y =
+      this.placementYaw +
+      (this.mode === 'scatter' && this.randomYaw
+        ? seededRandom(this.strokeSeed++) * Math.PI * 2
+        : 0);
+    copy.transform.scale = {
+      x: scaleVariation,
+      y: scaleVariation,
+      z: scaleVariation,
+    };
+    if (stackedOnId) recordStackOffset(context, copy, stackedOnId);
+    if (this.alignToSlope && this.placementMode === 'terrain' && !stackedOnId && this.terrainObjectId) {
+      const target = terrainTarget(context, this.terrainObjectId);
+      if (target) {
+        const local = inverseTransformPointApprox(copy.transform.position, target.object.transform);
+        const localNormal = terrainNormalAtLocalPoint(
+          target.object,
+          target.mesh,
+          local.x,
+          local.z,
+        );
+        const yaw = copy.transform.rotation.y;
+        copy.transform.rotation = {
+          x: Math.atan2(localNormal.z, localNormal.y),
+          y: yaw,
+          z: -Math.atan2(localNormal.x, localNormal.y),
+        };
+      }
+    }
+    addObjectToDocument(context.document, copy);
+    return copy;
+  }
 }
 
 function terrainTarget(context: ModellingContext, id: ObjectId) {
   const object = context.document.objects.get(id);
   const mesh = object?.meshId ? context.document.meshes.get(object.meshId) : null;
   return object?.metadata.terrain === 'true' && mesh ? { object, mesh } : null;
+}
+
+function recordStackOffset(
+  context: ModellingContext,
+  placed: SceneObject,
+  stackedOnId: string,
+): void {
+  const base = context.document.objects.get(stackedOnId);
+  if (!base) return;
+  placed.metadata.terrainStackOffsetX = String(
+    placed.transform.position.x - base.transform.position.x,
+  );
+  placed.metadata.terrainStackOffsetY = String(
+    placed.transform.position.y - base.transform.position.y,
+  );
+  placed.metadata.terrainStackOffsetZ = String(
+    placed.transform.position.z - base.transform.position.z,
+  );
 }
 
 function restoreObject(context: ModellingContext, object: SceneObject): void {

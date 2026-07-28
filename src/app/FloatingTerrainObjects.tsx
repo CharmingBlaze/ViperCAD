@@ -1,6 +1,5 @@
 import {
   useEffect,
-  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -8,15 +7,10 @@ import {
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { activeTerrain } from '@/core/terrain/Terrain';
 import {
-  buildTerrainPresetMesh,
   groundObjectToTerrain,
-  projectTerrainPropSources,
-  repairTerrainPresetSources,
   snapshotPlacedTransforms,
   restorePlacedTransforms,
-  TERRAIN_PROP_PRESETS,
   terrainPlacedObjects,
-  type TerrainPropPreset,
 } from '@/core/terrain/TerrainProps';
 import {
   TerrainObjectTool,
@@ -25,33 +19,49 @@ import {
 } from '@/core/tools/TerrainObjectTool';
 import { faceVertexIds } from '@/core/mesh/EditableMesh';
 import type { EditableMesh } from '@/core/mesh/types';
-import type { WorkspaceController } from '@/workspace/WorkspaceController';
 import {
-  MODEL_IMPORT_FILES,
-  openNativeFile,
-} from '@/app/platform/FileDialogs';
-import { importTerrainLibraryFile } from '@/core/terrain/TerrainObjectLibrary';
+  listPlaceableModelIds,
+  makeModelInstanceUnique,
+  modelDocumentBaseOffset,
+  modelDocumentPlacementRadius,
+} from '@/core/editor/ModelInstances';
+import { getViperDocument } from '@/core/document/ViperProject';
+import { writeModelDrag } from '@/app/outliner/modelDrag';
 
 type Props = {
   session: EditorSession;
-  workspace: WorkspaceController;
   onClose: () => void;
+  onOpenOutliner: () => void;
   onRefresh: () => void;
 };
 
 type DragState = { pointerId: number; offsetX: number; offsetY: number };
+type ScatterLayer = {
+  name: string;
+  modelDocumentId: string;
+  density: number;
+  radius: number;
+  spacing: number;
+  randomScale: number;
+  randomYaw: boolean;
+  seed: number;
+  collisionPadding: number;
+  maskEnabled: boolean;
+  minimumHeight: number;
+  maximumHeight: number;
+  maximumSlopeDegrees: number;
+};
 
 export function FloatingTerrainObjects({
   session,
-  workspace,
   onClose,
+  onOpenOutliner,
   onRefresh,
 }: Props) {
   const [minimized, setMinimized] = useState(false);
   const [position, setPosition] = useState({ x: 18, y: 94 });
   const [objectSearch, setObjectSearch] = useState('');
-  const [importing, setImporting] = useState(false);
-  const [importNote, setImportNote] = useState<string | null>(null);
+  const [layerName, setLayerName] = useState('Scatter layer');
   const drag = useRef<DragState | null>(null);
   const panel = useRef<HTMLElement>(null);
   const objectTool = session.tools.get('terrain-object') as TerrainObjectTool;
@@ -69,29 +79,34 @@ export function FloatingTerrainObjects({
     const mesh = object?.meshId ? session.document.meshes.get(object.meshId) : null;
     return object && mesh ? { object, mesh } : null;
   })();
-  const projectSources = projectTerrainPropSources(session.document);
-  const visibleProjectSources = projectSources.filter((object) =>
-    object.name.toLocaleLowerCase().includes(objectSearch.trim().toLocaleLowerCase()),
+  const outlinerModels = listPlaceableModelIds(session.project).map((documentId) =>
+    getViperDocument(session.project, documentId),
+  );
+  const modelDocumentKey = session.project.modelDocumentIds.join('|');
+  const visibleOutlinerModels = outlinerModels.filter((document) =>
+    document.name.toLocaleLowerCase().includes(objectSearch.trim().toLocaleLowerCase()),
   );
   const placedObjects = terrainPlacedObjects(session.document, terrain?.object.id);
-  const presetMeshes = useMemo(
-    () => new Map(TERRAIN_PROP_PRESETS.map((preset) => [
-      preset.id,
-      buildTerrainPresetMesh(preset.id),
-    ])),
-    [],
+  const linkedPlaced = placedObjects.filter((object) => object.kind === 'instance');
+  const missingLinked = linkedPlaced.filter(
+    (object) =>
+      !object.instanceSourceModelId ||
+      !session.project.documents.has(object.instanceSourceModelId),
   );
-  const selectedBrushLabel = objectTool.usePreset
-    ? TERRAIN_PROP_PRESETS.find((preset) => preset.id === objectTool.preset)?.label ?? 'Tree'
-    : objectTool.sourceObjectId
-      ? session.document.objects.get(objectTool.sourceObjectId)?.name ?? 'Project object'
-      : 'Choose an object';
+  const scatterLayers = readScatterLayers(terrain?.object.metadata.terrainScatterLayers);
+  const selectedBrushLabel = objectTool.sourceModelDocumentId
+    ? session.project.documents.get(objectTool.sourceModelDocumentId)?.name ?? 'Choose a model'
+    : 'Choose a model';
 
   useEffect(() => {
-    if (!repairTerrainPresetSources(session.document)) return;
-    session.requestRedraw();
-    onRefresh();
-  }, [session, session.document.id, onRefresh]);
+    if (
+      objectTool.sourceModelDocumentId &&
+      !session.project.documents.has(objectTool.sourceModelDocumentId)
+    ) {
+      objectTool.clearSource(session.context());
+      onRefresh();
+    }
+  }, [modelDocumentKey, objectTool, onRefresh, session]);
 
   useEffect(() => {
     const move = (event: PointerEvent) => {
@@ -126,18 +141,17 @@ export function FloatingTerrainObjects({
     onRefresh();
   };
 
-  const choosePreset = (preset: TerrainPropPreset) => {
+  const chooseOutlinerModel = (documentId: string) => {
     if (!terrain) return;
+    const model = getViperDocument(session.project, documentId);
     objectTool.setTerrain(terrain.object.id, session.context());
-    objectTool.setPreset(preset, session.context());
-    if (objectTool.mode === 'erase') objectTool.setMode('place', session.context());
-    prepareObjectTool(objectTool.mode);
-  };
-
-  const chooseProjectObject = (objectId: string) => {
-    if (!terrain) return;
-    objectTool.setTerrain(terrain.object.id, session.context());
-    objectTool.setSourceObject(objectId, session.context());
+    objectTool.setSourceModel(
+      documentId,
+      model.name,
+      modelDocumentBaseOffset(session.project, documentId),
+      modelDocumentPlacementRadius(session.project, documentId),
+      session.context(),
+    );
     if (objectTool.mode === 'erase') objectTool.setMode('place', session.context());
     prepareObjectTool(objectTool.mode);
   };
@@ -150,26 +164,47 @@ export function FloatingTerrainObjects({
     onRefresh();
   };
 
-  const importObject = async () => {
-    setImporting(true);
-    setImportNote(null);
-    try {
-      const selected = await openNativeFile({ types: MODEL_IMPORT_FILES });
-      if (!selected) return;
-      const objects = await importTerrainLibraryFile(session.document, selected.file);
-      const first = objects[0];
-      if (first) chooseProjectObject(first.id);
-      setObjectSearch('');
-      setImportNote(
-        `${objects.length} object${objects.length === 1 ? '' : 's'} added from ${selected.file.name}`,
-      );
-      session.requestRedraw();
-      onRefresh();
-    } catch (error) {
-      setImportNote(error instanceof Error ? error.message : 'Could not import this model');
-    } finally {
-      setImporting(false);
-    }
+  const saveScatterLayer = () => {
+    if (!terrain || !objectTool.sourceModelDocumentId) return;
+    const layer: ScatterLayer = {
+      name: layerName.trim() || `Scatter layer ${scatterLayers.length + 1}`,
+      modelDocumentId: objectTool.sourceModelDocumentId,
+      density: objectTool.density,
+      radius: objectTool.radius,
+      spacing: objectTool.spacing,
+      randomScale: objectTool.randomScale,
+      randomYaw: objectTool.randomYaw,
+      seed: objectTool.scatterSeed,
+      collisionPadding: objectTool.collisionPadding,
+      maskEnabled: objectTool.maskEnabled,
+      minimumHeight: objectTool.minimumHeight,
+      maximumHeight: objectTool.maximumHeight,
+      maximumSlopeDegrees: objectTool.maximumSlopeDegrees,
+    };
+    const next = [...scatterLayers.filter((item) => item.name !== layer.name), layer];
+    terrain.object.metadata.terrainScatterLayers = JSON.stringify(next);
+    session.document.dirty = true;
+    onRefresh();
+  };
+
+  const loadScatterLayer = (index: number) => {
+    const layer = scatterLayers[index];
+    if (!layer || !session.project.documents.has(layer.modelDocumentId)) return;
+    chooseOutlinerModel(layer.modelDocumentId);
+    objectTool.density = layer.density;
+    objectTool.radius = layer.radius;
+    objectTool.spacing = layer.spacing;
+    objectTool.randomScale = layer.randomScale;
+    objectTool.randomYaw = layer.randomYaw;
+    objectTool.scatterSeed = layer.seed;
+    objectTool.collisionPadding = layer.collisionPadding;
+    objectTool.maskEnabled = layer.maskEnabled;
+    objectTool.minimumHeight = layer.minimumHeight;
+    objectTool.maximumHeight = layer.maximumHeight;
+    objectTool.maximumSlopeDegrees = layer.maximumSlopeDegrees;
+    objectTool.setMode('scatter', session.context());
+    setLayerName(layer.name);
+    onRefresh();
   };
 
   return (
@@ -273,6 +308,21 @@ export function FloatingTerrainObjects({
                         <option value="base">Terrain base plane</option>
                       </select>
                     </label>
+                    {objectTool.mode === 'place' ? (
+                      <label className="uv-check terrain-stack-models">
+                        <input
+                          type="checkbox"
+                          checked={objectTool.stackModels}
+                          onChange={(event) => {
+                            objectTool.stackModels = event.target.checked;
+                            objectTool.revision += 1;
+                            session.requestRedraw();
+                            onRefresh();
+                          }}
+                        />
+                        Stack on placed models
+                      </label>
+                    ) : null}
                     <label className="uv-field">
                       <span>Height offset</span>
                       <input
@@ -287,9 +337,44 @@ export function FloatingTerrainObjects({
                         }}
                       />
                     </label>
+                    <label className="uv-field">
+                      <span>Rotation · {Math.round(objectTool.placementYaw * 180 / Math.PI)}°</span>
+                      <input
+                        className="uv-range"
+                        type="range"
+                        min={-180}
+                        max={180}
+                        step={5}
+                        value={objectTool.placementYaw * 180 / Math.PI}
+                        onChange={(event) => {
+                          objectTool.placementYaw = Number(event.target.value) * Math.PI / 180;
+                          objectTool.revision += 1;
+                          session.requestRedraw();
+                          onRefresh();
+                        }}
+                      />
+                    </label>
+                    <label className="uv-field">
+                      <span>Scale · {objectTool.placementScale.toFixed(2)}</span>
+                      <input
+                        className="uv-range"
+                        type="range"
+                        min={0.1}
+                        max={4}
+                        step={0.05}
+                        value={objectTool.placementScale}
+                        onChange={(event) => {
+                          objectTool.placementScale = Number(event.target.value);
+                          objectTool.revision += 1;
+                          session.requestRedraw();
+                          onRefresh();
+                        }}
+                      />
+                    </label>
                     <p className="uv-hint">
-                      Terrain surface follows mountains and valleys with automatic contact clearance.
-                      Offset raises or sinks objects further.
+                      {objectTool.stackModels && objectTool.mode === 'place'
+                        ? 'Hover a placed model to put the next model on top. Empty terrain still places normally.'
+                        : 'Terrain surface follows mountains and valleys with automatic contact clearance. Offset raises or sinks objects further.'}
                     </p>
                   </div>
                 )}
@@ -299,80 +384,56 @@ export function FloatingTerrainObjects({
                     className="uv-text"
                     type="search"
                     value={objectSearch}
-                    placeholder="Search project objects"
+                    placeholder="Search Outliner models"
                     onChange={(event) => setObjectSearch(event.target.value)}
                   />
                 </label>
 
-                <span className="uv-field-label">Starter objects</span>
-                <div className="terrain-object-library">
-                  {TERRAIN_PROP_PRESETS.map((preset) => (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      className={`terrain-object-card${objectTool.usePreset && objectTool.preset === preset.id ? ' is-selected' : ''}`}
-                      onClick={() => choosePreset(preset.id)}
-                      title={preset.description}
-                    >
-                      <MeshPreview mesh={presetMeshes.get(preset.id)!} />
-                      <span>{preset.label}</span>
-                    </button>
-                  ))}
-                </div>
-
                 <div className="terrain-project-library-heading">
-                  <span className="uv-field-label">Your model objects</span>
-                  <div className="terrain-library-actions">
-                    <button
-                      type="button"
-                      className="tool terrain-model-link"
-                      disabled={importing}
-                      onClick={() => void importObject()}
-                    >
-                      {importing ? 'Importing…' : 'Import…'}
-                    </button>
-                    <button
-                      type="button"
-                      className="tool terrain-model-link"
-                      onClick={() => {
-                        session.tools.setActive('select', session.context());
-                        workspace.setShellMode('model');
-                        onRefresh();
-                      }}
-                    >
-                      Model new
-                    </button>
-                  </div>
+                  <span className="uv-field-label">Outliner models</span>
+                  <button
+                    type="button"
+                    className="tool terrain-model-link"
+                    onClick={onOpenOutliner}
+                  >
+                    Open Outliner
+                  </button>
                 </div>
                 <p className="uv-hint terrain-import-hint">
-                  Add OBJ, glTF, or GLB models directly to this library.
+                  The same reusable models shown in the Outliner.
                 </p>
-                {importNote && <p className="uv-meta terrain-import-note">{importNote}</p>}
-                {visibleProjectSources.length ? (
+                {visibleOutlinerModels.length ? (
                   <div className="terrain-object-library">
-                    {visibleProjectSources.map((object) => {
-                      const mesh = object.meshId
-                        ? session.document.meshes.get(object.meshId)
+                    {visibleOutlinerModels.map((model) => {
+                      const previewObject = [...model.objects.values()].find(
+                        (object) => object.visible && object.meshId,
+                      );
+                      const mesh = previewObject?.meshId
+                        ? session.project.meshes.get(previewObject.meshId)
                         : null;
                       return (
                         <button
-                          key={object.id}
+                          key={model.id}
                           type="button"
-                          className={`terrain-object-card${!objectTool.usePreset && objectTool.sourceObjectId === object.id ? ' is-selected' : ''}`}
-                          onClick={() => chooseProjectObject(object.id)}
-                          title={`Use ${object.name} as a level brush`}
+                          className={`terrain-object-card${objectTool.sourceModelDocumentId === model.id ? ' is-selected' : ''}`}
+                          draggable
+                          onDragStart={(event) =>
+                            writeModelDrag(event.dataTransfer, model.id, model.name)
+                          }
+                          onClick={() => chooseOutlinerModel(model.id)}
+                          title={`Select ${model.name} or drag it onto the terrain`}
                         >
                           {mesh && <MeshPreview mesh={mesh} />}
-                          <span>{object.name}</span>
+                          <span>{model.name}</span>
                         </button>
                       );
                     })}
                   </div>
-                ) : projectSources.length ? (
-                  <p className="uv-hint">No project objects match “{objectSearch}”.</p>
+                ) : outlinerModels.length ? (
+                  <p className="uv-hint">No Outliner models match “{objectSearch}”.</p>
                 ) : (
                   <p className="uv-hint">
-                    Build or import an object in Model, then it appears here automatically.
+                    Create a reusable Model in the Outliner, then it appears here automatically.
                   </p>
                 )}
 
@@ -467,9 +528,128 @@ export function FloatingTerrainObjects({
                           />
                           Align to slope
                         </label>
+                        <label className="uv-field">
+                          <span>Scatter seed</span>
+                          <input
+                            className="uv-text"
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={objectTool.scatterSeed}
+                            onChange={(event) => {
+                              objectTool.scatterSeed = Math.max(1, Math.round(Number(event.target.value) || 1));
+                              objectTool.revision += 1;
+                              onRefresh();
+                            }}
+                          />
+                        </label>
                       </>
                     )}
                   </>
+                )}
+
+                {objectTool.mode !== 'erase' && (
+                  <div className="terrain-placement-settings">
+                    <div className="simple-texture-card-heading">
+                      <strong>PLACEMENT MASK</strong>
+                      <span>Height, slope, and overlap rules</span>
+                    </div>
+                    <label className="uv-check">
+                      <input
+                        type="checkbox"
+                        checked={objectTool.collisionAvoidance}
+                        onChange={(event) => {
+                          objectTool.collisionAvoidance = event.target.checked;
+                          objectTool.revision += 1;
+                          onRefresh();
+                        }}
+                      />
+                      Avoid overlaps
+                    </label>
+                    <label className="uv-field">
+                      <span>Collision padding · {objectTool.collisionPadding.toFixed(2)}</span>
+                      <input
+                        className="uv-range"
+                        type="range"
+                        min={0}
+                        max={4}
+                        step={0.05}
+                        value={objectTool.collisionPadding}
+                        onChange={(event) => {
+                          objectTool.collisionPadding = Number(event.target.value);
+                          objectTool.revision += 1;
+                          onRefresh();
+                        }}
+                      />
+                    </label>
+                    <label className="uv-check">
+                      <input
+                        type="checkbox"
+                        checked={objectTool.maskEnabled}
+                        onChange={(event) => {
+                          objectTool.maskEnabled = event.target.checked;
+                          objectTool.revision += 1;
+                          onRefresh();
+                        }}
+                      />
+                      Restrict by terrain
+                    </label>
+                    {objectTool.maskEnabled && (
+                      <>
+                        <div className="uv-btn-grid uv-btn-grid-2">
+                          <label className="uv-field">
+                            <span>Minimum height</span>
+                            <input className="uv-text" type="number" value={objectTool.minimumHeight} onChange={(event) => { objectTool.minimumHeight = Number(event.target.value); objectTool.revision += 1; onRefresh(); }} />
+                          </label>
+                          <label className="uv-field">
+                            <span>Maximum height</span>
+                            <input className="uv-text" type="number" value={objectTool.maximumHeight} onChange={(event) => { objectTool.maximumHeight = Number(event.target.value); objectTool.revision += 1; onRefresh(); }} />
+                          </label>
+                        </div>
+                        <label className="uv-field">
+                          <span>Maximum slope · {Math.round(objectTool.maximumSlopeDegrees)}°</span>
+                          <input className="uv-range" type="range" min={0} max={90} step={1} value={objectTool.maximumSlopeDegrees} onChange={(event) => { objectTool.maximumSlopeDegrees = Number(event.target.value); objectTool.revision += 1; onRefresh(); }} />
+                        </label>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {objectTool.mode === 'scatter' && (
+                  <div className="terrain-placement-settings">
+                    <div className="simple-texture-card-heading">
+                      <strong>SCATTER LAYERS</strong>
+                      <span>Reusable editable settings</span>
+                    </div>
+                    {scatterLayers.length > 0 && (
+                      <select
+                        className="uv-select"
+                        defaultValue=""
+                        onChange={(event) => loadScatterLayer(Number(event.target.value))}
+                      >
+                        <option value="" disabled>Load layer…</option>
+                        {scatterLayers.map((layer, index) => (
+                          <option key={`${layer.name}-${index}`} value={index}>{layer.name}</option>
+                        ))}
+                      </select>
+                    )}
+                    <div className="uv-btn-grid uv-btn-grid-2">
+                      <input
+                        className="uv-text"
+                        value={layerName}
+                        onChange={(event) => setLayerName(event.target.value)}
+                        aria-label="Scatter layer name"
+                      />
+                      <button
+                        type="button"
+                        className="tool"
+                        disabled={!objectTool.sourceModelDocumentId}
+                        onClick={saveScatterLayer}
+                      >
+                        Save layer
+                      </button>
+                    </div>
+                  </div>
                 )}
                 <div className="uv-btn-grid uv-btn-grid-2">
                   <button
@@ -529,6 +709,43 @@ export function FloatingTerrainObjects({
                     Re-ground selection
                   </button>
                 </div>
+                {linkedPlaced.length > 0 && (
+                  <div className="terrain-placement-settings">
+                    <div className="simple-texture-card-heading">
+                      <strong>LINKED MODELS</strong>
+                      <span>
+                        {linkedPlaced.length} linked
+                        {missingLinked.length ? ` · ${missingLinked.length} missing source` : ' · sources healthy'}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={
+                        ![...session.selection.state.selectedObjectIds].some((id) =>
+                          linkedPlaced.some((object) => object.id === id),
+                        )
+                      }
+                      onClick={() => {
+                        const selected = [...session.selection.state.selectedObjectIds];
+                        const madeUnique = selected
+                          .filter((id) => linkedPlaced.some((object) => object.id === id))
+                          .map((id) => makeModelInstanceUnique(session, id))
+                          .filter((id): id is string => !!id);
+                        if (madeUnique.length) {
+                          session.selection.selectObjects(madeUnique, 'replace');
+                          session.requestRedraw();
+                          onRefresh();
+                        }
+                      }}
+                    >
+                      Make selection unique
+                    </button>
+                    <p className="uv-hint">
+                      Linked copies follow edits to their Outliner model. Make unique to edit one copy on its own.
+                    </p>
+                  </div>
+                )}
                 <p className="uv-hint">
                   Place with a click, paint groups with Scatter, or erase with a red brush.
                   Select / edit makes every item a normal Viper object.
@@ -599,4 +816,21 @@ function MeshPreview({ mesh }: { mesh: EditableMesh }) {
       ))}
     </svg>
   );
+}
+
+function readScatterLayers(raw: string | undefined): ScatterLayer[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as ScatterLayer[];
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (layer) =>
+            !!layer &&
+            typeof layer.name === 'string' &&
+            typeof layer.modelDocumentId === 'string',
+        )
+      : [];
+  } catch {
+    return [];
+  }
 }

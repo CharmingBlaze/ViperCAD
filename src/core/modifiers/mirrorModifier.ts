@@ -12,8 +12,6 @@ import { weldVerticesByDistance } from '@/core/mesh/ops/basic';
 import type { EditableMesh, FaceId, VertexId } from '@/core/mesh/types';
 import type { MirrorModifierSpec } from '@/core/modifiers/types';
 
-const AXIS_INDEX = { x: 0, y: 1, z: 2 } as const;
-
 function axisCoord(position: Vec3, axis: MirrorModifierSpec['axis']): number {
   return axis === 'x' ? position.x : axis === 'y' ? position.y : position.z;
 }
@@ -133,7 +131,7 @@ export function applyMirrorModifier(
     const cache = mirror ? mirroredCache : originalCache;
     const vertexIds = loop.map((vertexId) => {
       const position = source.vertices.get(vertexId)!.position;
-      const next = mirror ? mirrorPosition(position) : position;
+      const next = mirror ? mirrorPosition(position, modifier.axis) : position;
       return getOrCreateVertex(target, cache, next, merge);
     });
     const winding = mirror ? [...vertexIds].reverse() : vertexIds;

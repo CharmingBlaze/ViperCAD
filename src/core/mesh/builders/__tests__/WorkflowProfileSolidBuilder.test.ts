@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { v3 } from '@/core/math/Vec3';
 import { validateMeshFull } from '@/core/mesh/Validation';
 import {
-  buildLimbBlockoutChain,
-  buildOutlineBlockout,
+  buildBlockoutFlow,
+  buildBlockoutVolume,
 } from '@/core/mesh/builders/WorkflowBlockoutBuilder';
 import {
-  buildWorkflowLimbBlockout,
-  buildWorkflowProfileSolid,
+  buildWorkflowFlow,
+  buildWorkflowVolume,
 } from '@/core/mesh/builders/WorkflowProfileSolidBuilder';
 
 describe('Workflow blockout builders', () => {
@@ -18,7 +18,7 @@ describe('Workflow blockout builders', () => {
       v3(1, 1, 0),
       v3(0, 1, 0),
     ];
-    const mesh = buildOutlineBlockout({
+    const mesh = buildBlockoutVolume({
       points: outline,
       depth: 0.24,
       depthSegments: 3,
@@ -26,7 +26,7 @@ describe('Workflow blockout builders', () => {
       exactOutline: true,
       name: 'Body Blockout',
     });
-    expect(mesh.vertices.size).toBe(outline.length * 4);
+    expect(mesh.vertices.size).toBe(outline.length * 4 + 2);
     expect(mesh.faces.size).toBeGreaterThanOrEqual(outline.length * 3 + 2);
     expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
   });
@@ -38,7 +38,7 @@ describe('Workflow blockout builders', () => {
       v3(0.5, 1, 0),
       v3(-0.5, 1, 0),
     ];
-    const wide = buildOutlineBlockout({
+    const wide = buildBlockoutVolume({
       points: outline,
       depth: 0.2,
       exactOutline: true,
@@ -57,32 +57,32 @@ describe('Workflow blockout builders', () => {
       const t = (index / 40) * Math.PI * 2;
       return v3(Math.cos(t) * 0.5, Math.sin(t) * 0.7, 0);
     });
-    const mesh = buildOutlineBlockout({
+    const mesh = buildBlockoutVolume({
       points: noisy,
       depth: 0.2,
       maxCorners: 12,
       exactOutline: false,
       name: 'Simplified',
     });
-    expect(mesh.vertices.size).toBeLessThanOrEqual(12 * 5);
+    expect(mesh.vertices.size).toBeLessThanOrEqual(12 * 5 + 2);
     expect(mesh.vertices.size).toBeGreaterThanOrEqual(12 * 2);
     expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
   });
 
-  it('builds open limb paths with rings only at joints', () => {
+  it('builds open flow paths with rings only at control sections', () => {
     const path = [v3(0, 0, 0), v3(1, 0.2, 0), v3(2, 0, 0)];
-    const mesh = buildLimbBlockoutChain({
+    const mesh = buildBlockoutFlow({
       points: path,
       radius: 0.1,
       sides: 4,
-      name: 'Limb Blockout',
+      name: 'Blockout Flow',
     });
     expect(mesh.vertices.size).toBe(12);
     expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
   });
 
-  it('uses exact pen corners for profile blockout', () => {
-    const headProfile = [
+  it('uses exact placed corners for a volume blockout', () => {
+    const silhouette = [
       v3(0, 0, 0),
       v3(0.2, 0.6, 0),
       v3(0.5, 0.85, 0),
@@ -92,30 +92,66 @@ describe('Workflow blockout builders', () => {
       v3(0.6, -0.25, 0),
       v3(0.2, -0.15, 0),
     ];
-    const mesh = buildWorkflowProfileSolid({
-      points: headProfile,
+    const mesh = buildWorkflowVolume({
+      points: silhouette,
       radius: 0.12,
       maxOutlineCorners: 20,
       outlineSegments: 16,
       cyclic: true,
       exactOutline: true,
-      name: 'Head Blockout',
+      name: 'Exact Volume',
     });
-    expect(mesh.vertices.size).toBe(headProfile.length * 4);
+    expect(mesh.vertices.size).toBe(silhouette.length * 4 + 2);
     expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
   });
 
-  it('builds one limb segment per pen click', () => {
+  it('builds one flow segment per placed point', () => {
     const path = [v3(0, 0, 0), v3(0, 0.5, 0), v3(0.2, 1, 0), v3(0.5, 1.4, 0)];
-    const mesh = buildWorkflowLimbBlockout({
+    const mesh = buildWorkflowFlow({
       points: path,
       radius: 0.08,
       segmentCount: 2,
       exactEdges: true,
       sides: 4,
-      name: 'Arm Blockout',
+      name: 'Organic Flow',
     });
     expect(mesh.vertices.size).toBe(path.length * 4);
     expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+  });
+
+  it('supports a fuller middle cross-section and twist without changing clean topology', () => {
+    const path = [v3(0, 0, 0), v3(1, 0, 0), v3(2, 0, 0)];
+    const plain = buildBlockoutFlow({
+      points: path,
+      radius: 0.2,
+      sides: 4,
+      profileWidth: 1.6,
+      profileHeight: 0.6,
+      name: 'Plain Flow',
+    });
+    const shaped = buildBlockoutFlow({
+      points: path,
+      radius: 0.2,
+      sides: 4,
+      profileWidth: 1.6,
+      profileHeight: 0.6,
+      startScale: 0.5,
+      midScale: 1.5,
+      endScale: 0.75,
+      twistDegrees: 90,
+      name: 'Shaped Flow',
+    });
+
+    const middle = [...shaped.vertices.values()].slice(4, 8);
+    const middleRadius = Math.max(
+      ...middle.map((vertex) =>
+        Math.hypot(vertex.position.y, vertex.position.z),
+      ),
+    );
+    expect(middleRadius).toBeGreaterThan(0.3);
+    expect(
+      [...shaped.vertices.values()].map((vertex) => vertex.position),
+    ).not.toEqual([...plain.vertices.values()].map((vertex) => vertex.position));
+    expect(validateMeshFull(shaped).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
   });
 });

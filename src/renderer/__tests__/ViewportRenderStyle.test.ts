@@ -17,7 +17,7 @@ describe('ViewportRenderStyle', () => {
     const built = buildBox({ width: 1, height: 1, depth: 1, name: 'Box' });
     commitMeshObject(doc, built, { name: 'Box' });
     const mesh = doc.meshes.get(built.id)!;
-    const material = createMaterial(doc, 'Mat');
+    const material = createMaterial(doc, { name: 'Mat' });
     material.flatShaded = false;
     const handle = createObjectRenderHandle('obj', mesh, [material], {
       textures: doc.textures,
@@ -25,10 +25,10 @@ describe('ViewportRenderStyle', () => {
     });
 
     applyViewportRenderStyle(handle, 'wireframe');
-    expect(handle.materials[0]?.wireframe).toBe(true);
+    expect((handle.materials[0] as { wireframe?: boolean })?.wireframe).toBe(true);
 
     applyViewportRenderStyle(handle, 'game');
-    expect(handle.materials[0]?.wireframe).toBe(false);
+    expect((handle.materials[0] as { wireframe?: boolean })?.wireframe).toBe(false);
     expect((handle.materials[0] as { flatShading?: boolean }).flatShading).toBe(true);
 
     applyViewportRenderStyle(handle, 'material');

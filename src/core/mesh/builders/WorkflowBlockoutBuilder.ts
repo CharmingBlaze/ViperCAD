@@ -21,7 +21,7 @@ import {
   toLocalPoint,
 } from '@/core/mesh/builders/SilhouetteExtrudeBuilder';
 
-export type OutlineBlockoutOptions = {
+export type VolumeBlockoutOptions = {
   points: Vec3[];
   depth: number;
   /** How many depth slices (1 = front/back only, 2–4 adds mid rings for soft thickness). */
@@ -37,19 +37,28 @@ export type OutlineBlockoutOptions = {
   /** Cap freehand outlines to this many corners. Ignored when exactOutline. */
   maxCorners?: number;
   exactOutline?: boolean;
+  /** Triangle fans avoid export-time n-gon triangulation and keep cap topology explicit. */
+  capTopology?: 'triangle-fan' | 'ngon';
   name?: string;
 };
 
-export type LimbBlockoutOptions = {
+export type FlowBlockoutOptions = {
   points: Vec3[];
   radius: number;
   sides?: number;
   profileWidth?: number;
   profileHeight?: number;
   startScale?: number;
+  midScale?: number;
   endScale?: number;
+  twistDegrees?: number;
   name?: string;
 };
+
+/** @deprecated Use VolumeBlockoutOptions. */
+export type OutlineBlockoutOptions = VolumeBlockoutOptions;
+/** @deprecated Use FlowBlockoutOptions. */
+export type LimbBlockoutOptions = FlowBlockoutOptions;
 
 type Point2 = { u: number; v: number };
 
@@ -60,7 +69,7 @@ type Point2 = { u: number; v: number };
  * rings; outer faces shrink slightly toward the centroid so thickness reads
  * a little round — without remaking the shape as stacked width tubes.
  */
-export function buildOutlineBlockout(options: OutlineBlockoutOptions): EditableMesh {
+export function buildBlockoutVolume(options: VolumeBlockoutOptions): EditableMesh {
   const depth = Math.max(1e-4, options.depth);
   const half = depth * 0.5;
   const depthSegments = Math.max(1, Math.min(6, options.depthSegments ?? 3));
@@ -133,11 +142,31 @@ export function buildOutlineBlockout(options: OutlineBlockoutOptions): EditableM
   const back = rings[rings.length - 1]!;
   const n = boundary.length;
 
-  builder.ngon([...front], front.map((_, index) => planarUv(boundary[index]!)));
-  builder.ngon(
-    [...back].reverse(),
-    back.map((_, index) => planarUv(boundary[n - 1 - index]!)),
-  );
+  if (options.capTopology === 'ngon') {
+    builder.ngon([...front], front.map((_, index) => planarUv(boundary[index]!)));
+    builder.ngon(
+      [...back].reverse(),
+      back.map((_, index) => planarUv(boundary[n - 1 - index]!)),
+    );
+  } else {
+    const frontCentre = builder.vertex(fromLocal(centroid.u, centroid.v, plane, -half));
+    const backCentre = builder.vertex(fromLocal(centroid.u, centroid.v, plane, half));
+    for (let index = 0; index < n; index++) {
+      const nextIndex = (index + 1) % n;
+      builder.tri(
+        frontCentre,
+        front[index]!,
+        front[nextIndex]!,
+        [v2(0.5, 0.5), planarUv(boundary[index]!), planarUv(boundary[nextIndex]!)],
+      );
+      builder.tri(
+        backCentre,
+        back[nextIndex]!,
+        back[index]!,
+        [v2(0.5, 0.5), planarUv(boundary[nextIndex]!), planarUv(boundary[index]!)],
+      );
+    }
+  }
 
   for (let layer = 0; layer < rings.length - 1; layer++) {
     const current = rings[layer]!;
@@ -160,7 +189,10 @@ export function buildOutlineBlockout(options: OutlineBlockoutOptions): EditableM
   return finishMesh(ensureOutward(builder.build()));
 }
 
-/** @deprecated Use buildOutlineBlockout */
+/** @deprecated Use buildBlockoutVolume. */
+export const buildOutlineBlockout = buildBlockoutVolume;
+
+/** @deprecated Use buildBlockoutVolume. */
 export function buildBodyBlockoutFromSilhouette(options: {
   points: Vec3[];
   depth: number;
@@ -168,7 +200,7 @@ export function buildBodyBlockoutFromSilhouette(options: {
   sides?: number;
   name?: string;
 }): EditableMesh {
-  return buildOutlineBlockout({
+  return buildBlockoutVolume({
     points: options.points,
     depth: options.depth,
     depthSegments: 3,
@@ -180,15 +212,18 @@ export function buildBodyBlockoutFromSilhouette(options: {
 }
 
 /**
- * Open limb path → continuous faceted box with rings only at drawn joints.
+ * Open gesture path → continuous faceted form with rings at editable sections.
  */
-export function buildLimbBlockoutChain(options: LimbBlockoutOptions): EditableMesh {
+export function buildBlockoutFlow(options: FlowBlockoutOptions): EditableMesh {
   const radius = Math.max(1e-4, options.radius);
   const sides = Math.max(4, Math.min(8, options.sides ?? 6));
   const profileWidth = Math.max(0.05, Math.min(4, options.profileWidth ?? 0.9));
   const profileHeight = Math.max(0.05, Math.min(4, options.profileHeight ?? 0.9));
   const startScale = Math.max(0.05, Math.min(4, options.startScale ?? 1));
+  const midScale = Math.max(0.05, Math.min(4, options.midScale ?? 1));
   const endScale = Math.max(0.05, Math.min(4, options.endScale ?? 1));
+  const twistRadians =
+    Math.max(-2160, Math.min(2160, options.twistDegrees ?? 0)) * Math.PI / 180;
   let path = dedupePath(options.points.map((point) => ({ ...point })));
   if (path.length < 2) {
     path.push(addVec3(path[0] ?? v3(), v3(radius * 2, 0, 0)));
@@ -196,17 +231,22 @@ export function buildLimbBlockoutChain(options: LimbBlockoutOptions): EditableMe
 
   const profile = squareProfile(sides);
   const frames = buildPathFrames(path);
-  const builder = new MeshBuilder(options.name ?? 'Limb Blockout', false);
+  const builder = new MeshBuilder(options.name ?? 'Blockout Flow', false);
   const rings: VertexId[][] = [];
 
   for (let index = 0; index < frames.path.length; index++) {
     const t = index / Math.max(1, frames.path.length - 1);
-    const ringScale = startScale + (endScale - startScale) * t;
+    const ringScale = profileScaleAt(t, startScale, midScale, endScale);
+    const twist = twistRadians * t;
+    const cosTwist = Math.cos(twist);
+    const sinTwist = Math.sin(twist);
     const ring: VertexId[] = [];
     for (const point of profile) {
+      const profileX = point.x * cosTwist - point.y * sinTwist;
+      const profileY = point.x * sinTwist + point.y * cosTwist;
       const offset = addVec3(
-        scaleVec3(frames.normals[index]!, point.x * radius * profileWidth * ringScale),
-        scaleVec3(frames.binormals[index]!, point.y * radius * profileHeight * ringScale),
+        scaleVec3(frames.normals[index]!, profileX * radius * profileWidth * ringScale),
+        scaleVec3(frames.binormals[index]!, profileY * radius * profileHeight * ringScale),
       );
       ring.push(builder.vertex(addVec3(frames.path[index]!, offset)));
     }
@@ -234,6 +274,28 @@ export function buildLimbBlockoutChain(options: LimbBlockoutOptions): EditableMe
   builder.ngon([...rings[rings.length - 1]!]);
 
   return finishMesh(ensureOutward(builder.build()));
+}
+
+/** @deprecated Use buildBlockoutFlow. */
+export const buildLimbBlockoutChain = buildBlockoutFlow;
+
+function profileScaleAt(
+  t: number,
+  startScale: number,
+  midScale: number,
+  endScale: number,
+): number {
+  if (t <= 0.5) {
+    const localT = smoothstep(t * 2);
+    return startScale + (midScale - startScale) * localT;
+  }
+  const localT = smoothstep((t - 0.5) * 2);
+  return midScale + (endScale - midScale) * localT;
+}
+
+function smoothstep(t: number): number {
+  const clamped = Math.max(0, Math.min(1, t));
+  return clamped * clamped * (3 - 2 * clamped);
 }
 
 function squareProfile(sides: number): { x: number; y: number }[] {

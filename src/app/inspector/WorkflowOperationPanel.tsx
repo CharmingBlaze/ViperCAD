@@ -167,7 +167,7 @@ export function WorkflowOperationPanel({
     if (clamped !== operation.radius) update('Resize Blockout', { radius: clamped });
   };
 
-  const isOutline = operation.style === 'profile-solid';
+  const isVolume = operation.style === 'profile-solid';
   const depthSlices = clamp(Math.round(operation.pathCount / 2), 1, 6);
   const roundnessPct = Math.round(operation.blobInflation * 100);
 
@@ -240,12 +240,29 @@ export function WorkflowOperationPanel({
             value={operation.startScale}
             {...scrubHandlers('Change Scale', (startScale) => {
               const scale = clamp(startScale, 0.05, 4);
-              return isOutline ? { startScale: scale } : { startScale: scale };
+              return { startScale: scale };
             })}
           />
         </label>
 
-        {!isOutline && (
+        {!isVolume && (
+          <label className="uv-field">
+            <span>Middle scale · {operation.midScale.toFixed(2)}</span>
+            <input
+              aria-label="Selected middle scale"
+              type="range"
+              min={0.1}
+              max={2.5}
+              step={0.01}
+              value={operation.midScale}
+              {...scrubHandlers('Change Middle Scale', (midScale) => ({
+                midScale: clamp(midScale, 0.05, 4),
+              }))}
+            />
+          </label>
+        )}
+
+        {!isVolume && (
           <label className="uv-field">
             <span>End scale · {operation.endScale.toFixed(2)}</span>
             <input
@@ -281,11 +298,11 @@ export function WorkflowOperationPanel({
         </label>
       </div>
 
-      {isOutline && (
+      {isVolume && (
         <div className="path-settings-panel capsule-settings-panel">
           <div className="simple-texture-card-heading">
-            <strong>OUTLINE</strong>
-            <span>Silhouette solid · soft depth</span>
+            <strong>VOLUME</strong>
+            <span>Silhouette · quad depth loops</span>
           </div>
           <label className="uv-field">
             <span>Roundness · {roundnessPct}%</span>
@@ -332,22 +349,22 @@ export function WorkflowOperationPanel({
         </div>
       )}
 
-      {!isOutline && (
+      {!isVolume && (
         <div className="path-settings-panel capsule-settings-panel">
           <div className="simple-texture-card-heading">
-            <strong>LIMBS</strong>
-            <span>Faceted box through joints</span>
+            <strong>FLOW</strong>
+            <span>Continuous cross-section rings</span>
           </div>
           <label className="uv-field">
             <span>Sections · {operation.pathCount}</span>
             <input
-              aria-label="Selected limb sections"
+              aria-label="Selected flow sections"
               type="range"
               min={2}
               max={12}
               step={1}
               value={operation.pathCount}
-              {...scrubHandlers('Change Limb Sections', (pathCount) => ({
+              {...scrubHandlers('Change Flow Sections', (pathCount) => ({
                 pathCount: clamp(Math.round(pathCount), 2, 12),
               }))}
             />
@@ -355,14 +372,28 @@ export function WorkflowOperationPanel({
           <label className="uv-field">
             <span>Box sides · {Math.max(4, Math.min(8, Math.round(operation.pathRadialSegments / 2)))}</span>
             <input
-              aria-label="Selected limb sides"
+              aria-label="Selected flow sides"
               type="range"
               min={8}
               max={16}
               step={2}
               value={operation.pathRadialSegments}
-              {...scrubHandlers('Change Limb Sides', (pathRadialSegments) => ({
+              {...scrubHandlers('Change Flow Sides', (pathRadialSegments) => ({
                 pathRadialSegments: clamp(Math.round(pathRadialSegments), 3, 24),
+              }))}
+            />
+          </label>
+          <label className="uv-field">
+            <span>Twist · {Math.round(operation.twist)}°</span>
+            <input
+              aria-label="Selected flow twist"
+              type="range"
+              min={-180}
+              max={180}
+              step={5}
+              value={operation.twist}
+              {...scrubHandlers('Change Flow Twist', (twist) => ({
+                twist: clamp(twist, -2160, 2160),
               }))}
             />
           </label>

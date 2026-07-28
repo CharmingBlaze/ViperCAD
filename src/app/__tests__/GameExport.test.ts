@@ -7,9 +7,11 @@ import {
 } from '@/app/GameExportProfiles';
 import { createEmptyDocument, commitMeshObject } from '@/core/document/ModelDocument';
 import { EditorSession } from '@/core/editor/EditorSession';
-import { generateMeshCollider } from '@/core/editor/GameAssetTools';
+import { createRigMarker, generateMeshCollider } from '@/core/editor/GameAssetTools';
 import { resetIdCounter } from '@/core/ids/IdService';
 import { buildBox } from '@/core/mesh/builders';
+import { MeshBuilder } from '@/core/mesh/MeshBuilder';
+import { v3 } from '@/core/math/Vec3';
 import { createTerrain } from '@/core/terrain/Terrain';
 import { ensureTerrainPresetSource } from '@/core/terrain/TerrainProps';
 
@@ -48,6 +50,50 @@ describe('gameReadiness / exportDiagnostics', () => {
     const unreal = exportDiagnostics(session.document, EXPORT_PROFILES.unreal);
     expect(unity.warnings.some((warning) => /lightmap/i.test(warning))).toBe(true);
     expect(unreal.warnings.some((warning) => /lightmap/i.test(warning))).toBe(true);
+  });
+
+  it('reports n-gons, missing primary UVs, and absent colliders', () => {
+    const session = new EditorSession();
+    const builder = new MeshBuilder('Five sided');
+    const vertices = [
+      builder.vertex(v3(-1, 0, 0)),
+      builder.vertex(v3(-0.3, 1, 0)),
+      builder.vertex(v3(0.8, 0.7, 0)),
+      builder.vertex(v3(1, -0.4, 0)),
+      builder.vertex(v3(-0.4, -0.8, 0)),
+    ];
+    builder.ngon(vertices);
+    const mesh = builder.build();
+    mesh.defaultUvLayerId = null;
+    commitMeshObject(session.document, mesh, { name: 'Five sided' });
+
+    const stats = gameReadiness(session.document);
+    expect(stats.ngons).toBe(1);
+    expect(stats.missingUvMeshes).toBe(1);
+    expect(stats.missingColliderMeshes).toBe(1);
+    const diagnostics = exportDiagnostics(session.document, EXPORT_PROFILES.godot);
+    expect(diagnostics.warnings.some((warning) => /n-gon/i.test(warning))).toBe(true);
+    expect(diagnostics.warnings.some((warning) => /collision/i.test(warning))).toBe(true);
+  });
+
+  it('reports LOD and rig preparation health', () => {
+    const document = createEmptyDocument();
+    const source = commitMeshObject(document, buildBox({ width: 1, height: 2, depth: 1 }));
+    const object = document.objects.get(source.objectId)!;
+    object.metadata.lodLevel = '1';
+    object.metadata.lodScreenSize = '0.35';
+    createRigMarker(document, object.id, 'joint');
+
+    const ready = gameReadiness(document);
+    expect(ready.lodObjects).toBe(1);
+    expect(ready.invalidLodObjects).toBe(0);
+    expect(ready.rigMarkers).toBe(1);
+    expect(ready.orphanRigMarkers).toBe(0);
+
+    object.metadata.lodScreenSize = 'not-a-number';
+    expect(exportDiagnostics(document, EXPORT_PROFILES.godot).warnings.some(
+      (warning) => /LOD object/i.test(warning),
+    )).toBe(true);
   });
 });
 

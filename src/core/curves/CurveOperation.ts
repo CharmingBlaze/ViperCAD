@@ -33,7 +33,10 @@ import {
 } from '@/core/mesh/builders/PathOutputBuilder';
 import type { CurveSweepCapStyle } from '@/core/mesh/builders/CurveSweepBuilder';
 import { finalizeCurveMeshUvs } from '@/core/mesh/builders/CurveMeshUv';
-import { buildWorkflowProfileSolid, buildWorkflowLimbBlockout } from '@/core/mesh/builders/WorkflowProfileSolidBuilder';
+import {
+  buildWorkflowFlow,
+  buildWorkflowVolume,
+} from '@/core/mesh/builders/WorkflowProfileSolidBuilder';
 import { isWorkflowOperation, isWorkflowStyle } from '@/core/curves/workflowCurve';
 
 export { isWorkflowOperation, isWorkflowStyle } from '@/core/curves/workflowCurve';
@@ -69,6 +72,8 @@ export type CurveOperation = {
   cyclic: boolean;
   inputMode: CurveInputMode;
   startScale: number;
+  /** Cross-section scale at the middle of a blockout flow. */
+  midScale: number;
   endScale: number;
   twist: number;
   profileWidth: number;
@@ -124,6 +129,7 @@ export function curveOperationFromStroke(options: {
   cyclic: boolean;
   inputMode?: CurveInputMode;
   startScale?: number;
+  midScale?: number;
   endScale?: number;
   twist?: number;
   profileWidth?: number;
@@ -187,6 +193,7 @@ export function curveOperationFromStroke(options: {
         : options.cyclic,
     inputMode: options.inputMode ?? 'sketch',
     startScale: clampScale(options.startScale ?? 1),
+    midScale: clampScale(options.midScale ?? 1),
     endScale: clampScale(options.endScale ?? 1),
     twist: clampTwist(options.twist ?? (options.style === 'rope' ? 360 : 0)),
     profileWidth: clampProfileScale(options.profileWidth ?? 1),
@@ -331,7 +338,7 @@ export function evaluateCurveOperation(
         });
   } else if (operation.style === 'profile-solid' && isWorkflowOperation(operation)) {
     const maxOutlineCorners = Math.max(8, Math.min(48, operation.pathRadialSegments * 2));
-    mesh = buildWorkflowProfileSolid({
+    mesh = buildWorkflowVolume({
       points,
       radius,
       maxOutlineCorners,
@@ -343,10 +350,10 @@ export function evaluateCurveOperation(
       uniformScale: operation.startScale,
       roundness: Math.max(0, Math.min(0.45, operation.blobInflation * 0.45)),
       depthSegments: Math.max(1, Math.min(6, Math.round(operation.pathCount / 2))),
-      name: operation.cyclic ? 'Outline' : 'Outline Path',
+      name: operation.cyclic ? 'Volume' : 'Volume Path',
     });
   } else if (operation.style === 'segmented-sweep' && isWorkflowOperation(operation)) {
-    mesh = buildWorkflowLimbBlockout({
+    mesh = buildWorkflowFlow({
       points,
       radius,
       segmentCount: Math.max(2, Math.min(16, operation.pathCount)),
@@ -355,8 +362,10 @@ export function evaluateCurveOperation(
       profileWidth: operation.profileWidth,
       profileHeight: operation.profileHeight,
       startScale: operation.startScale,
+      midScale: operation.midScale,
       endScale: operation.endScale,
-      name: 'Limb',
+      twistDegrees: operation.twist,
+      name: 'Flow',
     });
   } else if (isSweepStyle(operation.style)) {
     const common = {
@@ -522,6 +531,7 @@ export function readCurveOperation(raw: string | undefined): CurveOperation | nu
           : parsed.cyclic === true,
       inputMode: parsed.inputMode === 'pen' ? 'pen' : 'sketch',
       startScale: clampScale(parsed.startScale ?? 1),
+      midScale: clampScale(parsed.midScale ?? 1),
       endScale: clampScale(parsed.endScale ?? 1),
       twist: clampTwist(parsed.twist ?? (parsed.style === 'rope' ? 360 : 0)),
       profileWidth: clampProfileScale(parsed.profileWidth ?? 1),
@@ -590,8 +600,8 @@ export function curveOperationLabel(operation: CurveOperation): string {
     return label[operation.pathOutput];
   }
   if (operation.style === 'capsule') return 'Capsule Path';
-  if (operation.style === 'profile-solid') return 'Outline';
-  if (operation.style === 'segmented-sweep') return 'Limb';
+  if (operation.style === 'profile-solid') return 'Volume';
+  if (operation.style === 'segmented-sweep') return 'Flow';
   if (operation.style === 'ribbon') return 'Ribbon Sweep';
   if (operation.style === 'hair') return 'Hair Path';
   if (operation.style === 'hair-strip') return 'Low-poly Hair Strip';
@@ -824,32 +834,6 @@ function isPathOutput(value: unknown): value is PathOutput {
 
 function isCapStyle(value: unknown): value is CurveSweepCapStyle {
   return value === 'flat' || value === 'round' || value === 'pointed' || value === 'open';
-}
-
-/** Workflow-only: complete open tube ends for freehand profile strokes. */
-function effectiveWorkflowCaps(
-  operation: CurveOperation,
-  cyclic: boolean,
-): { start: CurveSweepCapStyle; end: CurveSweepCapStyle } {
-  let start = operation.pathStartCap;
-  let end = operation.pathEndCap;
-  const freehandTube =
-    !cyclic &&
-    operation.smooth &&
-    operation.inputMode === 'sketch' &&
-    (operation.style === 'profile-solid');
-  if (freehandTube) {
-    if (start === 'open') start = 'round';
-    if (end === 'open') end = 'round';
-  }
-  return { start, end };
-}
-
-function workflowPathSpacingScale(operation: CurveOperation): number {
-  if (operation.smooth && operation.inputMode === 'sketch') {
-    return operation.resolution === 'medium' ? 0.42 : 0.5;
-  }
-  return operation.resolution === 'medium' ? 0.65 : 0.85;
 }
 
 function isWorkflowKind(value: unknown): value is WorkflowKind {

@@ -45,6 +45,8 @@ import {
 import type { LatheAxis } from '@/core/mesh/builders/LatheBuilder';
 export { smoothCurvePoints as smoothDoodlePoints } from '@/core/curves/CurveOperation';
 import type { ModellingContext, Tool, ToolPointerInput } from './Tool';
+import { writeObjectModifierStack } from '@/core/modifiers/serialize';
+import { createDefaultMirrorModifier } from '@/core/modifiers/types';
 
 export type DoodleDrawStage = 'idle' | 'drawing';
 export type DoodlePolyPreset = 'low' | 'medium';
@@ -88,6 +90,7 @@ export class CreateDoodleTool implements Tool {
   latheCaps = true;
   pathOutput: PathOutput = 'tube';
   startScale = 1;
+  midScale = 1;
   endScale = 1;
   twist = 0;
   profileWidth = 1;
@@ -117,7 +120,7 @@ export class CreateDoodleTool implements Tool {
   pathSourceMesh: EditableMesh | null = null;
   autoConnect = true;
   smoothDrawing = true;
-  /** Blockout → Poly mode: click-corner silhouette solids. */
+  /** Blockout Patch mode: click-corner silhouette solids. */
   blockoutPolyMode = false;
   simpleTextureSettings: SimpleTextureSettings = defaultSimpleTextureSettings();
   /** Curves vs Workflows — workflow-only styles and mesh rules stay isolated. */
@@ -197,6 +200,7 @@ export class CreateDoodleTool implements Tool {
         this.profileWidth = 1;
         this.profileHeight = 1;
         this.startScale = 1;
+        this.midScale = 1;
         this.endScale = 1;
       }
       if (style === 'segmented-sweep') {
@@ -300,6 +304,7 @@ export class CreateDoodleTool implements Tool {
     settings: Partial<{
       output: PathOutput;
       startScale: number;
+      midScale: number;
       endScale: number;
       twist: number;
       profileWidth: number;
@@ -332,6 +337,7 @@ export class CreateDoodleTool implements Tool {
   ): void {
     if (settings.output) this.pathOutput = settings.output;
     if (settings.startScale != null) this.startScale = clamp(settings.startScale, 0.02, 4);
+    if (settings.midScale != null) this.midScale = clamp(settings.midScale, 0.02, 4);
     if (settings.endScale != null) this.endScale = clamp(settings.endScale, 0.02, 4);
     if (settings.twist != null) this.twist = clamp(settings.twist, -2160, 2160);
     if (settings.profileWidth != null) this.profileWidth = clamp(settings.profileWidth, 0.05, 4);
@@ -401,7 +407,7 @@ export class CreateDoodleTool implements Tool {
         this.state.closed = true;
         this.state.previewPoint = null;
         this.state.revision += 1;
-        // Blockout Sketch: clicking the start point finishes the closed outline.
+        // Blockout Points: clicking the start point finishes the closed volume.
         if (this.createContext === 'workflows' && this.style === 'profile-solid') {
           this.confirm(context);
           return;
@@ -589,6 +595,18 @@ export class CreateDoodleTool implements Tool {
     const object = context.document.objects.get(objectId)!;
     object.transform.position = localized.position;
     object.metadata.curveOperation = serializeCurveOperation(operation);
+    if (this.createContext === 'workflows') {
+      const axes = (['x', 'y', 'z'] as const).filter(
+        (axis) => context.document.settings.symmetry[axis],
+      );
+      if (axes.length) {
+        writeObjectModifierStack(object, {
+          version: 1,
+          modifiers: axes.map((axis) => createDefaultMirrorModifier(axis)),
+        });
+        object.metadata.blockoutCreationSymmetry = axes.join(',');
+      }
+    }
     applySimpleTextureToObject(context.document, object, this.simpleTextureSettings);
     const meshRef = context.document.meshes.get(meshId)!;
     context.selection.setMode('object');
@@ -1040,8 +1058,8 @@ export class CreateDoodleTool implements Tool {
     if (this.style === 'sharp') return 'Sharp Curve';
     if (this.style === 'tube') return 'Tube Sweep';
     if (this.style === 'capsule') return 'Capsule Path';
-    if (this.style === 'profile-solid') return this.blockoutPolyMode ? 'Poly' : 'Outline';
-    if (this.style === 'segmented-sweep') return 'Limb';
+    if (this.style === 'profile-solid') return this.blockoutPolyMode ? 'Patch' : 'Volume';
+    if (this.style === 'segmented-sweep') return 'Flow';
     if (this.style === 'ribbon') return 'Ribbon Sweep';
     if (this.style === 'hair') return 'Hair Path';
     if (this.style === 'hair-strip') return 'Hair Strip';
@@ -1061,6 +1079,7 @@ export class CreateDoodleTool implements Tool {
     return {
       pathOutput: this.pathOutput,
       startScale: this.startScale,
+      midScale: this.midScale,
       endScale: this.endScale,
       twist: this.twist,
       profileWidth: this.profileWidth,

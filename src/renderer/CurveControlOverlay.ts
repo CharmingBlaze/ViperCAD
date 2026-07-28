@@ -16,7 +16,7 @@ import {
 import type { ObjectRenderHandle } from '@/renderer/MeshRenderAdapter';
 
 export type CurveControlTarget = {
-  kind: 'anchor' | 'handle-in' | 'handle-out';
+  kind: 'anchor' | 'handle-in' | 'handle-out' | 'scale-start' | 'scale-mid' | 'scale-end';
   index: number;
 };
 
@@ -36,6 +36,7 @@ export class CurveControlOverlay {
   private anchors = makePoints(0xff8f24, 11);
   private anchorHighlight = makePoints(0xfff1d0, 14);
   private tangentPoints = makePoints(0xffd58a, 8);
+  private crossSectionPoints = makePoints(0x61f0b5, 12);
   private operation: CurveOperation | null = null;
 
   constructor() {
@@ -48,6 +49,7 @@ export class CurveControlOverlay {
       this.anchors,
       this.anchorHighlight,
       this.tangentPoints,
+      this.crossSectionPoints,
     );
     this.root.visible = false;
   }
@@ -138,6 +140,31 @@ export class CurveControlOverlay {
       this.handles.visible = false;
       this.tangentPoints.visible = false;
     }
+    const showCrossSections =
+      editNodes &&
+      operation.style === 'segmented-sweep' &&
+      operation.points.length >= 2;
+    if (showCrossSections) {
+      const indices = [
+        0,
+        Math.floor((operation.points.length - 1) / 2),
+        operation.points.length - 1,
+      ];
+      const scales = [operation.startScale, operation.midScale, operation.endScale];
+      setPoints(
+        this.crossSectionPoints.geometry,
+        indices.map((index, scaleIndex) => ({
+          x:
+            operation.points[index]!.x +
+            operation.radius * operation.profileWidth * scales[scaleIndex]!,
+          y: operation.points[index]!.y,
+          z: operation.points[index]!.z,
+        })),
+      );
+      this.crossSectionPoints.visible = true;
+    } else {
+      this.crossSectionPoints.visible = false;
+    }
   }
 
   private hide(): void {
@@ -159,6 +186,16 @@ export class CurveControlOverlay {
       this.operation.curveType === 'bezier' && this.tangentPoints.visible
         ? raycaster.intersectObject(this.tangentPoints, false)[0]
         : undefined;
+    const scaleHit = this.crossSectionPoints.visible
+      ? raycaster.intersectObject(this.crossSectionPoints, false)[0]
+      : undefined;
+    if (scaleHit && (!anchorHit || scaleHit.distance < anchorHit.distance)) {
+      const index = scaleHit.index ?? 0;
+      return {
+        kind: index === 0 ? 'scale-start' : index === 1 ? 'scale-mid' : 'scale-end',
+        index,
+      };
+    }
     const bestAnchor =
       anchorHit && highlightHit
         ? anchorHit.distance <= highlightHit.distance
@@ -184,6 +221,7 @@ export class CurveControlOverlay {
       this.anchors,
       this.anchorHighlight,
       this.tangentPoints,
+      this.crossSectionPoints,
     ]) {
       object.geometry.dispose();
       disposeMaterial(object);

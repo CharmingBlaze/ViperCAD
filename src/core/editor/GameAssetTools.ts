@@ -43,6 +43,33 @@ export function hasLightmapUv(mesh: EditableMesh): boolean {
   return [...mesh.uvLayers.values()].some((layer) => layer.name === LIGHTMAP_UV_NAME);
 }
 
+/** Add a generic transform marker that engines can interpret as a joint or socket. */
+export function createRigMarker(
+  document: ModelDocument,
+  parentObjectId: ObjectId,
+  role: 'joint' | 'socket',
+  name?: string,
+): ObjectId {
+  const parent = document.objects.get(parentObjectId);
+  if (!parent) throw new Error('Select an object before adding a rig marker');
+  const existing = [...document.objects.values()].filter(
+    (object) => object.metadata.gameRole === role,
+  ).length;
+  const marker = createSceneObject(
+    name?.trim() || `${role === 'joint' ? 'Joint' : 'Socket'} ${existing + 1}`,
+    null,
+    [],
+    { kind: 'empty' },
+  );
+  marker.parentId = parent.id;
+  marker.metadata.gameRole = role;
+  marker.metadata.rigParent = parent.id;
+  marker.metadata.exportTransform = 'true';
+  addObjectToDocument(document, marker);
+  document.dirty = true;
+  return marker.id;
+}
+
 /** Create a lightweight box collider aligned to the selected object's local bounds. */
 export function generateBoxCollider(document: ModelDocument, sourceObjectId: ObjectId): ObjectId {
   const source = document.objects.get(sourceObjectId);

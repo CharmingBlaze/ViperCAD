@@ -91,8 +91,6 @@ export class DrawPolyTool implements Tool {
   /** Mesh snapshot before the current chain — restored on Esc / used for single undo. */
   private meshBeforeChain: EditableMesh | null = null;
   private selectionBeforeChain: SelectionState | null = null;
-  private lastClickMs = 0;
-
   activate(context: ModellingContext): void {
     this.abortChain(context, false);
     // Start from currently selected verts so old geometry can finish a new face.
@@ -231,10 +229,6 @@ export class DrawPolyTool implements Tool {
 
   begin(input: ToolPointerInput, context: ModellingContext): void {
     if (input.button !== 'left') return;
-
-    const now =
-      typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
-    this.lastClickMs = now;
 
     // Do not treat rapid corner clicks as "double-click to close" — that
     // turned squares into triangles when the 4th click landed within 350ms.
@@ -633,7 +627,7 @@ export class DrawPolyTool implements Tool {
 
   private ensureTarget(context: ModellingContext) {
     const locked = this.getTarget(context);
-    if (this.state.meshObjectId && locked) return locked;
+    if (this.state.meshObjectId && locked) return { ...locked, created: false };
     const ensured = ensureDrawMesh(context.document, context.selection);
     if (ensured.created) {
       const object = context.document.objects.get(ensured.objectId)!;
@@ -681,7 +675,7 @@ export class DrawPolyTool implements Tool {
     this.state.meshObjectId = ensured.objectId;
     const object = context.document.objects.get(ensured.objectId);
     if (!object) return null;
-    return { mesh: ensured.mesh, object, objectId: ensured.objectId };
+    return { mesh: ensured.mesh, object, objectId: ensured.objectId, created: ensured.created };
   }
 
   private getTarget(context: ModellingContext) {

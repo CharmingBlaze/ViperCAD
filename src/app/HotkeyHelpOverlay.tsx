@@ -1,12 +1,15 @@
-type Props = {
+type HotkeyHelpOverlayProps = {
   open: boolean;
   onClose: () => void;
 };
 
-const MODEL_KEYS = [
+const MODEL_KEYS: ReadonlyArray<readonly [string, string]> = [
   ['G / R / S', 'Move / Rotate / Scale'],
   ['Ctrl', 'Temporarily toggle vertex, edge, surface, increment, and angle snapping'],
   ['. / ,', 'Cycle orientation / pivot'],
+  ['A', 'Select / Deselect all (current mode)'],
+  ['Alt+A', 'Deselect all'],
+  ['Ctrl+A', 'Select all'],
   ['E', 'Extrude selection'],
   ['P', 'Push/Pull · click face · move · click finish'],
   ['I', 'Inset faces'],
@@ -26,9 +29,9 @@ const MODEL_KEYS = [
   ['Tab', 'Maximize viewport under cursor'],
   ['MMB / RMB', 'Pan / Orbit'],
   ['?', 'Toggle this help'],
-] as const;
+];
 
-const UV_KEYS = [
+const UV_KEYS: ReadonlyArray<readonly [string, string]> = [
   ['Face / Point / Island', 'UV selection modes'],
   ['G / S / R', 'Move / Scale / Rotate UVs'],
   ['Ctrl+drag', 'Box select'],
@@ -37,9 +40,9 @@ const UV_KEYS = [
   ['B / E / I / F', 'Pixel brush tools (paint mode)'],
   ['Ctrl+Z / Ctrl+Y', 'Undo / Redo'],
   ['?', 'Toggle this help'],
-] as const;
+];
 
-export function HotkeyHelpOverlay({ open, onClose }: Props) {
+export function HotkeyHelpOverlay({ open, onClose }: HotkeyHelpOverlayProps) {
   if (!open) return null;
   return (
     <div className="app-modal-backdrop" role="presentation" onClick={onClose}>
@@ -60,7 +63,7 @@ export function HotkeyHelpOverlay({ open, onClose }: Props) {
             <h3>Model</h3>
             <dl className="hotkey-list">
               {MODEL_KEYS.map(([key, label]) => (
-                <div key={key}>
+                <div key={`${key}-${label}`}>
                   <dt>{key}</dt>
                   <dd>{label}</dd>
                 </div>
@@ -71,7 +74,7 @@ export function HotkeyHelpOverlay({ open, onClose }: Props) {
             <h3>UV / Pixel</h3>
             <dl className="hotkey-list">
               {UV_KEYS.map(([key, label]) => (
-                <div key={key}>
+                <div key={`${key}-${label}`}>
                   <dt>{key}</dt>
                   <dd>{label}</dd>
                 </div>

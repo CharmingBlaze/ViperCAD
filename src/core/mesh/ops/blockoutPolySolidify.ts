@@ -5,7 +5,7 @@ import {
   mergeTopologyChange,
   removeFace,
 } from '@/core/mesh/EditableMesh';
-import { buildOutlineBlockout } from '@/core/mesh/builders/WorkflowBlockoutBuilder';
+import { buildBlockoutVolume } from '@/core/mesh/builders/WorkflowBlockoutBuilder';
 import {
   emptyTopologyChangeResult,
   type EditableMesh,
@@ -70,7 +70,7 @@ export function solidifyBlockoutPolyFace(
     mergeTopologyChange(change, removeFace(mesh, faceId));
     removeOrphanVertices(mesh, loop, change);
 
-    const solid = buildOutlineBlockout({
+    const solid = buildBlockoutVolume({
       points,
       depth: thickness,
       depthSegments,

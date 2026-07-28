@@ -1,7 +1,7 @@
 import type { EditableMesh } from '@/core/mesh/types';
 import {
-  buildLimbBlockoutChain,
-  buildOutlineBlockout,
+  buildBlockoutFlow,
+  buildBlockoutVolume,
 } from '@/core/mesh/builders/WorkflowBlockoutBuilder';
 import { resampleStrokePoints } from '@/core/mesh/builders/StrokeTubeBuilder';
 import { addVec3, lengthSqVec3, lengthVec3, subVec3, v3, type Vec3 } from '@/core/math/Vec3';
@@ -22,11 +22,9 @@ export type WorkflowProfileSolidOptions = {
 };
 
 /**
- * Blockout Outline:
- * - Closed outline → exact silhouette solid with soft depth + live scales
- * - Open path → faceted box chain at joints
+ * Closed silhouette → editable volume with predictable depth loops.
  */
-export function buildWorkflowProfileSolid(options: WorkflowProfileSolidOptions): EditableMesh {
+export function buildWorkflowVolume(options: WorkflowProfileSolidOptions): EditableMesh {
   const depth = Math.max(1e-4, options.radius * 2);
   const path = prepareExactPath(options.points, options.cyclic);
 
@@ -35,7 +33,7 @@ export function buildWorkflowProfileSolid(options: WorkflowProfileSolidOptions):
       1,
       Math.min(6, options.depthSegments ?? (options.outlineSegments >= 20 ? 4 : 3)),
     );
-    return buildOutlineBlockout({
+    return buildBlockoutVolume({
       points: path,
       depth,
       depthSegments,
@@ -50,7 +48,7 @@ export function buildWorkflowProfileSolid(options: WorkflowProfileSolidOptions):
   }
 
   const sides = Math.max(4, Math.min(8, Math.round(options.maxOutlineCorners / 3)));
-  return buildLimbBlockoutChain({
+  return buildBlockoutFlow({
     points: path,
     radius: options.radius,
     sides,
@@ -58,8 +56,11 @@ export function buildWorkflowProfileSolid(options: WorkflowProfileSolidOptions):
   });
 }
 
-/** Open workflow path → one faceted box chain (pen joints or resampled sections). */
-export function buildWorkflowLimbBlockout(options: {
+/** @deprecated Use buildWorkflowVolume. */
+export const buildWorkflowProfileSolid = buildWorkflowVolume;
+
+/** Open workflow path → one continuous quad-ring flow. */
+export function buildWorkflowFlow(options: {
   points: Vec3[];
   radius: number;
   segmentCount: number;
@@ -68,7 +69,9 @@ export function buildWorkflowLimbBlockout(options: {
   profileWidth?: number;
   profileHeight?: number;
   startScale?: number;
+  midScale?: number;
   endScale?: number;
+  twistDegrees?: number;
   name: string;
 }): EditableMesh {
   const sides = Math.max(4, Math.min(8, options.sides ?? 6));
@@ -86,17 +89,22 @@ export function buildWorkflowLimbBlockout(options: {
     path = resampleStrokePoints(path, Math.max(1e-4, spacing));
   }
 
-  return buildLimbBlockoutChain({
+  return buildBlockoutFlow({
     points: path,
     radius: options.radius,
     sides,
     profileWidth: options.profileWidth,
     profileHeight: options.profileHeight,
     startScale: options.startScale,
+    midScale: options.midScale,
     endScale: options.endScale,
+    twistDegrees: options.twistDegrees,
     name: options.name,
   });
 }
+
+/** @deprecated Use buildWorkflowFlow. */
+export const buildWorkflowLimbBlockout = buildWorkflowFlow;
 
 function pathLength(points: Vec3[]): number {
   let total = 0;

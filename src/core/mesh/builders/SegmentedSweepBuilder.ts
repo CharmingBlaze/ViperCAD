@@ -11,7 +11,6 @@ import { faceVertexIds } from '@/core/mesh/EditableMesh';
 import { MeshBuilder } from '@/core/mesh/MeshBuilder';
 import type { EditableMesh, VertexId } from '@/core/mesh/types';
 import {
-  buildCurveCapsule,
   buildStyledCurveCapsule,
   type CurveSweepCapStyle,
 } from '@/core/mesh/builders/CurveSweepBuilder';
@@ -68,7 +67,7 @@ export function buildSegmentedCapsuleSweep(options: SegmentedCapsuleSweepOptions
 function segmentEndpoints(
   samples: Vec3[],
   index: number,
-  segmentCount: number,
+  _segmentCount: number,
   overlap: number,
 ): Vec3[] {
   let start = samples[index]!;

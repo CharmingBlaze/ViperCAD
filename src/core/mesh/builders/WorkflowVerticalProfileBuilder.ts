@@ -60,10 +60,6 @@ export function buildWorkflowVerticalProfile(
 
   const fitR = Math.max(minRadius, bodyFitRadius(polygon, minY, maxY));
   const segments = Math.max(8, Math.min(16, Math.round(radialSegments)));
-  const bodyLen = Math.max(0, height - 2 * fitR);
-  const hemiArc = fitR * (Math.PI * 0.5);
-  const totalArc = bodyLen + 2 * hemiArc;
-
   const ringCount = Math.max(6, Math.min(12, profileRings));
   const influence = 0.92;
   const span = Math.max(1e-6, height);
@@ -79,8 +75,8 @@ export function buildWorkflowVerticalProfile(
     const halfWidth = Math.max(0, (chord.x1 - chord.x0) * 0.5);
     const centerX = (chord.x0 + chord.x1) * 0.5;
 
-    const idealRadius = influence < 1 && totalArc > 1e-4
-      ? idealCapsuleRadiusAtY(y, minY, maxY, fitR, bodyLen, hemiArc, totalArc)
+    const idealRadius = influence < 1
+      ? idealCapsuleRadiusAtY(y, minY, maxY, fitR)
       : halfWidth;
     const shapedRadius = halfWidth * influence + idealRadius * (1 - influence);
     if (shapedRadius < minRingRadius) continue;
@@ -239,7 +235,10 @@ function sampleProfileHeights(minY: number, maxY: number, ringCount: number): nu
 
 function simplifySilhouette(boundary: SilhouettePoint[], maxPoints: number): SilhouettePoint[] {
   if (boundary.length <= maxPoints) return boundary;
-  return capBoundaryPoints(boundary, maxPoints);
+  return capBoundaryPoints(
+    boundary.map((point) => ({ u: point.x, v: point.y })),
+    maxPoints,
+  ).map((point) => ({ x: point.u, y: point.v }));
 }
 
 function bodyFitRadius(polygon: SilhouettePoint[], minY: number, maxY: number): number {
@@ -263,9 +262,6 @@ function idealCapsuleRadiusAtY(
   minY: number,
   maxY: number,
   fitR: number,
-  bodyLen: number,
-  hemiArc: number,
-  totalArc: number,
 ): number {
   const bottomEnd = minY + fitR;
   const topStart = maxY - fitR;

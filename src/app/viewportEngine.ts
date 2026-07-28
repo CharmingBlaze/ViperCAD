@@ -5,8 +5,11 @@ import {
   Color,
   DirectionalLight,
   DoubleSide,
+  Group,
   HemisphereLight,
   MOUSE,
+  Mesh,
+  MeshBasicMaterial,
   LineBasicMaterial,
   LineLoop,
   OrthographicCamera,
@@ -24,8 +27,9 @@ import {
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { enterGroupFocusFromPick, isObjectInFocusScope } from '@/core/editor/GroupFocus';
-import { expandGroupsToDescendants } from '@/core/editor/Hierarchy';
+import { expandGroupsToDescendants, getObjectWorldMatrix } from '@/core/editor/Hierarchy';
 import {
+  editableMeshToRenderData,
   pickLogicalFace,
   type ObjectRenderHandle,
 } from '@/renderer/MeshRenderAdapter';
@@ -72,9 +76,15 @@ import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
 import { raycastSculptTarget } from '@/core/sculpt/MeshSculptTarget';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
+import { terrainPlacedObjects } from '@/core/terrain/TerrainProps';
 import type { ToolPointerInput } from '@/core/tools/Tool';
 import { WORLD_XY_PLANE, WORLD_XZ_PLANE, WORLD_YZ_PLANE, rayPlaneIntersection } from '@/core/snap/SnapEngine';
-import { commitPlaceModelInLevel } from '@/core/editor/ModelInstances';
+import {
+  commitPlaceModelInLevel,
+  modelDocumentBaseOffset,
+  modelDocumentPlacementRadius,
+} from '@/core/editor/ModelInstances';
+import { buildModelDocumentView } from '@/core/document/ViperProject';
 import type { DocumentId } from '@/core/document/types';
 import { inverseTransformPointApprox, cloneTransform } from '@/core/math/Transform';
 import { PrimitivePreviewHandle } from '@/renderer/PrimitivePreviewAdapter';
@@ -176,11 +186,15 @@ export class ViewportEngine {
   private onLayoutChange: (() => void) | null = null;
   private onCameraChange: ((id: ViewId, axes: CameraAxes) => void) | null = null;
   private lastPixelRatio = 0;
+  private renderQualityScale = 1;
   private primitivePreview = new PrimitivePreviewHandle();
   private tileDrawOverlay = new TileDrawOverlay();
   private overlays = new SelectionOverlaySystem();
   private gizmo = new TransformGizmo();
   private terrainBrushPreview = createTerrainBrushPreview();
+  private sculptHardnessPreview = createTerrainBrushPreview();
+  private terrainObjectGhost: Group | null = null;
+  private terrainObjectGhostKey = '';
   private modifierPreview = new ModifierPreviewOverlay();
   private curveControls = new CurveControlOverlay();
   private curvePointDrag: {
@@ -197,7 +211,7 @@ export class ViewportEngine {
   private draftCurvePointDrag: {
     paneId: ViewId;
     pointerId: number;
-    target: CurveControlTarget;
+    target: { kind: 'anchor' | 'handle-in' | 'handle-out'; index: number };
     planeOrigin: Vec3;
     planeNormal: Vec3;
   } | null = null;
@@ -307,6 +321,7 @@ export class ViewportEngine {
     this.curvePointDrag = null;
     this.draftCurvePointDrag = null;
     this.interactionOverlay.detach();
+    this.clearTerrainObjectGhost();
     for (const pane of this.panes.values()) {
       pane.controls?.dispose();
       pane.controls = null;
@@ -345,6 +360,17 @@ export class ViewportEngine {
     this.needsRender = true;
   }
 
+  setRenderQuality(scale: number): void {
+    this.renderQualityScale = Math.max(0.5, Math.min(1.5, scale));
+    if (this.renderer) {
+      const ratio = Math.min((window.devicePixelRatio || 1) * this.renderQualityScale, 2);
+      this.renderer.setPixelRatio(ratio);
+      this.lastPixelRatio = ratio;
+      this.resize();
+      this.invalidate();
+    }
+  }
+
   setModifierPreview(objectId: ObjectId | null, previews: ModifierPreview[]): void {
     this.modifierObjectId = objectId;
     this.modifierSpecs = previews;
@@ -381,7 +407,7 @@ export class ViewportEngine {
     }
 
     // Pixel ratio is for sharpness only. Layout/viewport/scissor stay in CSS pixels.
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(Math.min((window.devicePixelRatio || 1) * this.renderQualityScale, 2));
     renderer.toneMapping = ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.05;
     renderer.outputColorSpace = SRGBColorSpace;
@@ -479,6 +505,9 @@ export class ViewportEngine {
     scene.add(this.overlays.root);
     scene.add(this.gizmo.root);
     scene.add(this.terrainBrushPreview);
+    scene.add(this.sculptHardnessPreview);
+    (this.sculptHardnessPreview.material as LineBasicMaterial).opacity = 0.48;
+    this.sculptHardnessPreview.name = 'Sculpt Hardness';
     scene.add(this.modifierPreview.root);
     this.renderer = renderer;
     return true;
@@ -1060,6 +1089,9 @@ export class ViewportEngine {
       !(tool instanceof TerrainFeatureTool)
     ) {
       this.terrainBrushPreview.visible = false;
+    }
+    if (!(tool instanceof MeshSculptTool)) {
+      this.sculptHardnessPreview.visible = false;
     }
     if (id && tool instanceof CreatePrimitiveTool && tool.state.stage !== 'idle') {
       this.pendingPrimitiveMove = { event: e, paneId: id };
@@ -2255,6 +2287,10 @@ export class ViewportEngine {
       shiftKey: e.shiftKey,
       ctrlKey: e.ctrlKey,
       altKey: e.altKey,
+      pressure:
+        e.pointerType === 'pen'
+          ? Math.max(0.05, Math.min(1, e.pressure || 0.5))
+          : 1,
       worldUnitsPerPixel,
     };
   }
@@ -2277,10 +2313,39 @@ export class ViewportEngine {
       new Vector3(input.rayOrigin.x, input.rayOrigin.y, input.rayOrigin.z),
       new Vector3(input.rayDirection.x, input.rayDirection.y, input.rayDirection.z),
     );
+    if (
+      activeTool instanceof TerrainObjectTool &&
+      activeTool.mode === 'place' &&
+      activeTool.stackModels
+    ) {
+      const placedIds = new Set(
+        terrainPlacedObjects(this.session.document, object.id).map((placed) => placed.id),
+      );
+      const stackTargets: Mesh[] = [];
+      const objectIdByMesh = new Map<Mesh, ObjectId>();
+      for (const [handleKey, candidate] of this.handles) {
+        const candidateObjectId = handleKey.split('::')[0] as ObjectId;
+        if (!placedIds.has(candidateObjectId)) continue;
+        const placed = this.session.document.objects.get(candidateObjectId);
+        if (!placed?.visible) continue;
+        stackTargets.push(candidate.mesh);
+        objectIdByMesh.set(candidate.mesh, candidateObjectId);
+      }
+      this.scene?.updateMatrixWorld(true);
+      const stackedHit = raycaster.intersectObjects(stackTargets, false)[0];
+      if (stackedHit) {
+        return {
+          ...input,
+          worldPosition: v3(stackedHit.point.x, stackedHit.point.y, stackedHit.point.z),
+          surfaceObjectId: objectIdByMesh.get(stackedHit.object as Mesh) ?? null,
+        };
+      }
+    }
     const hit = raycaster.intersectObject(handle.mesh, false)[0];
     return {
       ...input,
       worldPosition: hit ? v3(hit.point.x, hit.point.y, hit.point.z) : null,
+      surfaceObjectId: hit ? object.id : null,
     };
   }
 
@@ -2303,6 +2368,7 @@ export class ViewportEngine {
     const hit = tool.previewHit;
     if (!hit) {
       this.terrainBrushPreview.visible = false;
+      this.sculptHardnessPreview.visible = false;
       return;
     }
     this.terrainBrushPreview.visible = true;
@@ -2316,6 +2382,12 @@ export class ViewportEngine {
     const up = new Vector3(0, 1, 0);
     const normal = new Vector3(hit.normal.x, hit.normal.y, hit.normal.z);
     this.terrainBrushPreview.quaternion.setFromUnitVectors(up, normal.normalize());
+    this.sculptHardnessPreview.visible = true;
+    this.sculptHardnessPreview.position.copy(this.terrainBrushPreview.position);
+    this.sculptHardnessPreview.quaternion.copy(this.terrainBrushPreview.quaternion);
+    this.sculptHardnessPreview.scale.setScalar(
+      tool.radius * Math.max(0.04, tool.hardness),
+    );
     const material = this.terrainBrushPreview.material as LineBasicMaterial;
     material.color.setHex(
       tool.mode === 'grab' ? 0x6eb5ff
@@ -2326,6 +2398,7 @@ export class ViewportEngine {
                 : tool.mode === 'noise' ? 0xb18cff
                   : 0xff8c28,
     );
+    (this.sculptHardnessPreview.material as LineBasicMaterial).color.copy(material.color);
   }
 
   private updateTerrainBrushPreview(
@@ -2359,6 +2432,7 @@ export class ViewportEngine {
   ): void {
     if (!input.worldPosition) {
       this.terrainBrushPreview.visible = false;
+      if (this.terrainObjectGhost) this.terrainObjectGhost.visible = false;
       return;
     }
     this.terrainBrushPreview.visible = true;
@@ -2376,6 +2450,115 @@ export class ViewportEngine {
           ? 0x79d26b
           : 0xffa33b,
     );
+    this.syncTerrainObjectGhost(input, tool);
+  }
+
+  private syncTerrainObjectGhost(input: ToolPointerInput, tool: TerrainObjectTool): void {
+    if (
+      !this.scene ||
+      !this.session ||
+      !input.worldPosition ||
+      !tool.sourceModelDocumentId ||
+      tool.mode === 'erase'
+    ) {
+      if (this.terrainObjectGhost) this.terrainObjectGhost.visible = false;
+      return;
+    }
+    const model = this.session.project.documents.get(tool.sourceModelDocumentId);
+    if (!model || model.kind !== 'model') {
+      if (this.terrainObjectGhost) this.terrainObjectGhost.visible = false;
+      return;
+    }
+    const modelView = buildModelDocumentView(this.session.project, model.id);
+    const parts: {
+      objectId: ObjectId;
+      mesh: EditableMesh;
+      matrix: ReturnType<typeof getObjectWorldMatrix>;
+    }[] = [];
+    const walk = (objectId: ObjectId, ancestorsVisible: boolean) => {
+      const object = model.objects.get(objectId);
+      if (!object) return;
+      const visible = ancestorsVisible && object.visible;
+      if (visible && object.meshId) {
+        const mesh = this.session!.project.meshes.get(object.meshId);
+        if (mesh) {
+          parts.push({
+            objectId,
+            mesh,
+            matrix: getObjectWorldMatrix(modelView, objectId),
+          });
+        }
+      }
+      for (const childId of object.childIds) walk(childId, visible);
+    };
+    const roots = model.rootObjectIds.length
+      ? model.rootObjectIds
+      : [...model.objects.values()].filter((object) => !object.parentId).map((object) => object.id);
+    for (const rootId of roots) walk(rootId, true);
+    if (!parts.length) {
+      if (this.terrainObjectGhost) this.terrainObjectGhost.visible = false;
+      return;
+    }
+    const key = [
+      tool.sourceModelDocumentId,
+      ...parts.map(({ objectId, mesh, matrix }) =>
+        `${objectId}:${mesh.id}:${mesh.topologyVersion}:${mesh.geometryVersion}:${matrix.elements.join(',')}`),
+    ].join('|');
+    if (!this.terrainObjectGhost || this.terrainObjectGhostKey !== key) {
+      this.clearTerrainObjectGhost();
+      const material = new MeshBasicMaterial({
+        color: 0xffa33b,
+        transparent: true,
+        opacity: 0.34,
+        depthWrite: false,
+        wireframe: false,
+        side: DoubleSide,
+      });
+      this.terrainObjectGhost = new Group();
+      this.terrainObjectGhost.name = 'Terrain Model Ghost';
+      this.terrainObjectGhost.renderOrder = 115;
+      this.terrainObjectGhost.userData.nonSelectable = true;
+      for (const part of parts) {
+        const renderData = editableMeshToRenderData(part.mesh);
+        const child = new Mesh(renderData.geometry, material);
+        child.name = `Terrain Model Ghost · ${part.objectId}`;
+        child.matrixAutoUpdate = false;
+        child.matrix.copy(part.matrix);
+        child.renderOrder = 115;
+        child.userData.nonSelectable = true;
+        this.terrainObjectGhost.add(child);
+      }
+      this.scene.add(this.terrainObjectGhost);
+      this.terrainObjectGhostKey = key;
+    }
+    const ghost = this.terrainObjectGhost;
+    ghost.visible = true;
+    ghost.position.set(
+      input.worldPosition.x,
+      input.worldPosition.y +
+        tool.sourceModelBaseOffset * tool.placementScale +
+        tool.groundClearance +
+        tool.heightOffset,
+      input.worldPosition.z,
+    );
+    ghost.rotation.set(0, tool.placementYaw, 0);
+    ghost.scale.setScalar(tool.placementScale);
+  }
+
+  private clearTerrainObjectGhost(): void {
+    if (!this.terrainObjectGhost) return;
+    this.terrainObjectGhost.parent?.remove(this.terrainObjectGhost);
+    const materials = new Set<Material>();
+    this.terrainObjectGhost.traverse((child) => {
+      if (!(child instanceof Mesh)) return;
+      child.geometry.dispose();
+      const material = child.material;
+      if (Array.isArray(material)) material.forEach((item) => materials.add(item));
+      else materials.add(material);
+    });
+    materials.forEach((material) => material.dispose());
+    this.terrainObjectGhost = null;
+    this.terrainObjectGhostKey = '';
   }
 
   private updateTerrainFeatureBrushPreview(
@@ -2827,6 +3010,9 @@ export class ViewportEngine {
     ) {
       this.terrainBrushPreview.visible = false;
     }
+    if (!(terrain instanceof MeshSculptTool) || !terrain.dragging) {
+      this.sculptHardnessPreview.visible = false;
+    }
     if (!this.session || this.interacting) return;
     this.session.selection.clearHover();
     if (this.lastHoverKey !== '') {
@@ -2924,6 +3110,22 @@ export class ViewportEngine {
 
   private onWheel = (e: WheelEvent): void => {
     const tool = this.session?.tools.getActive();
+    if (tool instanceof TerrainObjectTool && this.session && tool.mode === 'place') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        tool.placementScale = Math.max(
+          0.1,
+          Math.min(4, tool.placementScale * (e.deltaY < 0 ? 1.08 : 0.92)),
+        );
+      } else {
+        tool.placementYaw += (e.deltaY < 0 ? 1 : -1) * Math.PI / 12;
+      }
+      tool.revision += 1;
+      this.interactionOverlay.updateTransform(e, tool.statusLine());
+      this.session.requestRedraw();
+      this.invalidate();
+      return;
+    }
     if (tool instanceof LoopCutTool && this.session) {
       e.preventDefault();
       tool.adjustCutCount(e.deltaY < 0 ? 1 : -1, this.session.context());
@@ -2940,7 +3142,14 @@ export class ViewportEngine {
     }
     if (tool instanceof MeshSculptTool && this.session) {
       e.preventDefault();
-      tool.setRadius(tool.radius * (e.deltaY < 0 ? 1.12 : 0.89), this.session.context());
+      if (e.ctrlKey || e.metaKey) {
+        tool.setStrength(
+          tool.strength * (e.deltaY < 0 ? 1.12 : 0.89),
+          this.session.context(),
+        );
+      } else {
+        tool.setRadius(tool.radius * (e.deltaY < 0 ? 1.12 : 0.89), this.session.context());
+      }
       this.interactionOverlay.updateTransform(e, tool.statusLine());
       this.invalidate();
       return;
@@ -3035,6 +3244,11 @@ export class ViewportEngine {
     const tool = this.session.tools.getActive();
     const draft = tool instanceof CreateDoodleTool ? tool.getDraftOperation() : null;
     if (draft && tool instanceof CreateDoodleTool) {
+      if (
+        target.kind === 'scale-start' ||
+        target.kind === 'scale-mid' ||
+        target.kind === 'scale-end'
+      ) return false;
       const point =
         target.kind === 'anchor'
           ? tool.state.points[target.index]
@@ -3047,7 +3261,7 @@ export class ViewportEngine {
       this.draftCurvePointDrag = {
         paneId,
         pointerId: e.pointerId,
-        target,
+        target: { kind: target.kind, index: target.index },
         planeOrigin: { ...point },
         planeNormal: { ...axes.forward },
       };
@@ -3071,7 +3285,9 @@ export class ViewportEngine {
         ? operation.points[target.index]
         : target.kind === 'handle-in'
           ? operation.handlesIn[target.index]
-          : operation.handlesOut[target.index];
+          : target.kind === 'handle-out'
+            ? operation.handlesOut[target.index]
+            : crossSectionHandlePoint(operation, target.kind);
     const axes = this.getCameraAxes(paneId);
     if (!localPoint || !axes) return false;
     const world = handle.group.localToWorld(new Vector3(localPoint.x, localPoint.y, localPoint.z));
@@ -3149,8 +3365,27 @@ export class ViewportEngine {
       );
     } else if (target.kind === 'handle-in') {
       drag.operation.handlesIn[target.index] = next;
-    } else {
+    } else if (target.kind === 'handle-out') {
       drag.operation.handlesOut[target.index] = next;
+    } else {
+      const anchorIndex =
+        target.kind === 'scale-start'
+          ? 0
+          : target.kind === 'scale-mid'
+            ? Math.floor((drag.operation.points.length - 1) / 2)
+            : drag.operation.points.length - 1;
+      const anchor = drag.operation.points[anchorIndex]!;
+      const scale = Math.max(
+        0.05,
+        Math.min(
+          4,
+          Math.hypot(next.x - anchor.x, next.y - anchor.y, next.z - anchor.z) /
+            Math.max(1e-4, drag.operation.radius * drag.operation.profileWidth),
+        ),
+      );
+      if (target.kind === 'scale-start') drag.operation.startScale = scale;
+      else if (target.kind === 'scale-mid') drag.operation.midScale = scale;
+      else drag.operation.endScale = scale;
     }
     const sourceObject = drag.operation.pathSourceObjectId
       ? this.session.document.objects.get(drag.operation.pathSourceObjectId)
@@ -3179,7 +3414,12 @@ export class ViewportEngine {
     if (!object || !afterMesh || !afterMetadata) return;
     let applied = true;
     this.session.history.execute({
-      name: drag.target.kind === 'anchor' ? 'Move Curve Point' : 'Move Bézier Handle',
+      name:
+        drag.target.kind === 'anchor'
+          ? 'Move Curve Point'
+          : drag.target.kind.startsWith('scale-')
+            ? 'Resize Flow Cross-section'
+            : 'Move Bézier Handle',
       execute: () => {
         if (applied) return;
         this.session!.document.meshes.set(afterMesh.id, afterMesh);
@@ -3454,7 +3694,7 @@ export class ViewportEngine {
     const h = Math.max(1, Math.floor(bounds.height));
     if (w < 2 || h < 2) return;
 
-    const nextRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const nextRatio = Math.min((window.devicePixelRatio || 1) * this.renderQualityScale, 2);
     if (nextRatio !== this.lastPixelRatio) {
       this.renderer.setPixelRatio(nextRatio);
       this.lastPixelRatio = nextRatio;
@@ -3654,28 +3894,112 @@ export class ViewportEngine {
     this.setModelPlacement(null);
   }
 
-  private groundRayHit(e: PointerEvent, paneId: ViewId) {
-    const input = this.pointerInput(e, paneId);
-    return rayPlaneIntersection(input.rayOrigin, input.rayDirection, WORLD_XZ_PLANE);
+  placeModelAtScreen(
+    modelDocumentId: DocumentId,
+    clientX: number,
+    clientY: number,
+  ): ObjectId | null {
+    if (!this.host || !this.session || this.session.document.kind !== 'level') return null;
+    const host = this.host.getBoundingClientRect();
+    const localX = clientX - host.left;
+    const localY = clientY - host.top;
+    const paneId = this.lastRects.find(
+      (rect) =>
+        localX >= rect.x &&
+        localX <= rect.x + rect.width &&
+        localY >= rect.y &&
+        localY <= rect.y + rect.height,
+    )?.id;
+    if (!paneId) return null;
+    const pointer = new PointerEvent('pointermove', { clientX, clientY });
+    const input = this.pointerInput(pointer, paneId);
+    const surface = this.modelPlacementSurface(input);
+    if (!surface) return null;
+    const point = { ...surface.point };
+    point.y += modelDocumentBaseOffset(this.session.project, modelDocumentId);
+    const objectId = commitPlaceModelInLevel(this.session, modelDocumentId, { position: point });
+    if (objectId) {
+      this.markPlacedModelTerrainMetadata(objectId, modelDocumentId, surface.terrainObjectId);
+      this.session.requestRedraw();
+      this.invalidate();
+    }
+    return objectId;
+  }
+
+  private modelPlacementSurface(
+    input: ToolPointerInput,
+  ): { point: Vec3; terrainObjectId: ObjectId | null } | null {
+    if (!this.session) return null;
+    let point: Vec3 | null = null;
+    let terrainObjectId: ObjectId | null = null;
+    let nearest = Infinity;
+    const raycaster = new Raycaster(
+      new Vector3(input.rayOrigin.x, input.rayOrigin.y, input.rayOrigin.z),
+      new Vector3(input.rayDirection.x, input.rayDirection.y, input.rayDirection.z),
+    );
+    for (const object of this.session.document.objects.values()) {
+      if (object.metadata.terrain !== 'true') continue;
+      const handle = this.handles.get(object.id);
+      const hit = handle ? raycaster.intersectObject(handle.mesh, false)[0] : null;
+      if (hit && hit.distance < nearest) {
+        nearest = hit.distance;
+        point = v3(hit.point.x, hit.point.y, hit.point.z);
+        terrainObjectId = object.id;
+      }
+    }
+    point ??= rayPlaneIntersection(input.rayOrigin, input.rayDirection, WORLD_XZ_PLANE);
+    return point ? { point, terrainObjectId } : null;
+  }
+
+  private markPlacedModelTerrainMetadata(
+    objectId: ObjectId,
+    modelDocumentId: DocumentId,
+    terrainObjectId: ObjectId | null,
+  ): void {
+    if (!this.session || !terrainObjectId) return;
+    const object = this.session.document.objects.get(objectId);
+    if (!object) return;
+    object.metadata = {
+      ...object.metadata,
+      terrainPlaced: 'true',
+      terrainOwnerId: terrainObjectId,
+      terrainSourceModelId: modelDocumentId,
+      terrainBaseOffset: String(modelDocumentBaseOffset(this.session.project, modelDocumentId)),
+      terrainGroundClearance: '0',
+      terrainHeightOffset: '0',
+      terrainAlignToSlope: 'false',
+      terrainCollisionRadius: String(
+        modelDocumentPlacementRadius(this.session.project, modelDocumentId),
+      ),
+    };
+    this.session.document.dirty = true;
   }
 
   private tryPlaceModelAtPointer(e: PointerEvent, paneId: ViewId): boolean {
     if (!this.modelPlacement || !this.session || this.session.document.kind !== 'level') return false;
     if (e.button !== 0 || e.ctrlKey || e.metaKey || e.altKey) return false;
 
-    const point = this.groundRayHit(e, paneId);
-    if (!point) return false;
+    const input = this.pointerInput(e, paneId);
+    const surface = this.modelPlacementSurface(input);
+    if (!surface) return false;
+    const point = { ...surface.point };
 
     const snap = this.session.document.settings.snapIncrement ?? 0.25;
-    if (snap > 0) {
+    if (snap > 0 && !surface.terrainObjectId) {
       point.x = Math.round(point.x / snap) * snap;
       point.y = Math.round(point.y / snap) * snap;
       point.z = Math.round(point.z / snap) * snap;
     }
 
     const request = this.modelPlacement;
+    point.y += modelDocumentBaseOffset(this.session.project, request.modelDocumentId);
     const objectId = commitPlaceModelInLevel(this.session, request.modelDocumentId, { position: point });
     if (!objectId) return false;
+    this.markPlacedModelTerrainMetadata(
+      objectId,
+      request.modelDocumentId,
+      surface.terrainObjectId,
+    );
 
     this.session.tools.setActive('select', this.session.context());
     this.setModelPlacement(null);
@@ -3688,6 +4012,30 @@ export class ViewportEngine {
 
 /** App-wide viewport singleton. */
 export const viewportEngine = new ViewportEngine();
+
+function crossSectionHandlePoint(
+  operation: CurveOperation,
+  kind: Extract<CurveControlTarget['kind'], 'scale-start' | 'scale-mid' | 'scale-end'>,
+): Vec3 {
+  const index =
+    kind === 'scale-start'
+      ? 0
+      : kind === 'scale-mid'
+        ? Math.floor((operation.points.length - 1) / 2)
+        : operation.points.length - 1;
+  const scale =
+    kind === 'scale-start'
+      ? operation.startScale
+      : kind === 'scale-mid'
+        ? operation.midScale
+        : operation.endScale;
+  const point = operation.points[index]!;
+  return v3(
+    point.x + operation.radius * operation.profileWidth * scale,
+    point.y,
+    point.z,
+  );
+}
 
 function createTerrainBrushPreview(): LineLoop {
   const points: Vector3[] = [];

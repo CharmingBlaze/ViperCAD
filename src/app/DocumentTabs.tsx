@@ -5,7 +5,7 @@ import { getViperDocument } from '@/core/document/ViperProject';
 import { filterDocumentIds } from '@/app/outliner/documentNavigation';
 import { pushToast } from '@/app/Toast';
 
-type OutlinerTab = 'scene' | 'models' | 'levels';
+type OutlinerTab = 'scene' | 'assets' | 'models' | 'levels';
 
 type Props = {
   session: EditorSession;
@@ -19,9 +19,6 @@ export function DocumentTabs({ session, onRefresh, onBrowseOutliner }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const activeId = session.projectEditor.activeDocumentId;
-  if (!activeId) return null;
-
-  const activeDoc = getViperDocument(session.project, activeId);
   const openIds = [...session.projectEditor.openDocuments.keys()];
   const levelIds = filterDocumentIds(session.project, session.project.levelDocumentIds, query);
   const modelIds = filterDocumentIds(session.project, session.project.modelDocumentIds, query);
@@ -45,6 +42,9 @@ export function DocumentTabs({ session, onRefresh, onBrowseOutliner }: Props) {
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [open]);
+
+  if (!activeId) return null;
+  const activeDoc = getViperDocument(session.project, activeId);
 
   const switchTo = (documentId: DocumentId) => {
     session.openDocument(documentId);

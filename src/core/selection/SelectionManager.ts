@@ -206,6 +206,38 @@ export class SelectionManager {
     this.clearHover();
   }
 
+  /** True when the current selection mode has anything selected. */
+  hasModeSelection(): boolean {
+    if (this.state.mode === 'object') return this.state.selectedObjectIds.size > 0;
+    if (this.state.mode === 'vertex') return this.state.selectedVertexIds.size > 0;
+    if (this.state.mode === 'edge') return this.state.selectedEdgeIds.size > 0;
+    return this.state.selectedFaceIds.size > 0;
+  }
+
+  /** Clear only the current mode's selection (keeps other mode caches). */
+  deselectAll(): void {
+    if (this.state.mode === 'object') {
+      this.state.selectedObjectIds.clear();
+      this.state.activeObjectId = null;
+    } else if (this.state.mode === 'vertex') {
+      this.state.selectedVertexIds.clear();
+      this.state.activeVertexId = null;
+      this.modeCache.vertexIds.clear();
+      this.modeCache.activeVertexId = null;
+    } else if (this.state.mode === 'edge') {
+      this.state.selectedEdgeIds.clear();
+      this.state.activeEdgeId = null;
+      this.modeCache.edgeIds.clear();
+      this.modeCache.activeEdgeId = null;
+    } else {
+      this.state.selectedFaceIds.clear();
+      this.state.activeFaceId = null;
+      this.modeCache.faceIds.clear();
+      this.modeCache.activeFaceId = null;
+    }
+    this.clearHover();
+  }
+
   selectObjects(ids: ObjectId[], op: SelectionOp = 'replace'): void {
     const scoped = this.objectScopeFilter
       ? ids.filter((id) => this.objectScopeFilter!(id))
@@ -274,13 +306,47 @@ export class SelectionManager {
     this.clearHover();
   }
 
-  selectAll(mesh?: EditableMesh): void {
+  selectAll(mesh?: EditableMesh, document?: ModelDocument): void {
+    if (this.state.mode === 'object') {
+      if (!document) return;
+      this.selectObjects([...document.objects.keys()], 'replace');
+      return;
+    }
     if (this.state.mode === 'vertex' && mesh) this.selectVertices([...mesh.vertices.keys()]);
     else if (this.state.mode === 'edge' && mesh) this.selectEdges([...mesh.edges.keys()]);
     else if (this.state.mode === 'face' && mesh) this.selectFaces([...mesh.faces.keys()]);
   }
 
-  invert(mesh: EditableMesh): void {
+  /**
+   * Blender-style A: if anything is selected in the current mode, deselect all;
+   * otherwise select all. Returns whether the selection changed.
+   */
+  toggleSelectAll(mesh?: EditableMesh, document?: ModelDocument): boolean {
+    if (this.hasModeSelection()) {
+      this.deselectAll();
+      return true;
+    }
+    if (this.state.mode === 'object') {
+      if (!document || document.objects.size === 0) return false;
+      this.selectAll(undefined, document);
+      return this.hasModeSelection();
+    }
+    if (!mesh) return false;
+    const before = this.currentComponentCount();
+    this.selectAll(mesh);
+    return this.currentComponentCount() !== before || this.hasModeSelection();
+  }
+
+  invert(mesh?: EditableMesh, document?: ModelDocument): void {
+    if (this.state.mode === 'object') {
+      if (!document) return;
+      this.selectObjects(
+        [...document.objects.keys()].filter((id) => !this.state.selectedObjectIds.has(id)),
+        'replace',
+      );
+      return;
+    }
+    if (!mesh) return;
     if (this.state.mode === 'vertex') {
       this.selectVertices([...mesh.vertices.keys()].filter((id) => !this.state.selectedVertexIds.has(id)));
     } else if (this.state.mode === 'edge') {

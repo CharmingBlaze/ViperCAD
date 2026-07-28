@@ -11,11 +11,15 @@ export type ToolPointerInput = {
   screenX: number;
   screenY: number;
   worldPosition: Vec3 | null;
+  /** Scene object whose visible surface supplied worldPosition, when relevant. */
+  surfaceObjectId?: string | null;
   rayOrigin: Vec3;
   rayDirection: Vec3;
   shiftKey: boolean;
   ctrlKey: boolean;
   altKey: boolean;
+  /** Normalized pen pressure. Mouse input and unavailable pressure use 1. */
+  pressure?: number;
   numericValue?: number;
   /** World units represented by one CSS pixel at the active pivot depth (ortho/persp). */
   worldUnitsPerPixel?: number;

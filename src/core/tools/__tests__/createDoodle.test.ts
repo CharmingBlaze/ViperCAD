@@ -4,6 +4,7 @@ import { CreateDoodleTool, smoothDoodlePoints } from '@/core/tools/CreateDoodleT
 import { v3 } from '@/core/math/Vec3';
 import type { ToolPointerInput } from '@/core/tools/Tool';
 import { readCurveOperation } from '@/core/curves/CurveOperation';
+import { readObjectModifierStack } from '@/core/modifiers/serialize';
 
 function pointer(
   origin: { x: number; y: number; z: number },
@@ -431,5 +432,32 @@ describe('CreateDoodleTool', () => {
       operation!.points.map((p) => `${p.x.toFixed(3)},${p.y.toFixed(3)},${p.z.toFixed(3)}`),
     );
     expect(unique.size).toBe(4);
+  });
+
+  it('adds live mirror modifiers to newly created blockout geometry', () => {
+    const session = new EditorSession();
+    session.document.settings.symmetry.x = true;
+    session.document.settings.symmetry.z = true;
+    const tool = session.tools.get('create-doodle') as CreateDoodleTool;
+    session.tools.setActive('create-doodle', session.context());
+    tool.setCreateContext('workflows', 'sketch', session.context());
+    tool.setInputMode('pen', session.context());
+    tool.setCurveType('polyline', session.context());
+    tool.setStyle('profile-solid', session.context());
+    tool.setAutoConnect(true, session.context());
+    tool.blockoutPolyMode = true;
+    const origin = { x: 0, y: 0, z: 4 };
+
+    tool.begin(pointer(origin, { x: 0, y: 0, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 1, y: 0, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 1, y: 1, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 0, y: 1, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 0.01, y: 0.01, z: -1 }), session.context());
+
+    const object = [...session.document.objects.values()][0]!;
+    const stack = readObjectModifierStack(object);
+    expect(stack?.modifiers.map((modifier) => modifier.kind === 'mirror' && modifier.axis))
+      .toEqual(['x', 'z']);
+    expect(object.metadata.blockoutCreationSymmetry).toBe('x,z');
   });
 });
