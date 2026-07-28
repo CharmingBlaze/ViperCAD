@@ -564,6 +564,22 @@ export function MaterialEditor({ session, compact = false, workspace }: Props) {
                   </select>
                 </label>
               ))}
+              <label
+                className="tool primary uv-btn-block"
+                style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, margin: '0.5rem 0' }}
+              >
+                📁 Import Image Texture File...
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) void importTexture(file);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
             </section>
 
             <section className="uv-section">

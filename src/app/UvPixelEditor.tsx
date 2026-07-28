@@ -36,7 +36,9 @@ import {
   translateUvsFromSnapshot,
   UV_GIZMO_PX,
   uvGizmoCursor,
-  weldSelectedUvs,
+  alignUvs,
+  snapUvsToPixelGrid,
+  type UvAlignMode,
   type UvGizmoHandle,
   type UvSnapshot,
 } from '@/core/uv/UvEdit';
@@ -56,7 +58,8 @@ import { pushToast } from '@/app/Toast';
 import { FloatingAtlasTilePanel } from '@/app/FloatingAtlasTilePanel';
 import { applyAtlasTileToFaces, buildAtlasTileGrid } from '@/core/uv/AtlasUv';
 import { buildPlane } from '@/core/mesh/builders/PlaneBuilder';
-import { commitMeshObject } from '@/core/document/ModelDocument';
+import { importImageFile } from '@/core/image/ImageImport';
+import { commitMeshObject, createMaterial, getObjectMaterialId } from '@/core/document/ModelDocument';
 import { TileDrawTool } from '@/core/tools/TileDrawTool';
 import { WORLD_XY_PLANE, WORLD_XZ_PLANE, WORLD_YZ_PLANE } from '@/core/snap/SnapEngine';
 import { commitDeleteSelection } from '@/core/editor/DeleteSelection';
@@ -256,14 +259,11 @@ export function UvPixelEditor({ session, workspace }: Props) {
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    let frame = 0;
     const ro = new ResizeObserver(() => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => draw());
+      draw();
     });
     ro.observe(host);
     return () => {
-      cancelAnimationFrame(frame);
       ro.disconnect();
     };
   }, [draw]);
@@ -426,6 +426,13 @@ export function UvPixelEditor({ session, workspace }: Props) {
           if (handle === 'rotate') {
             mode = 'rotate';
             pivot = bounds.center;
+          } else if (transformTool === 'move') {
+            if (handle === 'nw' || handle === 'ne' || handle === 'sw' || handle === 'se') {
+              mode = 'scale';
+            } else {
+              mode = 'move';
+              handle = 'body';
+            }
           } else if (isScaleHandle(handle)) {
             mode = 'scale';
           } else if (handle === 'body') {
@@ -1766,6 +1773,75 @@ export function UvPixelEditor({ session, workspace }: Props) {
     : `${tex.pixelTool} · ${tex.brushSize}px ${tex.brushShape}${tex.paintMode3D ? ' · 3D paint' : ''}`;
   const activeObjectId = session.selection.state.activeObjectId;
 
+  const handleAlign = (mode: UvAlignMode) => {
+    const sel = selectedSnapshot();
+    if (!sel || !sel.corners.length) {
+      pushToast('Select UV corners or faces to align');
+      return;
+    }
+    alignUvs(sel.ctx.mesh, sel.corners, sel.ctx.layerId, mode);
+    session.history.commit({
+      name: `Align UVs (${mode})`,
+      execute: () => session.requestRedraw(),
+      undo: () => session.requestRedraw(),
+    });
+    session.requestRedraw();
+  };
+
+  const handlePixelSnap = () => {
+    const sel = selectedSnapshot();
+    if (!sel || !sel.corners.length) {
+      pushToast('Select UV corners to snap to pixels');
+      return;
+    }
+    snapUvsToPixelGrid(sel.ctx.mesh, sel.corners, sel.ctx.layerId, image?.width ?? 64, image?.height ?? 64);
+    session.history.commit({
+      name: 'Snap UVs to Pixel Grid',
+      execute: () => session.requestRedraw(),
+      undo: () => session.requestRedraw(),
+    });
+    session.requestRedraw();
+  };
+
+  const handleImportImageFile = async (file: File | null) => {
+    if (!file) return;
+    try {
+      const result = await importImageFile(session.document, file);
+      const activeObjId = session.selection.state.activeObjectId;
+      const obj = activeObjId ? session.document.objects.get(activeObjId) : null;
+      let matId = obj ? getObjectMaterialId(obj) : null;
+
+      if (!matId && activeObjId) {
+        const mat = createMaterial(session.document, {
+          assignToObjectId: activeObjId,
+          name: file.name.replace(/\.[^/.]+$/, ''),
+        });
+        matId = mat.id;
+      }
+
+      if (matId) {
+        const mat = session.document.materials.get(matId);
+        if (mat) {
+          mat.baseColourTextureId = result.textureId;
+          mat.presetId = null;
+        }
+      }
+
+      workspace.patchTexture({
+        activeImageId: result.imageId,
+        activeTextureId: result.textureId,
+        activeMaterialId: matId ?? workspace.texture.activeMaterialId,
+      });
+
+      pushToast(`Imported ${file.name} (${result.width}×${result.height})`);
+      session.document.dirty = true;
+      session.requestRedraw();
+      refresh();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Failed to import image');
+    }
+  };
+
   return (
     <div className="uv-pixel-editor">
       <div ref={hostRef} className="uv-pixel-canvas-host">
@@ -1787,6 +1863,49 @@ export function UvPixelEditor({ session, workspace }: Props) {
             >
               Paint Texture
             </button>
+            <label
+              className="uv-canvas-tool"
+              style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+              title="Import image texture file (.png, .jpg, .webp)"
+            >
+              📁 Import Image
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void handleImportImageFile(file);
+                  e.target.value = '';
+                }}
+              />
+            </label>
+          </div>
+          <div className="uv-canvas-toolgroup" role="group" aria-label="Layout view mode">
+            <button
+              type="button"
+              className={`uv-canvas-tool${tex.maximize === 'none' ? ' is-active' : ''}`}
+              onClick={() => workspace.patchTexture({ maximize: 'none' })}
+              title="Show 3D View and UV Editor side-by-side"
+            >
+              📐 Split
+            </button>
+            <button
+              type="button"
+              className={`uv-canvas-tool${tex.maximize === 'left' ? ' is-active' : ''}`}
+              onClick={() => workspace.patchTexture({ maximize: 'left' })}
+              title="Focus 3D Viewport (Full Screen 3D)"
+            >
+              🧊 Full 3D
+            </button>
+            <button
+              type="button"
+              className={`uv-canvas-tool${tex.maximize === 'right' ? ' is-active' : ''}`}
+              onClick={() => workspace.patchTexture({ maximize: 'right' })}
+              title="Focus UV Editor (Full Screen UV)"
+            >
+              🎨 Full UV
+            </button>
           </div>
           {uvPointerActive ? (
             <>
@@ -1802,6 +1921,17 @@ export function UvPixelEditor({ session, workspace }: Props) {
                   </button>
                 ))}
               </div>
+              <div className="uv-canvas-toolgroup" role="group" aria-label="Smart Unwrap">
+                <button
+                  type="button"
+                  className="uv-canvas-tool"
+                  style={{ color: '#ffd2a8', fontWeight: 600 }}
+                  onClick={() => runUnwrap('smart')}
+                  title="Smart Conformal Unwrap: Auto seam sharp edges & pack islands"
+                >
+                  ⚡ Smart Unwrap
+                </button>
+              </div>
               <div className="uv-canvas-toolgroup" role="group" aria-label="UV transform tool">
                 {(['move', 'scale', 'rotate'] as const).map((tool) => (
                   <button
@@ -1813,6 +1943,13 @@ export function UvPixelEditor({ session, workspace }: Props) {
                     {tool[0]!.toUpperCase() + tool.slice(1)}
                   </button>
                 ))}
+              </div>
+              <div className="uv-canvas-toolgroup" role="group" aria-label="UV alignment">
+                <button type="button" className="uv-canvas-tool" onClick={() => handleAlign('left')} title="Align Left (U min)">Align L</button>
+                <button type="button" className="uv-canvas-tool" onClick={() => handleAlign('center-u')} title="Align Center U">Center U</button>
+                <button type="button" className="uv-canvas-tool" onClick={() => handleAlign('right')} title="Align Right (U max)">Align R</button>
+                <button type="button" className="uv-canvas-tool" onClick={() => handleAlign('top')} title="Align Top (V max)">Align T</button>
+                <button type="button" className="uv-canvas-tool" onClick={handlePixelSnap} title="Snap to Pixel Grid">Pixel Snap</button>
               </div>
             </>
           ) : (
@@ -1865,6 +2002,14 @@ export function UvPixelEditor({ session, workspace }: Props) {
             </div>
           )}
           <div className="uv-canvas-toolgroup uv-canvas-view-tools" role="group" aria-label="Canvas view">
+            <button
+              type="button"
+              className={`uv-canvas-tool${tex.showUvCheckerboard ? ' is-active' : ''}`}
+              onClick={() => workspace.patchTexture({ showUvCheckerboard: !tex.showUvCheckerboard })}
+              title="Toggle UV Checkerboard pattern"
+            >
+              Checker
+            </button>
             <button type="button" className="uv-canvas-tool" onClick={() => stepZoom(-1)} aria-label="Zoom out">−</button>
             <span className="uv-canvas-zoom">{Math.round(editorCamera(tex).zoom * 100)}%</span>
             <button type="button" className="uv-canvas-tool" onClick={() => stepZoom(1)} aria-label="Zoom in">+</button>

@@ -13,10 +13,25 @@ import {
   terrainPlacedObjects,
 } from '@/core/terrain/TerrainProps';
 import {
-  TerrainObjectTool,
-  type TerrainObjectBrushMode,
-  type TerrainObjectPlacementMode,
-} from '@/core/tools/TerrainObjectTool';
+  carveTerrainSplinePath,
+  generateRiverWaterMesh,
+} from '@/core/terrain/SplineCarve';
+import { autoPaintTerrainMesh } from '@/core/terrain/TerrainAutoPaint';
+import {
+  getTerrainLayerStack,
+  addTerrainLayer,
+  removeTerrainLayer,
+  paintTerrainLayerAtPosition,
+} from '@/core/terrain/TerrainLayers';
+import {
+  generateBuildingMesh,
+  generateRoadGridMesh,
+  getOrCreateBuildingMaterial,
+} from '@/core/level/CityGenerator';
+import { buildBridgeMesh, carveCaveTunnel, generateWaterfallMesh } from '@/core/level/InfrastructureBuilder';
+import { FloatingSkyboxEditor } from '@/app/FloatingSkyboxEditor';
+import { commitMeshObject } from '@/core/document/ModelDocument';
+import { v3 } from '@/core/math/Vec3';
 import { faceVertexIds } from '@/core/mesh/EditableMesh';
 import type { EditableMesh } from '@/core/mesh/types';
 import {
@@ -59,6 +74,8 @@ export function FloatingTerrainObjects({
   onRefresh,
 }: Props) {
   const [minimized, setMinimized] = useState(false);
+  const [showSkyboxEditor, setShowSkyboxEditor] = useState(false);
+  const [activeLayerIndex, setActiveLayerIndex] = useState(0);
   const [position, setPosition] = useState({ x: 18, y: 94 });
   const [objectSearch, setObjectSearch] = useState('');
   const [layerName, setLayerName] = useState('Scatter layer');
@@ -746,6 +763,272 @@ export function FloatingTerrainObjects({
                     </p>
                   </div>
                 )}
+                {(() => {
+                  const t = activeTerrain(session);
+                  if (!t) return null;
+                  const layers = getTerrainLayerStack(t.mesh);
+                  const activeLayer = layers[activeLayerIndex] ?? layers[0];
+
+                  return (
+                    <div className="terrain-action-card">
+                      <div className="simple-texture-card-heading">
+                        <strong>TERRAIN MATERIAL LAYERS</strong>
+                        <span>Multi-layer texture splatmap stack</span>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                        {layers.map((layer, idx) => (
+                          <div
+                            key={layer.id}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              padding: '0.35rem 0.5rem',
+                              borderRadius: '4px',
+                              backgroundColor: idx === activeLayerIndex ? '#222d3d' : '#141820',
+                              border: `1px solid ${idx === activeLayerIndex ? '#3b82f6' : '#262d3a'}`,
+                              cursor: 'pointer',
+                            }}
+                            onClick={() => setActiveLayerIndex(idx)}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                              <div
+                                style={{
+                                  width: '12px',
+                                  height: '12px',
+                                  borderRadius: '3px',
+                                  backgroundColor: layer.color,
+                                  border: '1px solid #475569',
+                                }}
+                              />
+                              <span style={{ fontSize: '0.75rem', fontWeight: idx === activeLayerIndex ? 600 : 400, color: '#f1f5f9' }}>
+                                {layer.name}
+                              </span>
+                            </div>
+                            <span style={{ fontSize: '0.65rem', color: '#94a3b8' }}>
+                              {layer.tiling}x Tiling
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="terrain-action-grid" style={{ marginTop: '0.2rem' }}>
+                        <button
+                          type="button"
+                          className="terrain-action-btn"
+                          onClick={() => {
+                            addTerrainLayer(t.mesh);
+                            session.document.dirty = true;
+                            onRefresh();
+                          }}
+                        >
+                          Add Material Layer
+                        </button>
+                        <button
+                          type="button"
+                          className="terrain-action-btn"
+                          disabled={layers.length <= 1}
+                          onClick={() => {
+                            if (activeLayer) {
+                              removeTerrainLayer(t.mesh, activeLayer.id);
+                              setActiveLayerIndex(0);
+                              session.document.dirty = true;
+                              onRefresh();
+                            }
+                          }}
+                        >
+                          Remove Layer
+                        </button>
+                        <button
+                          type="button"
+                          className="terrain-action-btn primary full-width"
+                          onClick={() => {
+                            paintTerrainLayerAtPosition(t.mesh, v3(0, 0, 0), activeLayerIndex, 10, 0.7);
+                            session.document.dirty = true;
+                            session.requestRedraw();
+                            onRefresh();
+                          }}
+                        >
+                          Paint {activeLayer?.name ?? 'Layer'} onto Center
+                        </button>
+                      </div>
+                      <p className="uv-hint">
+                        Select an active layer to paint texture splatmaps, adjust tiling scale, or add custom layers.
+                      </p>
+                    </div>
+                  );
+                })()}
+
+                <div className="terrain-action-card">
+                  <div className="simple-texture-card-heading">
+                    <strong>RIVERS, LAKES & PATHS</strong>
+                    <span>Spline carving & water mesh ribbons</span>
+                  </div>
+                  <div className="terrain-action-grid">
+                    <button
+                      type="button"
+                      className="terrain-action-btn primary"
+                      onClick={() => {
+                        const terrain = activeTerrain(session.document);
+                        if (!terrain) return;
+                        const w = terrain.heightmap.width;
+                        const d = terrain.heightmap.depth;
+                        const splinePoints = [
+                          v3(-w * 0.4, 0, -d * 0.35),
+                          v3(-w * 0.15, -0.5, -d * 0.1),
+                          v3(w * 0.1, -1.0, d * 0.15),
+                          v3(w * 0.4, -1.5, d * 0.4),
+                        ];
+
+                        carveTerrainSplinePath(terrain.mesh, splinePoints, {
+                          width: 4.5,
+                          depth: 1.8,
+                          mode: 'river',
+                        });
+
+                        const riverMesh = generateRiverWaterMesh(splinePoints, 4.5);
+                        commitMeshObject(session.document, riverMesh, { name: 'River Water Ribbon' });
+                        session.document.dirty = true;
+                        session.requestRedraw();
+                        onRefresh();
+                      }}
+                    >
+                      Carve River
+                    </button>
+                    <button
+                      type="button"
+                      className="terrain-action-btn"
+                      onClick={() => {
+                        const terrain = activeTerrain(session.document);
+                        if (!terrain) return;
+                        const w = terrain.heightmap.width;
+                        const d = terrain.heightmap.depth;
+                        const pathPoints = [
+                          v3(-w * 0.35, 0.2, d * 0.35),
+                          v3(-w * 0.1, 0.2, d * 0.1),
+                          v3(w * 0.2, 0.2, -d * 0.15),
+                          v3(w * 0.35, 0.2, -d * 0.35),
+                        ];
+
+                        carveTerrainSplinePath(terrain.mesh, pathPoints, {
+                          width: 3.2,
+                          mode: 'road',
+                        });
+
+                        session.document.dirty = true;
+                        session.requestRedraw();
+                        onRefresh();
+                      }}
+                    >
+                      Carve Path
+                    </button>
+                  </div>
+                  <p className="uv-hint">
+                    Carves smooth U-shaped riverbeds with conforming water ribbons or flattens roads.
+                  </p>
+                </div>
+
+                <div className="terrain-action-card">
+                  <div className="simple-texture-card-heading">
+                    <strong>CITY, ROADS, BRIDGES & CAVES</strong>
+                    <span>Procedural level generation & terrain auto-painting</span>
+                  </div>
+                  <div className="terrain-action-grid">
+                    <button
+                      type="button"
+                      className="terrain-action-btn primary"
+                      onClick={() => {
+                        const terrain = activeTerrain(session.document);
+                        if (terrain) {
+                          autoPaintTerrainMesh(terrain.mesh, { cliffMinAngleDeg: 35, snowMinHeight: 7.5 });
+                          session.document.dirty = true;
+                          session.requestRedraw();
+                          onRefresh();
+                        }
+                      }}
+                    >
+                      Auto-Paint
+                    </button>
+                    <button
+                      type="button"
+                      className="terrain-action-btn"
+                      onClick={() => {
+                        const building = generateBuildingMesh({ floors: 6, style: 'skyscraper', width: 7, depth: 7 });
+                        const matId = getOrCreateBuildingMaterial(session.document);
+                        commitMeshObject(session.document, building, { name: 'Skyscraper Building', materialId: matId });
+                        session.document.dirty = true;
+                        session.requestRedraw();
+                        onRefresh();
+                      }}
+                    >
+                      Add Building
+                    </button>
+                    <button
+                      type="button"
+                      className="terrain-action-btn"
+                      onClick={() => {
+                        const { roadMesh } = generateRoadGridMesh(2, 2, 16, 4);
+                        commitMeshObject(session.document, roadMesh, { name: 'City Roads & Sidewalks' });
+                        session.document.dirty = true;
+                        session.requestRedraw();
+                        onRefresh();
+                      }}
+                    >
+                      Add Road Grid
+                    </button>
+                    <button
+                      type="button"
+                      className="terrain-action-btn"
+                      onClick={() => {
+                        const bridge = buildBridgeMesh(v3(-12, 0.5, 0), v3(12, 0.5, 0), { width: 3.5, archHeight: 1.2 });
+                        commitMeshObject(session.document, bridge, { name: 'Girder Bridge' });
+                        session.document.dirty = true;
+                        session.requestRedraw();
+                        onRefresh();
+                      }}
+                    >
+                      Add Bridge
+                    </button>
+                    <button
+                      type="button"
+                      className="terrain-action-btn"
+                      onClick={() => {
+                        const terrain = activeTerrain(session.document);
+                        if (terrain) {
+                          carveCaveTunnel(terrain.mesh, v3(0, 1, 0), 4, 12);
+                          session.document.dirty = true;
+                          session.requestRedraw();
+                          onRefresh();
+                        }
+                      }}
+                    >
+                      Carve Cave
+                    </button>
+                    <button
+                      type="button"
+                      className="terrain-action-btn"
+                      onClick={() => {
+                        const waterfall = generateWaterfallMesh(v3(0, 8, 0), v3(0, 0, 0), 4.5);
+                        commitMeshObject(session.document, waterfall, { name: 'Waterfall Mesh' });
+                        session.document.dirty = true;
+                        session.requestRedraw();
+                        onRefresh();
+                      }}
+                    >
+                      Add Waterfall
+                    </button>
+                    <button
+                      type="button"
+                      className="terrain-action-btn primary full-width"
+                      style={{ marginTop: '0.2rem' }}
+                      onClick={() => setShowSkyboxEditor(true)}
+                    >
+                      Skybox & Skysphere Maker
+                    </button>
+                  </div>
+                  <p className="uv-hint">
+                    1-Click Auto-Paint, procedural city buildings, roads, bridges, caves, waterfalls & skyboxes.
+                  </p>
+                </div>
                 <p className="uv-hint">
                   Place with a click, paint groups with Scatter, or erase with a red brush.
                   Select / edit makes every item a normal Viper object.
@@ -754,6 +1037,9 @@ export function FloatingTerrainObjects({
             </>
           )}
         </div>
+      )}
+      {showSkyboxEditor && (
+        <FloatingSkyboxEditor session={session} onClose={() => setShowSkyboxEditor(false)} />
       )}
     </aside>
   );

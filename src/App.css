@@ -872,6 +872,8 @@ body,
   margin-left: calc(var(--hit) / -2);
   z-index: 4;
   cursor: col-resize;
+  touch-action: none;
+  will-change: left;
 }
 
 .uv-pixel-editor {
@@ -2706,6 +2708,80 @@ input[type="range"]:disabled {
   border: 1px solid color-mix(in srgb, #79b85a 28%, var(--line));
   border-radius: 6px;
   background: color-mix(in srgb, #79b85a 6%, #0b1017);
+}
+
+.terrain-action-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  padding: 0.65rem;
+  border: 1px solid color-mix(in srgb, #3b82f6 30%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, #3b82f6 7%, #0d121a);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.terrain-action-card .simple-texture-card-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.terrain-action-card .simple-texture-card-heading strong {
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  color: #f1f5f9;
+  text-transform: uppercase;
+}
+
+.terrain-action-card .simple-texture-card-heading span {
+  font-size: 0.68rem;
+  color: #94a3b8;
+}
+
+.terrain-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.terrain-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.73rem;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, #3b82f6 35%, var(--line));
+  background: color-mix(in srgb, #3b82f6 14%, #18202c);
+  color: #f8fafc;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.terrain-action-btn:hover {
+  background: color-mix(in srgb, #3b82f6 28%, #222d3d);
+  border-color: #60a5fa;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+}
+
+.terrain-action-btn.primary {
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  border-color: #60a5fa;
+}
+
+.terrain-action-btn.primary:hover {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+}
+
+.terrain-action-btn.full-width {
+  grid-column: 1 / -1;
 }
 
 .terrain-placement-settings .uv-hint {

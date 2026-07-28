@@ -4,7 +4,7 @@ import { cornersForFaces } from '@/core/uv/UvEdit';
 import { islandForFace } from '@/core/uv/UvOperations';
 import type { TextureWorkspaceState } from '@/workspace/TextureWorkspace';
 
-export const UV_ZOOM_STEPS = [0.0625, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32];
+export const UV_ZOOM_STEPS = [0.01, 0.025, 0.05, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512];
 
 export function uniqueFacesForCorners(
   mesh: { faceCorners: Map<FaceCornerId, { faceId: FaceId }> },

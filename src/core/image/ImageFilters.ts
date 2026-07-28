@@ -316,3 +316,121 @@ export function applyPixelateToImage(
 ): boolean {
   return applyPixelateToImages(session, [image], blockSize, material, mode);
 }
+
+/** Draw a 1px clean pixel art outline around non-transparent pixels. */
+export function applyPixelOutlineToImage(
+  session: EditorSession,
+  image: ImageAsset,
+  outlineColor: [number, number, number, number],
+): boolean {
+  const width = image.width;
+  const height = image.height;
+  const pixels = image.pixels;
+  const copy = new Uint8ClampedArray(pixels);
+  let changed = false;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = (y * width + x) * 4;
+      const alpha = copy[idx + 3]!;
+      // Only process empty/transparent or semi-transparent border pixels
+      if (alpha > 32) continue;
+
+      // Check 4 neighbors
+      const neighbors = [
+        { nx: x - 1, ny: y },
+        { nx: x + 1, ny: y },
+        { nx: x, ny: y - 1 },
+        { nx: x, ny: y + 1 },
+      ];
+
+      let isBorder = false;
+      for (const { nx, ny } of neighbors) {
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+          const nIdx = (ny * width + nx) * 4;
+          if (copy[nIdx + 3]! > 32) {
+            isBorder = true;
+            break;
+          }
+        }
+      }
+
+      if (isBorder) {
+        writePixel(pixels, width, x, y, outlineColor);
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    image.revision += 1;
+    session.document.dirty = true;
+    session.requestRedraw();
+  }
+  return changed;
+}
+
+const BAYER_4X4 = [
+  [0, 8, 2, 10],
+  [12, 4, 14, 6],
+  [3, 11, 1, 9],
+  [15, 7, 13, 5],
+];
+
+/** Apply retro Bayer 4x4 dither effect to pixel asset. */
+export function applyBayerDitherToImage(
+  session: EditorSession,
+  image: ImageAsset,
+  intensity = 24,
+): boolean {
+  const width = image.width;
+  const height = image.height;
+  const pixels = image.pixels;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = (y * width + x) * 4;
+      if (pixels[idx + 3]! === 0) continue;
+
+      const dither = (BAYER_4X4[y % 4]![x % 4]! / 16.0 - 0.5) * intensity;
+      pixels[idx] = Math.max(0, Math.min(255, Math.round(pixels[idx]! + dither)));
+      pixels[idx + 1] = Math.max(0, Math.min(255, Math.round(pixels[idx + 1]! + dither)));
+      pixels[idx + 2] = Math.max(0, Math.min(255, Math.round(pixels[idx + 2]! + dither)));
+    }
+  }
+
+  image.revision += 1;
+  session.document.dirty = true;
+  session.requestRedraw();
+  return true;
+}
+
+/** Flip image asset horizontally or vertically. */
+export function flipImageAsset(
+  session: EditorSession,
+  image: ImageAsset,
+  axis: 'horizontal' | 'vertical',
+): void {
+  const w = image.width;
+  const h = image.height;
+  const src = new Uint8ClampedArray(image.pixels);
+
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      const srcX = axis === 'horizontal' ? w - 1 - x : x;
+      const srcY = axis === 'vertical' ? h - 1 - y : y;
+      const srcIdx = (srcY * w + srcX) * 4;
+      const dstIdx = (y * w + x) * 4;
+
+      image.pixels[dstIdx] = src[srcIdx]!;
+      image.pixels[dstIdx + 1] = src[srcIdx + 1]!;
+      image.pixels[dstIdx + 2] = src[srcIdx + 2]!;
+      image.pixels[dstIdx + 3] = src[srcIdx + 3]!;
+    }
+  }
+
+  image.revision += 1;
+  session.document.dirty = true;
+  session.requestRedraw();
+}
+

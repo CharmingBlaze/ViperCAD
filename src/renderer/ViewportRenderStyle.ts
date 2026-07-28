@@ -77,7 +77,8 @@ export function applyViewportRenderStyle(
     restoreMaps(material, baseline);
 
     if ('flatShading' in material) {
-      material.flatShading = mode === 'game' ? true : baseline.flatShading;
+      const isSky = handle.mesh.name.toLowerCase().includes('sky');
+      material.flatShading = isSky ? false : (mode === 'game' ? true : baseline.flatShading);
     }
 
     material.needsUpdate = true;

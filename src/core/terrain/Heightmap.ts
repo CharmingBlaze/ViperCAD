@@ -43,12 +43,16 @@ export function applyHeightmap(
   );
   const beforeMetadata = { ...object.metadata };
   const beforeObjectTransforms = snapshotPlacedTransforms(session.document, terrainObjectId);
-  const xs = [...mesh.vertices.values()].map((vertex) => vertex.position.x);
-  const zs = [...mesh.vertices.values()].map((vertex) => vertex.position.z);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minZ = Math.min(...zs);
-  const maxZ = Math.max(...zs);
+  let minX = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxZ = -Infinity;
+  for (const vertex of mesh.vertices.values()) {
+    const px = vertex.position.x;
+    const pz = vertex.position.z;
+    if (px < minX) minX = px;
+    if (px > maxX) maxX = px;
+    if (pz < minZ) minZ = pz;
+    if (pz > maxZ) maxZ = pz;
+  }
   const spanX = Math.max(1e-8, maxX - minX);
   const spanZ = Math.max(1e-8, maxZ - minZ);
   const strength = finite(options.strength, 1);

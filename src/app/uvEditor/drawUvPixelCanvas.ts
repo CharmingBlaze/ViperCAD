@@ -66,7 +66,7 @@ export function drawUvPixelCanvas(options: Options): void {
   const imageY = camera.panY;
   const imageWidth = image.width * camera.zoom;
   const imageHeight = image.height * camera.zoom;
-  drawArtboard(context, imageX, imageY, imageWidth, imageHeight, width, height);
+  drawArtboard(context, imageX, imageY, imageWidth, imageHeight, width, height, workspace.texture.showUvCheckerboard);
   context.save();
   context.imageSmoothingEnabled = false;
   context.translate(camera.panX, camera.panY);
@@ -111,7 +111,16 @@ function drawMessage(context: CanvasRenderingContext2D, message: string): void {
   context.fillText(message, 16, 28);
 }
 
-function drawArtboard(context: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, viewportW: number, viewportH: number): void {
+function drawArtboard(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  viewportW: number,
+  viewportH: number,
+  showCheckerboard = false,
+): void {
   context.save();
   context.shadowColor = 'rgba(0,0,0,0.55)';
   context.shadowBlur = 24;
@@ -120,12 +129,17 @@ function drawArtboard(context: CanvasRenderingContext2D, x: number, y: number, w
   context.restore();
   context.save();
   context.beginPath(); context.rect(x, y, w, h); context.clip();
-  const checker = 10;
+  const checker = showCheckerboard ? 16 : 10;
   const startX = Math.floor(Math.max(0, x) / checker) * checker;
   const startY = Math.floor(Math.max(0, y) / checker) * checker;
   for (let py = startY; py < Math.min(viewportH, y + h); py += checker) {
     for (let px = startX; px < Math.min(viewportW, x + w); px += checker) {
-      context.fillStyle = (Math.floor((px - x) / checker) + Math.floor((py - y) / checker)) % 2 === 0 ? '#202734' : '#151b24';
+      const isEven = (Math.floor((px - x) / checker) + Math.floor((py - y) / checker)) % 2 === 0;
+      if (showCheckerboard) {
+        context.fillStyle = isEven ? '#e0e0e0' : '#808080';
+      } else {
+        context.fillStyle = isEven ? '#202734' : '#151b24';
+      }
       context.fillRect(px, py, checker, checker);
     }
   }

@@ -429,10 +429,17 @@ export function createObjectRenderHandle(
   edgeOverlay.renderOrder = 1;
   edgeOverlay.raycast = () => {};
 
+  const isSky = mesh.name.toLowerCase().includes('sky');
+  if (isSky) {
+    edgeOverlay.visible = false;
+  }
+
   const group = new Group();
   group.name = objectId;
   group.add(threeMesh);
-  group.add(edgeOverlay);
+  if (!isSky) {
+    group.add(edgeOverlay);
+  }
 
   return {
     objectId,

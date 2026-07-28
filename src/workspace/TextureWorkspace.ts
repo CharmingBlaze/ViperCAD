@@ -62,6 +62,8 @@ export type TextureWorkspaceState = {
   seamPaintMode: 'off' | 'mark' | 'clear';
   uvDiagnosticMode: 'off' | 'distortion' | 'density';
   showUvOverlay: boolean;
+  showUvCheckerboard: boolean;
+  pixelGridSnap: boolean;
   showPixelGrid: boolean;
   pixelTool: 'pencil' | 'eraser' | 'eyedropper' | 'fill';
   brushShape: 'square' | 'circle';
@@ -138,6 +140,8 @@ export function createDefaultTextureWorkspace(): TextureWorkspaceState {
     seamPaintMode: 'off',
     uvDiagnosticMode: 'off',
     showUvOverlay: true,
+    showUvCheckerboard: false,
+    pixelGridSnap: false,
     showPixelGrid: true,
     pixelTool: 'pencil',
     brushShape: 'square',

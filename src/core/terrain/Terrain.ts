@@ -138,11 +138,22 @@ export function createTerrain(session: EditorSession, options: TerrainOptions = 
   return { ...committed, size, resolution };
 }
 
-export function activeTerrain(session: EditorSession) {
-  const objectId = session.selection.state.activeObjectId;
-  const object = objectId ? session.document.objects.get(objectId) : null;
-  const mesh = object?.meshId ? session.document.meshes.get(object.meshId) : null;
-  return object?.metadata.terrain === 'true' && mesh ? { object, mesh } : null;
+export function activeTerrain(sessionOrDoc: EditorSession | ModelDocument) {
+  const isSession = 'selection' in sessionOrDoc && !!sessionOrDoc.selection;
+  const doc: ModelDocument = isSession ? (sessionOrDoc as EditorSession).document : (sessionOrDoc as ModelDocument);
+
+  if (isSession) {
+    const objectId = (sessionOrDoc as EditorSession).selection.state.activeObjectId;
+    const object = objectId ? doc.objects.get(objectId) : null;
+    const mesh = object?.meshId ? doc.meshes.get(object.meshId) : null;
+    if (object?.metadata.terrain === 'true' && mesh) {
+      return { object, mesh };
+    }
+  }
+
+  const firstTerrain = [...doc.objects.values()].find((obj) => obj.metadata.terrain === 'true');
+  const mesh = firstTerrain?.meshId ? doc.meshes.get(firstTerrain.meshId) : null;
+  return firstTerrain && mesh ? { object: firstTerrain, mesh } : null;
 }
 
 /**
@@ -223,12 +234,18 @@ export function applyTerrainTileRepeat(mesh: EditableMesh, repeat: number): void
   const layerId = mesh.defaultUvLayerId;
   if (!layerId) return;
   const amount = clamp(repeat, 1, 128);
-  const xs = [...mesh.vertices.values()].map((vertex) => vertex.position.x);
-  const zs = [...mesh.vertices.values()].map((vertex) => vertex.position.z);
-  const minX = Math.min(...xs);
-  const minZ = Math.min(...zs);
-  const spanX = Math.max(1e-8, Math.max(...xs) - minX);
-  const spanZ = Math.max(1e-8, Math.max(...zs) - minZ);
+  let minX = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxZ = -Infinity;
+  for (const vertex of mesh.vertices.values()) {
+    const px = vertex.position.x;
+    const pz = vertex.position.z;
+    if (px < minX) minX = px;
+    if (px > maxX) maxX = px;
+    if (pz < minZ) minZ = pz;
+    if (pz > maxZ) maxZ = pz;
+  }
+  const spanX = Math.max(1e-8, maxX - minX);
+  const spanZ = Math.max(1e-8, maxZ - minZ);
   for (const face of mesh.faces.values()) {
     for (const cornerId of faceCornerIds(mesh, face.id)) {
       const corner = mesh.faceCorners.get(cornerId)!;

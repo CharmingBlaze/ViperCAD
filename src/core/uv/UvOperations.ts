@@ -1,5 +1,6 @@
 import { createId } from '@/core/ids/IdService';
 import {
+  addVec3,
   crossVec3,
   dotVec3,
   lengthVec3,
@@ -16,6 +17,7 @@ export type UvIsland = { id: string; faceIds: FaceId[]; cornerIds: string[] };
 
 /** Blockbench-style unwrap modes. */
 export type UvUnwrapMode =
+  | 'smart'
   | 'auto'
   | 'box'
   | 'cubic'
@@ -45,6 +47,37 @@ export function markUvSeams(mesh: EditableMesh, edgeIds: string[], seam = true):
   for (const id of edgeIds) {
     const edge = mesh.edges.get(id);
     if (edge) edge.seam = seam;
+  }
+  mesh.geometryVersion += 1;
+  mesh.dirty.uvs = true;
+}
+
+/** Automatically mark seams along sharp edges where adjacent face normals exceed minAngleDegrees. */
+export function markUvSeamsByAngle(mesh: EditableMesh, minAngleDegrees = 45): number {
+  const minCos = Math.cos((minAngleDegrees * Math.PI) / 180);
+  let count = 0;
+  for (const edge of mesh.edges.values()) {
+    if (!edge.halfEdgeAId || !edge.halfEdgeBId) continue;
+    const face1 = mesh.halfEdges.get(edge.halfEdgeAId)?.faceId;
+    const face2 = mesh.halfEdges.get(edge.halfEdgeBId)?.faceId;
+    if (!face1 || !face2) continue;
+    const n1 = computeFaceNormal(mesh, face1);
+    const n2 = computeFaceNormal(mesh, face2);
+    const dot = dotVec3(n1, n2);
+    if (dot < minCos) {
+      edge.seam = true;
+      count += 1;
+    }
+  }
+  mesh.geometryVersion += 1;
+  mesh.dirty.uvs = true;
+  return count;
+}
+
+/** Remove all UV seams from the mesh. */
+export function clearAllUvSeams(mesh: EditableMesh): void {
+  for (const edge of mesh.edges.values()) {
+    edge.seam = false;
   }
   mesh.geometryVersion += 1;
   mesh.dirty.uvs = true;
@@ -400,6 +433,75 @@ export function unwrapUvFromView(
   mesh.dirty.uvs = true;
 }
 
+/**
+ * Smart Conformal UV Unwrap:
+ * Automatically detects seams along sharp edges (>45°),
+ * separates topological islands, preserves face aspect ratios,
+ * and packs charts into 0–1 UV space.
+ */
+export function unwrapUvSmart(
+  mesh: EditableMesh,
+  faceIds: FaceId[],
+  layerId = mesh.defaultUvLayerId,
+  padding = 0.015,
+): void {
+  if (!layerId || !mesh.uvLayers.has(layerId)) throw new Error('Invalid UV layer');
+  if (!faceIds.length) return;
+
+  // Auto-mark sharp edges as seams if no seams are marked yet
+  let hasSeam = false;
+  for (const edge of mesh.edges.values()) {
+    if (edge.seam) {
+      hasSeam = true;
+      break;
+    }
+  }
+  if (!hasSeam) {
+    markUvSeamsByAngle(mesh, 45);
+  }
+
+  const islands = detectUvIslands(mesh);
+  const targetFaces = new Set(faceIds);
+  const charts: FaceChart[] = [];
+
+  for (const island of islands) {
+    const islandFaces = island.faceIds.filter((id) => targetFaces.has(id));
+    if (!islandFaces.length) continue;
+
+    let sumNormal = v3(0, 0, 0);
+    for (const fId of islandFaces) {
+      sumNormal = addVec3(sumNormal, computeFaceNormal(mesh, fId));
+    }
+    const normal = normalizeVec3(sumNormal);
+
+    let tangent = normalizeVec3(
+      Math.abs(normal.y) < 0.9
+        ? crossVec3(v3(0, 1, 0), normal)
+        : crossVec3(v3(1, 0, 0), normal),
+    );
+    if (lengthVec3(tangent) < 1e-8) tangent = v3(1, 0, 0);
+    let bitangent = normalizeVec3(crossVec3(normal, tangent));
+    if (lengthVec3(bitangent) < 1e-8) bitangent = v3(0, 0, 1);
+
+    const cornerMap = new Map<string, { x: number; y: number }>();
+    for (const fId of islandFaces) {
+      for (const cId of faceCornerIds(mesh, fId)) {
+        const p = mesh.vertices.get(mesh.faceCorners.get(cId)!.vertexId)!.position;
+        cornerMap.set(cId, { x: dotVec3(p, tangent), y: dotVec3(p, bitangent) });
+      }
+    }
+
+    const corners = islandFaces.flatMap((fId) => faceCornerIds(mesh, fId));
+    const uvs = corners.map((cId) => cornerMap.get(cId) ?? { x: 0, y: 0 });
+    charts.push(normalizeChart(islandFaces[0]!, corners, uvs));
+  }
+
+  shelfPackCharts(charts, padding);
+  applyCharts(mesh, charts, layerId);
+  mesh.geometryVersion += 1;
+  mesh.dirty.uvs = true;
+}
+
 /** Run any unwrap mode. */
 export function unwrapUvs(
   mesh: EditableMesh,
@@ -410,6 +512,9 @@ export function unwrapUvs(
 ): void {
   const faces = faceIds.length ? faceIds : [...mesh.faces.keys()];
   switch (mode) {
+    case 'smart':
+      unwrapUvSmart(mesh, faces, layerId, options.padding ?? 0.015);
+      break;
     case 'auto':
       unwrapUvAuto(mesh, faces, layerId, options.padding ?? 0.01);
       break;

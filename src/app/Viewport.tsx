@@ -550,8 +550,9 @@ export function Viewport({ session, workspace }: Props) {
   const showDividers = mode === 'quad' && workspace.shellMode === 'model';
   const textureMode = workspace.shellMode === 'texture';
   const texMax = workspace.texture.maximize;
+  const activeSplitRatio = liveTextureSplitRef.current ?? workspace.texture.splitRatio;
   const leftPct =
-    texMax === 'left' ? 100 : texMax === 'right' ? 0 : workspace.texture.splitRatio * 100;
+    texMax === 'left' ? 100 : texMax === 'right' ? 0 : activeSplitRatio * 100;
   const rightPct = 100 - leftPct;
 
   useEffect(() => {
@@ -570,12 +571,12 @@ export function Viewport({ session, workspace }: Props) {
       }
       if (textureSplitRef.current) textureSplitRef.current.style.left = left;
       liveTextureSplitRef.current = ratio;
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => viewportEngine.invalidate());
+      viewportEngine.resize();
+      viewportEngine.invalidate();
     };
     const onMove = (e: PointerEvent) => {
       const drag = textureDividerDrag.current;
-      const region = hostRef.current?.parentElement;
+      const region = textureLeftRef.current?.parentElement || hostRef.current?.closest('.modelling-region');
       if (!drag || !region) return;
       const rect = region.getBoundingClientRect();
       applyLiveSplit(clampTextureSplit((e.clientX - rect.left) / Math.max(1, rect.width)));
