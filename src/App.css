@@ -5469,3 +5469,110 @@ input[type="range"]:disabled {
 @media (max-width: 720px) {
   .hotkey-columns { grid-template-columns: 1fr; }
 }
+
+/* Unified Theme Styling for Terrain Action Cards & Viewport Placement Tools */
+.terrain-action-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.7rem;
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+
+.terrain-action-card .simple-texture-card-heading strong {
+  color: #f8fafc;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.terrain-action-card .simple-texture-card-heading span {
+  color: #94a3b8;
+  font-size: 0.65rem;
+  display: block;
+  margin-top: 1px;
+}
+
+.terrain-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.terrain-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 0.4rem;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #e2e8f0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+}
+
+.terrain-action-btn:hover {
+  background: #334155;
+  border-color: #475569;
+  color: #ffffff;
+}
+
+.terrain-action-btn.primary {
+  background: #1d4ed8;
+  border-color: #3b82f6;
+  color: #ffffff;
+}
+
+.terrain-action-btn.primary:hover {
+  background: #2563eb;
+  border-color: #60a5fa;
+}
+
+.terrain-action-btn.is-active {
+  background: #2563eb !important;
+  border-color: #60a5fa !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.45);
+}
+
+.terrain-action-btn.full-width {
+  grid-column: span 2;
+}
+
+.terrain-placement-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.4rem;
+  padding: 0.55rem 0.65rem;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 6px;
+}
+
+.terrain-placement-settings .uv-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.68rem;
+  color: #94a3b8;
+}
+
+.terrain-placement-settings .uv-range {
+  accent-color: #3b82f6;
+  height: 4px;
+  background: #1e293b;
+  border-radius: 2px;
+}
+

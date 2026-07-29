@@ -78,6 +78,91 @@ export function removeTerrainLayer(mesh: EditableMesh, layerId: string): Terrain
   return updated;
 }
 
+/** Updates layer properties by ID. */
+export function updateTerrainLayer(
+  mesh: EditableMesh,
+  layerId: string,
+  updates: Partial<TerrainLayerSpec>,
+): TerrainLayerSpec[] {
+  const current = getTerrainLayerStack(mesh);
+  const updated = current.map((l) => (l.id === layerId ? { ...l, ...updates } : l));
+  setTerrainLayerStack(mesh, updated);
+  bumpPositions(mesh);
+  mesh.dirty.uvs = true;
+  return updated;
+}
+
+/** Reorders layer in the splatmap stack. */
+export function moveTerrainLayer(
+  mesh: EditableMesh,
+  layerId: string,
+  direction: 'up' | 'down',
+): TerrainLayerSpec[] {
+  const current = [...getTerrainLayerStack(mesh)];
+  const idx = current.findIndex((l) => l.id === layerId);
+  if (idx < 0) return current;
+
+  const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+  if (targetIdx < 0 || targetIdx >= current.length) return current;
+
+  const temp = current[idx]!;
+  current[idx] = current[targetIdx]!;
+  current[targetIdx] = temp;
+
+  setTerrainLayerStack(mesh, current);
+  bumpPositions(mesh);
+  mesh.dirty.uvs = true;
+  return current;
+}
+
+/** Duplicates an existing terrain material layer. */
+export function duplicateTerrainLayer(mesh: EditableMesh, layerId: string): TerrainLayerSpec[] {
+  const current = getTerrainLayerStack(mesh);
+  const target = current.find((l) => l.id === layerId);
+  if (!target) return current;
+
+  const clone: TerrainLayerSpec = {
+    ...target,
+    id: `layer_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    name: `${target.name} Copy`,
+  };
+  const updated = [...current, clone];
+  setTerrainLayerStack(mesh, updated);
+  bumpPositions(mesh);
+  mesh.dirty.uvs = true;
+  return updated;
+}
+
+/** Flood fills the entire terrain mesh with active material layer. */
+export function fillTerrainWithLayer(mesh: EditableMesh, layerIndex: number): number {
+  const layers = getTerrainLayerStack(mesh);
+  if (layerIndex < 0 || layerIndex >= layers.length) return 0;
+  const layerId = mesh.defaultUvLayerId;
+  if (!layerId) return 0;
+
+  const uOffset = (layerIndex % 4) * 0.25;
+  const vOffset = Math.floor(layerIndex / 4) * 0.25;
+  let painted = 0;
+
+  for (const face of mesh.faces.values()) {
+    for (const cid of faceCornerIds(mesh, face.id)) {
+      const corner = mesh.faceCorners.get(cid)!;
+      const uv = corner.uvs.get(layerId) ?? { x: 0, y: 0 };
+      corner.uvs.set(layerId, {
+        x: (uv.x % 0.25) + uOffset,
+        y: (uv.y % 0.25) + vOffset,
+      });
+      painted += 1;
+    }
+  }
+
+  if (painted > 0) {
+    bumpPositions(mesh);
+    mesh.dirty.uvs = true;
+  }
+  return painted;
+}
+
 /** Paints active layer weights onto terrain vertices within brush radius. */
 export function paintTerrainLayerAtPosition(
   mesh: EditableMesh,
@@ -89,7 +174,6 @@ export function paintTerrainLayerAtPosition(
   let painted = 0;
   const layers = getTerrainLayerStack(mesh);
   if (layerIndex < 0 || layerIndex >= layers.length) return 0;
-  const layer = layers[layerIndex]!;
   const layerId = mesh.defaultUvLayerId;
   if (!layerId) return 0;
 

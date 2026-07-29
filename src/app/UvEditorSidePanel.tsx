@@ -10,6 +10,8 @@ import {
   applyPixelOutlineToImage,
   flipImageAsset,
 } from '@/core/image/ImageFilters';
+import { importImageFile } from '@/core/image/ImageImport';
+import { resolveActiveTexture } from '@/core/texture/resolveActiveTexture';
 import { boundsOfUvs, cornersForFaces, resolveUvLayerId, snapshotUvs } from '@/core/uv/UvEdit';
 import { markUvSeamsByAngle, clearAllUvSeams, type UvUnwrapMode } from '@/core/uv/UvOperations';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';

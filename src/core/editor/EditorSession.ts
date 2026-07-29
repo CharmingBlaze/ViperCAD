@@ -23,6 +23,7 @@ import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
 import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
+import { TerrainStructureTool } from '@/core/tools/TerrainStructureTool';
 import { ToolController } from '@/core/tools/ToolController';
 import type { ModellingContext } from '@/core/tools/Tool';
 import type { SnapQuery, SnapResult } from '@/core/snap/SnapEngine';
@@ -281,6 +282,7 @@ export class EditorSession {
     this.tools.register(new MeshSculptTool());
     this.tools.register(new TerrainObjectTool());
     this.tools.register(new TerrainFeatureTool());
+    this.tools.register(new TerrainStructureTool());
   }
 
   private createTransformSystem(open: OpenDocumentSession): TransformSystem {

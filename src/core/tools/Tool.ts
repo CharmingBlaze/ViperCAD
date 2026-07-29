@@ -57,7 +57,8 @@ export type ToolId =
   | 'terrain-sculpt'
   | 'mesh-sculpt'
   | 'terrain-object'
-  | 'terrain-feature';
+  | 'terrain-feature'
+  | 'terrain-structure';
 
 export interface Tool {
   id: ToolId;

@@ -229,15 +229,15 @@ export function generateRiverWaterMesh(
     const v3Pt = addVertex(mesh, p2.right);
     const v4 = addVertex(mesh, p2.left);
 
-    const faceId = addFace(mesh, [v1, v2, v3Pt, v4]);
-    const corners = mesh.faces.get(faceId)?.cornerIds ?? [];
-
-    if (corners.length === 4) {
-      mesh.faceCorners.get(corners[0]!)?.uvs.set(layerId, { x: 0, y: p1.v });
-      mesh.faceCorners.get(corners[1]!)?.uvs.set(layerId, { x: 1, y: p1.v });
-      mesh.faceCorners.get(corners[2]!)?.uvs.set(layerId, { x: 1, y: p2.v });
-      mesh.faceCorners.get(corners[3]!)?.uvs.set(layerId, { x: 0, y: p2.v });
-    }
+    addFace(mesh, [v1, v2, v3Pt, v4], {
+      uvLayerId: layerId,
+      uvs: [
+        { x: 0, y: p1.v },
+        { x: 1, y: p1.v },
+        { x: 1, y: p2.v },
+        { x: 0, y: p2.v },
+      ],
+    });
   }
 
   bumpTopology(mesh);

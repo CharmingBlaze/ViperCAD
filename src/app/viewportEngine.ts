@@ -5,6 +5,7 @@ import {
   Color,
   DirectionalLight,
   DoubleSide,
+  FogExp2,
   Group,
   HemisphereLight,
   MOUSE,
@@ -24,6 +25,7 @@ import {
   type Material,
   type Texture,
 } from 'three';
+import { getDocumentLighting } from '@/core/level/LevelLighting';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { enterGroupFocusFromPick, isObjectInFocusScope } from '@/core/editor/GroupFocus';
@@ -76,6 +78,7 @@ import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
 import { raycastSculptTarget } from '@/core/sculpt/MeshSculptTarget';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
+import { TerrainStructureTool } from '@/core/tools/TerrainStructureTool';
 import { terrainPlacedObjects } from '@/core/terrain/TerrainProps';
 import type { ToolPointerInput } from '@/core/tools/Tool';
 import { WORLD_XY_PLANE, WORLD_XZ_PLANE, WORLD_YZ_PLANE, rayPlaneIntersection } from '@/core/snap/SnapEngine';
@@ -252,6 +255,11 @@ export class ViewportEngine {
     modelName: string;
     onPlaced?: () => void;
   } | null = null;
+  private hemiLight: HemisphereLight | null = null;
+  private ambientLight: AmbientLight | null = null;
+  private sunLight: DirectionalLight | null = null;
+  private fillLight: DirectionalLight | null = null;
+  private rimLight: DirectionalLight | null = null;
 
   attach(
     host: HTMLElement,
@@ -434,17 +442,23 @@ export class ViewportEngine {
       false,
     );
 
-    scene.add(new HemisphereLight(0xd8e4f8, 0x282830, 0.42));
-    scene.add(new AmbientLight(0xffffff, 0.28));
-    const key = new DirectionalLight(0xffffff, 0.95);
-    key.position.set(6, 10, 4);
-    scene.add(key);
-    const fill = new DirectionalLight(0xc8d4ff, 0.42);
-    fill.position.set(-5, 4, -7);
-    scene.add(fill);
-    const rim = new DirectionalLight(0xffe8cc, 0.28);
-    rim.position.set(-2, 3, 8);
-    scene.add(rim);
+    this.hemiLight = new HemisphereLight(0xd8e4f8, 0x282830, 0.42);
+    scene.add(this.hemiLight);
+
+    this.ambientLight = new AmbientLight(0xffffff, 0.28);
+    scene.add(this.ambientLight);
+
+    this.sunLight = new DirectionalLight(0xffffff, 0.95);
+    this.sunLight.position.set(6, 10, 4);
+    scene.add(this.sunLight);
+
+    this.fillLight = new DirectionalLight(0xc8d4ff, 0.42);
+    this.fillLight.position.set(-5, 4, -7);
+    scene.add(this.fillLight);
+
+    this.rimLight = new DirectionalLight(0xffe8cc, 0.28);
+    this.rimLight.position.set(-2, 3, 8);
+    scene.add(this.rimLight);
 
     const ids: ViewId[] = ['persp', 'top', 'front', 'right'];
     for (const id of ids) {
@@ -2304,7 +2318,9 @@ export class ViewportEngine {
         ? activeTool.terrainObjectId
         : activeTool instanceof TerrainFeatureTool && activeTool.terrainObjectId
           ? activeTool.terrainObjectId
-        : this.session.selection.state.activeObjectId;
+          : activeTool instanceof TerrainStructureTool && activeTool.terrainObjectId
+            ? activeTool.terrainObjectId
+            : this.session.selection.state.activeObjectId;
     const object = objectId ? this.session.document.objects.get(objectId) : null;
     if (!object || object.metadata.terrain !== 'true') return input;
     const handle = this.handles.get(object.id);
@@ -2422,7 +2438,8 @@ export class ViewportEngine {
         : tool.mode === 'smooth' ? 0x74d68b
           : tool.mode === 'flatten' ? 0xffc45c
             : tool.mode === 'noise' ? 0xb18cff
-              : 0xff8c28,
+              : tool.mode === 'paint' ? 0x3b82f6
+                : 0xff8c28,
     );
   }
 
@@ -2578,6 +2595,45 @@ export class ViewportEngine {
     this.terrainBrushPreview.scale.setScalar(Math.max(0.1, tool.width / 2));
     const material = this.terrainBrushPreview.material as LineBasicMaterial;
     material.color.setHex(tool.kind === 'river' ? 0x55bde9 : 0xd39a5a);
+  }
+
+  private updateTerrainStructureBrushPreview(
+    input: ToolPointerInput,
+    tool: TerrainStructureTool,
+  ): void {
+    if (!input.worldPosition) {
+      this.terrainBrushPreview.visible = false;
+      return;
+    }
+    this.terrainBrushPreview.visible = true;
+    this.terrainBrushPreview.position.set(
+      input.worldPosition.x,
+      input.worldPosition.y + 0.04,
+      input.worldPosition.z,
+    );
+    const radius =
+      tool.kind === 'building'
+        ? Math.max(tool.buildingWidth, tool.buildingDepth) * 0.5
+        : tool.kind === 'road_grid'
+          ? (tool.gridX * tool.blockSize) * 0.35
+          : tool.kind === 'bridge'
+            ? tool.bridgeWidth * 0.75
+            : tool.kind === 'cave'
+              ? tool.caveRadius
+              : tool.waterfallWidth * 0.5;
+    this.terrainBrushPreview.scale.setScalar(Math.max(0.2, radius));
+    const material = this.terrainBrushPreview.material as LineBasicMaterial;
+    material.color.setHex(
+      tool.kind === 'building'
+        ? 0x3b82f6
+        : tool.kind === 'road_grid'
+          ? 0xf59e0b
+          : tool.kind === 'bridge'
+            ? 0x10b981
+            : tool.kind === 'cave'
+              ? 0x8b5cf6
+              : 0x06b6d4,
+    );
   }
 
   private faceConstructionPlane(e: PointerEvent, paneId: ViewId): { plane: { origin: { x:number;y:number;z:number }; normal: { x:number;y:number;z:number }; xAxis: { x:number;y:number;z:number }; yAxis: { x:number;y:number;z:number } }; id: string } | null {
@@ -3636,6 +3692,54 @@ export class ViewportEngine {
     if (!this.attached || !this.session || !this.scene) return;
     const session = this.session;
     this.sceneSynchronizer.sync(this.scene);
+
+    // Sync Level Lighting
+    const lighting = getDocumentLighting(session.document);
+    if (this.hemiLight) {
+      this.hemiLight.color.setStyle(lighting.skyColor);
+      this.hemiLight.groundColor.setStyle(lighting.groundColor);
+      this.hemiLight.intensity = lighting.ambientIntensity * 0.7;
+    }
+    if (this.ambientLight) {
+      this.ambientLight.color.setStyle(lighting.skyColor);
+      this.ambientLight.intensity = lighting.ambientIntensity * 0.3;
+    }
+    if (this.sunLight) {
+      this.sunLight.visible = lighting.sunEnabled;
+      this.sunLight.color.setStyle(lighting.sunColor);
+      this.sunLight.intensity = lighting.sunIntensity;
+      this.sunLight.castShadow = lighting.sunShadows;
+      const radAzimuth = (lighting.sunAzimuth * Math.PI) / 180;
+      const radElevation = (lighting.sunElevation * Math.PI) / 180;
+      const dist = 50;
+      this.sunLight.position.set(
+        dist * Math.cos(radElevation) * Math.sin(radAzimuth),
+        dist * Math.sin(radElevation),
+        dist * Math.cos(radElevation) * Math.cos(radAzimuth),
+      );
+    }
+    if (this.fillLight) {
+      this.fillLight.color.setStyle(lighting.fillColor);
+      this.fillLight.intensity = lighting.fillIntensity;
+    }
+    if (this.rimLight) {
+      this.rimLight.color.setStyle(lighting.rimColor);
+      this.rimLight.intensity = lighting.rimIntensity;
+    }
+    if (this.renderer) {
+      this.renderer.toneMappingExposure = lighting.exposure;
+    }
+    if (lighting.fogEnabled) {
+      if (!this.scene.fog || !(this.scene.fog instanceof FogExp2)) {
+        this.scene.fog = new FogExp2(lighting.fogColor, lighting.fogDensity);
+      } else {
+        (this.scene.fog as FogExp2).color.setStyle(lighting.fogColor);
+        (this.scene.fog as FogExp2).density = lighting.fogDensity;
+      }
+    } else {
+      this.scene.fog = null;
+    }
+
     const shadingMode = this.workspace?.getShadingMode() ?? 'material';
     for (const handle of this.handles.values()) {
       applyViewportRenderStyle(handle, shadingMode);
@@ -3687,7 +3791,7 @@ export class ViewportEngine {
     this.syncOrbitEnabled();
   }
 
-  private resize(): void {
+  resize(): void {
     if (!this.host || !this.renderer || !this.workspace) return;
     const bounds = this.host.getBoundingClientRect();
     const w = Math.max(1, Math.floor(bounds.width));

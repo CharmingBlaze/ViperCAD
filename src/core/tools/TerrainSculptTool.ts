@@ -7,9 +7,9 @@ import {
   restorePlacedTransforms,
   snapshotPlacedTransforms,
 } from '@/core/terrain/TerrainProps';
-import type { ModellingContext, Tool, ToolPointerInput } from '@/core/tools/Tool';
+import { paintTerrainLayerAtPosition } from '@/core/terrain/TerrainLayers';
 
-export type TerrainBrushMode = 'raise' | 'lower' | 'smooth' | 'flatten' | 'noise';
+export type TerrainBrushMode = 'raise' | 'lower' | 'smooth' | 'flatten' | 'noise' | 'paint';
 export type TerrainFalloff = 'smooth' | 'linear' | 'sharp';
 
 export class TerrainSculptTool implements Tool {
@@ -19,6 +19,7 @@ export class TerrainSculptTool implements Tool {
   falloff: TerrainFalloff = 'smooth';
   radius = 2.5;
   strength = 0.35;
+  activeLayerIndex = 0;
   flattenHeight = 0;
   dragging = false;
   revision = 0;
@@ -178,6 +179,17 @@ export class TerrainSculptTool implements Tool {
   }
 
   private applyBrush(mesh: EditableMesh, point: Vec3, shiftKey: boolean): void {
+    if (this.mode === 'paint') {
+      paintTerrainLayerAtPosition(
+        mesh,
+        point,
+        this.activeLayerIndex,
+        this.radius,
+        this.strength,
+      );
+      return;
+    }
+
     const affected: Array<{ id: VertexId; weight: number }> = [];
     for (const vertex of mesh.vertices.values()) {
       const distance = Math.hypot(vertex.position.x - point.x, vertex.position.z - point.z);

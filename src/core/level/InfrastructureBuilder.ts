@@ -69,19 +69,24 @@ export function carveCaveTunnel(
 ): number {
   let affected = 0;
   const r = Math.max(0.5, radius);
+  const floorY = entrancePos.y - r * 0.75;
+  const searchDist = Math.max(r * 2.5, tunnelLength);
 
   for (const vertex of mesh.vertices.values()) {
     const dx = vertex.position.x - entrancePos.x;
     const dy = vertex.position.y - entrancePos.y;
     const dz = vertex.position.z - entrancePos.z;
-    const distXZ = Math.hypot(dx, dz);
+    const distHoriz = Math.hypot(dx, dz);
 
-    if (distXZ <= r && Math.abs(dy) <= r * 1.2 && dz >= 0 && dz <= tunnelLength) {
-      // Push terrain Y height down to carve cave archway
-      const archFloor = entrancePos.y - r * 0.8;
-      if (vertex.position.y > archFloor) {
-        vertex.position.y = archFloor;
-        affected += 1;
+    if (distHoriz <= r * 2.0 && Math.abs(dy) <= r * 2.0) {
+      const dist3D = Math.hypot(dx, dy, dz);
+      if (dist3D <= searchDist) {
+        const falloff = Math.max(0, 1 - distHoriz / (r * 2.0));
+        const targetY = floorY + (1 - falloff) * (entrancePos.y - floorY);
+        if (vertex.position.y > targetY) {
+          vertex.position.y = targetY;
+          affected += 1;
+        }
       }
     }
   }

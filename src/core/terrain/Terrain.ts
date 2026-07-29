@@ -3,7 +3,7 @@ import {
   createMaterial,
   removeObject,
 } from '@/core/document/ModelDocument';
-import type { ObjectId } from '@/core/document/types';
+import type { ModelDocument, ObjectId } from '@/core/document/types';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { createImageAsset, createTextureAsset } from '@/core/image/PixelEditor';
 import { v2 } from '@/core/math/Vec2';

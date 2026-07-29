@@ -12,6 +12,7 @@ describe('PixelOutlineAndFilters', () => {
       height: 3,
       pixels: new Uint8ClampedArray(3 * 3 * 4), // 3x3 transparent image
       revision: 1,
+      colourMode: 'rgba' as const,
     };
 
     // Set center pixel (1, 1) to red
@@ -43,6 +44,7 @@ describe('PixelOutlineAndFilters', () => {
         0, 0, 255, 255, // Right pixel: Blue
       ]),
       revision: 1,
+      colourMode: 'rgba' as const,
     };
 
     flipImageAsset(session, image, 'horizontal');

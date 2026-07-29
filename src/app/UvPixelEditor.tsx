@@ -38,6 +38,7 @@ import {
   uvGizmoCursor,
   alignUvs,
   snapUvsToPixelGrid,
+  weldSelectedUvs,
   type UvAlignMode,
   type UvGizmoHandle,
   type UvSnapshot,
@@ -824,6 +825,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
     unwrapUvs(ctx.mesh, faceIds, mode, ctx.layerId, { view });
     const after = snapshotUvs(ctx.mesh, corners, ctx.layerId);
     const labels: Record<UvUnwrapMode, string> = {
+      smart: 'Smart UV',
       auto: 'Auto UV',
       box: 'Box UV',
       cubic: 'Cubic UV',
@@ -1780,7 +1782,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
       return;
     }
     alignUvs(sel.ctx.mesh, sel.corners, sel.ctx.layerId, mode);
-    session.history.commit({
+    session.history.execute({
       name: `Align UVs (${mode})`,
       execute: () => session.requestRedraw(),
       undo: () => session.requestRedraw(),
@@ -1795,7 +1797,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
       return;
     }
     snapUvsToPixelGrid(sel.ctx.mesh, sel.corners, sel.ctx.layerId, image?.width ?? 64, image?.height ?? 64);
-    session.history.commit({
+    session.history.execute({
       name: 'Snap UVs to Pixel Grid',
       execute: () => session.requestRedraw(),
       undo: () => session.requestRedraw(),

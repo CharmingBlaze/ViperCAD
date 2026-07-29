@@ -1,4 +1,4 @@
-import { v3 } from '@/core/math/Vec3';
+import { v3, type Vec3 } from '@/core/math/Vec3';
 import { v2 as uv } from '@/core/math/Vec2';
 import { MeshBuilder } from '@/core/mesh/MeshBuilder';
 import type { EditableMesh } from '@/core/mesh/types';

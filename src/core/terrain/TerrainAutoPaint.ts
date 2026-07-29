@@ -97,6 +97,7 @@ export function autoPaintTerrainMesh(
     painted += 1;
   }
 
+  bumpPositions(mesh);
   mesh.geometryVersion += 1;
   mesh.dirty.uvs = true;
   return painted;
