@@ -26,6 +26,16 @@ export function clearMeshMask(meshId: string): void {
   meshMaskCache.delete(meshId);
 }
 
+export function pruneMeshMasks(liveMeshIds: Set<string>): void {
+  for (const id of meshMaskCache.keys()) {
+    if (!liveMeshIds.has(id)) meshMaskCache.delete(id);
+  }
+}
+
+export function clearAllMeshMasks(): void {
+  meshMaskCache.clear();
+}
+
 export function invertMeshMask(mesh: EditableMesh): void {
   const mask = getMeshMask(mesh.id);
   for (const vertexId of mesh.vertices.keys()) {

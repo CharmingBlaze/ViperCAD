@@ -251,20 +251,17 @@ export default function App() {
   }, [animation]);
 
   useEffect(() => {
+    if (!animation.playing) return;
     let frame = 0;
     let last = performance.now();
     const loop = (now: number) => {
       frame = requestAnimationFrame(loop);
-      if (!animation.playing) {
-        last = now;
-        return;
-      }
       animation.advancePlayback((now - last) / 1000);
       last = now;
     };
     frame = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(frame);
-  }, [animation]);
+  }, [animation, animation.playing]);
 
   useEffect(() => {
     if (!timelineOpen || workspace.shellMode !== 'animate') return;
@@ -885,11 +882,6 @@ export default function App() {
         'info',
       );
     }
-    refresh();
-  };
-
-  const openDocumentById = (documentId: string) => {
-    session.openDocument(documentId);
     refresh();
   };
 

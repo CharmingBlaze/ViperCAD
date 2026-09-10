@@ -23,7 +23,8 @@ export function handleTransformHotkey(
   getCameraAxes: (viewId: ViewId) => CameraAxes | null,
   getPointerSample?: (viewId: ViewId) => PointerSample | null,
 ): boolean {
-  if (isTypingTarget(e.target)) return false;
+  const confirmOrCancel = e.key === 'Enter' || e.key === 'NumpadEnter' || e.key === 'Return' || e.key === 'Escape';
+  if (isTypingTarget(e.target) && !(session.transform.active && confirmOrCancel)) return false;
   if (workspace.input.owner === 'divider') return false;
 
   const key = e.key;

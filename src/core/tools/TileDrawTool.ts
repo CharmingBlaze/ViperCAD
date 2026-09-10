@@ -366,7 +366,8 @@ function gridLine(from: AtlasTileCell, to: AtlasTileCell): AtlasTileCell[] {
   const dx = Math.abs(to.column - x), sx = x < to.column ? 1 : -1;
   const dy = -Math.abs(to.row - y), sy = y < to.row ? 1 : -1;
   let error = dx + dy;
-  for (;;) {
+  const maxSteps = dx + Math.abs(to.row - from.row) + 2;
+  for (let step = 0; step < maxSteps; step++) {
     result.push({ column: x, row: y });
     if (x === to.column && y === to.row) break;
     const twice = 2 * error;

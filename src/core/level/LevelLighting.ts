@@ -1,4 +1,4 @@
-import type { ViperDocument, ViperProject } from '@/core/document/types';
+import type { ModelDocument, ViperDocument, ViperProject } from '@/core/document/types';
 
 export type LevelLightingPresetId =
   | 'default'
@@ -220,14 +220,14 @@ export const LIGHTING_PRESETS: Record<LevelLightingPresetId, { label: string; co
   },
 };
 
-export function getDocumentLighting(doc: ViperDocument | ViperProject): LevelLightingConfig {
+export function getDocumentLighting(doc: ViperDocument | ViperProject | ModelDocument): LevelLightingConfig {
   const settings = doc.settings as Record<string, unknown>;
   const raw = settings?.lighting as Partial<LevelLightingConfig> | undefined;
   return { ...DEFAULT_LEVEL_LIGHTING, ...(raw ?? {}) };
 }
 
 export function updateDocumentLighting(
-  doc: ViperDocument | ViperProject,
+  doc: ViperDocument | ViperProject | ModelDocument,
   updates: Partial<LevelLightingConfig>,
 ): LevelLightingConfig {
   const current = getDocumentLighting(doc);

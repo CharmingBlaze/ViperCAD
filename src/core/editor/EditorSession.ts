@@ -45,6 +45,11 @@ import { MeshBvh } from '@/core/spatial/MeshBvh';
 import { inverseTransformPointApprox, transformPoint } from '@/core/math/Transform';
 import { computeFaceNormal } from '@/core/mesh/Normals';
 import { faceVertexIds } from '@/core/mesh/EditableMesh';
+import { invalidateDisplayMeshCache } from '@/core/modifiers/displayMesh';
+import { clearSculptBvhs, pruneSculptBvhs } from '@/core/sculpt/MeshSculptTarget';
+import { clearAllMeshMasks, pruneMeshMasks } from '@/core/sculpt/SculptMask';
+import { clearSpatialIndexes, pruneSpatialIndexes } from '@/core/sculpt/SculptSpatialIndex';
+import { clearVertexNeighborMaps, pruneVertexNeighborMaps } from '@/core/sculpt/VertexNeighbors';
 
 type SnapIndexCache = {
   meshId: string;
@@ -246,14 +251,38 @@ export class EditorSession {
 
   undo(): boolean {
     const ok = this.history.undo();
-    if (ok) { this.selection.prune(this.document); this.requestRedraw(); }
+    if (ok) {
+      this.selection.prune(this.document);
+      this.releaseRuntimeCaches(false);
+      this.requestRedraw();
+    }
     return ok;
   }
 
   redo(): boolean {
     const ok = this.history.redo();
-    if (ok) { this.selection.prune(this.document); this.requestRedraw(); }
+    if (ok) {
+      this.selection.prune(this.document);
+      this.releaseRuntimeCaches(false);
+      this.requestRedraw();
+    }
     return ok;
+  }
+
+  private releaseRuntimeCaches(clearAll: boolean): void {
+    if (clearAll) {
+      clearSpatialIndexes();
+      clearVertexNeighborMaps();
+      clearSculptBvhs();
+      clearAllMeshMasks();
+      invalidateDisplayMeshCache();
+      return;
+    }
+    const live = new Set(this.project.meshes.keys());
+    pruneSpatialIndexes(live);
+    pruneVertexNeighborMaps(live);
+    pruneSculptBvhs(live);
+    pruneMeshMasks(live);
   }
 
   loadProject(project: ViperProject, activeDocumentId?: DocumentId): void {
@@ -277,6 +306,7 @@ export class EditorSession {
     this.transform = this.createTransformSystem(open);
     this.snapIndexCache.clear();
     this.snapBvhCache.clear();
+    this.releaseRuntimeCaches(true);
     this.tools.setActive('select', this.context());
     syncFocusScopeFilter(this);
     this.queuePlaceholderHydration();

@@ -146,8 +146,10 @@ export function terrainAssetFromObject(document: ModelDocument, objectId: Object
 }
 
 export function activeTerrain(sessionOrDoc: EditorSession | ModelDocument) {
-  const isSession = 'selection' in sessionOrDoc && !!sessionOrDoc.selection;
-  const doc: ModelDocument = isSession ? (sessionOrDoc as EditorSession).document : sessionOrDoc;
+  const doc: ModelDocument = 'selection' in sessionOrDoc
+    ? sessionOrDoc.document
+    : sessionOrDoc;
+  const isSession = 'selection' in sessionOrDoc;
   if (isSession) {
     const selected = terrainAssetFromObject(
       doc,

@@ -9,6 +9,7 @@ import {
   snapshotPlacedTransforms,
 } from '@/core/terrain/TerrainProps';
 import { paintTerrainLayerAtPosition } from '@/core/terrain/TerrainLayers';
+import type { ModellingContext, Tool, ToolPointerInput } from './Tool';
 
 export type TerrainBrushMode = 'raise' | 'lower' | 'smooth' | 'flatten' | 'noise' | 'erosion' | 'thermal' | 'plateau' | 'paint';
 export type TerrainFalloff = 'smooth' | 'linear' | 'sharp';

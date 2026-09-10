@@ -12,10 +12,6 @@ import {
   restorePlacedTransforms,
   terrainPlacedObjects,
 } from '@/core/terrain/TerrainProps';
-import {
-  carveTerrainSplinePath,
-  generateRiverWaterMesh,
-} from '@/core/terrain/SplineCarve';
 import { autoPaintTerrainMesh } from '@/core/terrain/TerrainAutoPaint';
 import {
   getTerrainLayerStack,
@@ -25,19 +21,10 @@ import {
   moveTerrainLayer,
   duplicateTerrainLayer,
   fillTerrainWithLayer,
-  paintTerrainLayerAtPosition,
 } from '@/core/terrain/TerrainLayers';
 import { importImageFile } from '@/core/image/ImageImport';
-import {
-  generateBuildingMesh,
-  generateRoadGridMesh,
-  getOrCreateBuildingMaterial,
-} from '@/core/level/CityGenerator';
-import { buildBridgeMesh, carveCaveTunnel, generateWaterfallMesh } from '@/core/level/InfrastructureBuilder';
 import { FloatingSkyboxEditor } from '@/app/FloatingSkyboxEditor';
 import { FloatingLightingEditor } from '@/app/FloatingLightingEditor';
-import { commitMeshObject } from '@/core/document/ModelDocument';
-import { v3 } from '@/core/math/Vec3';
 import { faceVertexIds } from '@/core/mesh/EditableMesh';
 import type { EditableMesh } from '@/core/mesh/types';
 import {
@@ -55,6 +42,7 @@ import {
 } from '@/core/tools/TerrainObjectTool';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
 import { TerrainStructureTool, type TerrainStructureKind } from '@/core/tools/TerrainStructureTool';
+import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
 import { TileDrawTool, type TileDrawMode } from '@/core/tools/TileDrawTool';
 
 type Props = {
@@ -1210,6 +1198,16 @@ export function FloatingTerrainObjects({
                         ? '✓ Path Active'
                         : 'Carve Path'}
                     </button>
+                    {(['building', 'road_grid', 'bridge', 'cave', 'waterfall'] as TerrainStructureKind[]).map((kind) => (
+                      <button
+                        key={kind}
+                        type="button"
+                        className={`terrain-action-btn${session.tools.getActive() === structureTool && structureTool.kind === kind ? ' is-active' : ''}`}
+                        onClick={() => prepareStructureTool(kind)}
+                      >
+                        {kind.replace('_', ' ')}
+                      </button>
+                    ))}
                   </div>
                   {session.tools.getActive() === featureTool && (
                     <div className="terrain-placement-settings">

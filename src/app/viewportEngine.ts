@@ -175,10 +175,18 @@ import {
   snapshotVertexPositions,
   VERTEX_BEZIER_META,
   vertexBezierControlPoint,
+  type VertexBezierHandleTarget,
 } from '@/core/curves/BezierFromVertices';
 
 const PICK_TOLERANCE_PX = 16;
 const DRAW_VERTEX_PICK_PX = 18;
+
+function asVertexBezierHandle(target: CurveControlTarget): VertexBezierHandleTarget | null {
+  if (target.kind === 'anchor' || target.kind === 'handle-in' || target.kind === 'handle-out') {
+    return { kind: target.kind as VertexBezierHandleTarget['kind'], index: target.index };
+  }
+  return null;
+}
 
 type MarqueeState = {
   paneId: ViewId;
@@ -4236,9 +4244,10 @@ export class ViewportEngine {
     const object = objectId ? this.session.document.objects.get(objectId) : null;
     const mesh = object?.meshId ? this.session.document.meshes.get(object.meshId) : null;
     const vertexBezier = this.workspace.vertexBezierEdit;
+    const bezierHandle = asVertexBezierHandle(target);
     const vertexLocal =
-      vertexBezier && object && mesh && vertexBezier.objectId === object.id
-        ? vertexBezierControlPoint(mesh, vertexBezier, target)
+      vertexBezier && object && mesh && vertexBezier.objectId === object.id && bezierHandle
+        ? vertexBezierControlPoint(mesh, vertexBezier, bezierHandle)
         : null;
     const operation = readCurveOperation(object?.metadata.curveOperation);
     const localPoint =
@@ -4327,10 +4336,12 @@ export class ViewportEngine {
     if (drag.vertexBezier && this.workspace?.vertexBezierEdit) {
       const mesh = object.meshId ? this.session.document.meshes.get(object.meshId) : null;
       if (!mesh) return;
+      const bezierHandle = asVertexBezierHandle(target);
+      if (!bezierHandle) return;
       const nextState = applyVertexBezierControl(
         mesh,
         this.workspace.vertexBezierEdit,
-        target,
+        bezierHandle,
         next,
         { alignOpposite: !e.altKey },
       );

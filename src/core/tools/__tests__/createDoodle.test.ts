@@ -4,7 +4,6 @@ import { CreateDoodleTool, smoothDoodlePoints } from '@/core/tools/CreateDoodleT
 import { v3 } from '@/core/math/Vec3';
 import type { ToolPointerInput } from '@/core/tools/Tool';
 import { readCurveOperation } from '@/core/curves/CurveOperation';
-import { DEFAULT_PLACEHOLDER_IMAGE_NAME } from '@/core/image/DefaultPlaceholderImage';
 import { readObjectModifierStack } from '@/core/modifiers/serialize';
 
 function pointer(
@@ -55,11 +54,9 @@ describe('CreateDoodleTool', () => {
     expect((Math.min(...ys) + Math.max(...ys)) / 2).toBeCloseTo(0, 5);
     expect((Math.min(...zs) + Math.max(...zs)) / 2).toBeCloseTo(0, 5);
     const material = session.document.materials.get(object.materialSlotIds[0]!)!;
-    expect(material.baseColourTextureId).toBeTruthy();
-    const texture = session.document.textures.get(material.baseColourTextureId!)!;
-    expect(session.document.images.get(texture.imageAssetId)?.name).toBe(
-      DEFAULT_PLACEHOLDER_IMAGE_NAME,
-    );
+    expect(material.baseColourTextureId).toBeNull();
+    expect(material.doubleSided).toBe(true);
+    expect(material.baseColour.x).toBeGreaterThan(0.7);
     const operation = readCurveOperation(object.metadata.curveOperation);
     expect(operation?.style).toBe('soft');
     expect(operation?.points.length).toBeGreaterThanOrEqual(2);
