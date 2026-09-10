@@ -1,8 +1,11 @@
 {
   "name": "vipercad",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite",
     "dev:rig": "vite --config rig/vite.config.ts",
@@ -10,12 +13,14 @@
     "build:rig": "vite build --config rig/vite.config.ts",
     "build:all": "npm run build && npm run build:rig",
     "build:exe": "npm run build && node scripts/prepare-desktop.mjs && cd desktop && go build -ldflags=\"-H windowsgui\" -o ../ViperCAD.exe .",
-    "lint": "oxlint",
+    "lint": "oxlint src rig",
+    "ci": "npm test && npm run lint && npm run build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@voluma/three-transform-gizmo": "^1.0.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "three": "^0.185.1",

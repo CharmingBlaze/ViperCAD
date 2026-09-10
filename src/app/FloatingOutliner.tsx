@@ -22,8 +22,9 @@ import type { ObjectId } from '@/core/document/types';
 import { OutlinerDocumentList } from '@/app/outliner/OutlinerDocumentList';
 import { AddModelMenu } from '@/app/outliner/AddModelMenu';
 import { SceneContextBar } from '@/app/outliner/SceneContextBar';
+import { BlenderIcon, type KnownBlenderIcon } from '@/components/BlenderIcon';
 
-type OutlinerTab = 'scene' | 'models' | 'levels';
+export type OutlinerTab = 'scene' | 'models' | 'levels';
 
 type Props = {
   session: EditorSession;
@@ -32,6 +33,7 @@ type Props = {
   activeTab?: OutlinerTab;
   onTabChange?: (tab: OutlinerTab) => void;
   initialTab?: OutlinerTab;
+  docked?: boolean;
 };
 
 type DragState = { pointerId: number; offsetX: number; offsetY: number };
@@ -43,6 +45,7 @@ export function FloatingOutliner({
   activeTab,
   onTabChange,
   initialTab = 'scene',
+  docked = false,
 }: Props) {
   const [internalTab, setInternalTab] = useState<OutlinerTab>(initialTab);
   const tab = activeTab ?? internalTab;
@@ -387,8 +390,8 @@ export function FloatingOutliner({
   return (
     <aside
       ref={panel}
-      className={`floating-outliner${minimized ? ' is-minimized' : ''}`}
-      style={{ left: position.x, top: position.y }}
+      className={`floating-outliner${minimized ? ' is-minimized' : ''}${docked ? ' is-docked' : ''}`}
+      style={docked ? undefined : { left: position.x, top: position.y }}
       aria-label="Outliner"
       onDragOver={(event) => {
         if (!dragObjectId) return;
@@ -410,78 +413,82 @@ export function FloatingOutliner({
         }
       }}
     >
-      <header
-        className="outliner-header"
-        onPointerDown={(event) => {
-          if ((event.target as HTMLElement).closest('button')) return;
-          const rect = panel.current?.getBoundingClientRect();
-          drag.current = {
-            pointerId: event.pointerId,
-            offsetX: event.clientX - (rect?.left ?? position.x),
-            offsetY: event.clientY - (rect?.top ?? position.y),
-          };
-        }}
-      >
-        <div>
-          <strong>Outliner</strong>
-          {tab !== 'scene' && (
-            <span>
-              {tab === 'models'
-                ? `${session.project.modelDocumentIds.length} models`
-                : `${session.project.levelDocumentIds.length} levels`}
-            </span>
-          )}
-        </div>
-        <div className="outliner-actions">
-          {tab === 'scene' && session.focusGroupId ? (
+      {!docked && (
+        <header
+          className="outliner-header"
+          onPointerDown={(event) => {
+            if ((event.target as HTMLElement).closest('button')) return;
+            const rect = panel.current?.getBoundingClientRect();
+            drag.current = {
+              pointerId: event.pointerId,
+              offsetX: event.clientX - (rect?.left ?? position.x),
+              offsetY: event.clientY - (rect?.top ?? position.y),
+            };
+          }}
+        >
+          <div>
+            <strong>Outliner</strong>
+            {tab !== 'scene' && (
+              <span>
+                {tab === 'models'
+                  ? `${session.project.modelDocumentIds.length} models`
+                  : `${session.project.levelDocumentIds.length} levels`}
+              </span>
+            )}
+          </div>
+          <div className="outliner-actions">
+            {tab === 'scene' && session.focusGroupId ? (
+              <button
+                type="button"
+                className="outliner-icon"
+                aria-label="Exit group focus"
+                title="Exit Group (Escape)"
+                onClick={() => {
+                  exitGroupFocus(session);
+                  touch();
+                }}
+              >
+                ↑
+              </button>
+            ) : null}
             <button
               type="button"
               className="outliner-icon"
-              aria-label="Exit group focus"
-              title="Exit Group (Escape)"
-              onClick={() => {
-                exitGroupFocus(session);
-                touch();
-              }}
+              aria-label={minimized ? 'Restore outliner' : 'Minimize outliner'}
+              title={minimized ? 'Restore' : 'Minimize'}
+              onClick={() => setMinimized((value) => !value)}
             >
-              ↑
+              {minimized ? '□' : '–'}
             </button>
-          ) : null}
-          <button
-            type="button"
-            className="outliner-icon"
-            aria-label={minimized ? 'Restore outliner' : 'Minimize outliner'}
-            title={minimized ? 'Restore' : 'Minimize'}
-            onClick={() => setMinimized((value) => !value)}
-          >
-            {minimized ? '□' : '–'}
-          </button>
-          <button
-            type="button"
-            className="outliner-icon danger"
-            aria-label="Close outliner"
-            title="Close"
-            onClick={onClose}
-          >
-            ×
-          </button>
-        </div>
-      </header>
+            <button
+              type="button"
+              className="outliner-icon danger"
+              aria-label="Close outliner"
+              title="Close"
+              onClick={onClose}
+            >
+              ×
+            </button>
+          </div>
+        </header>
+      )}
       {!minimized && (
         <nav className="outliner-tabs" aria-label="Outliner views">
           {([
-            ['scene', 'Scene', null],
-            ['models', 'Models', session.project.modelDocumentIds.length],
-            ['levels', 'Levels', session.project.levelDocumentIds.length],
-          ] as const).map(([id, label, count]) => (
+            ['scene', 'Scene', 'outliner', null],
+            ['models', 'Models', 'object_data', session.project.modelDocumentIds.length],
+            ['levels', 'Levels', 'world', session.project.levelDocumentIds.length],
+          ] as const).map(([id, label, icon, count]) => (
             <button
               key={id}
               type="button"
               className={`outliner-tab${tab === id ? ' is-active' : ''}`}
               aria-selected={tab === id}
               onClick={() => selectTab(id)}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
             >
-              {label}
+              <BlenderIcon name={icon as KnownBlenderIcon} size={13} />
+              <span>{label}</span>
               {count !== null ? <span className="outliner-tab-count">{count}</span> : null}
             </button>
           ))}
@@ -507,8 +514,10 @@ export function FloatingOutliner({
                 onClick={() => {
                   if (commitGroupSelection(session)) touch();
                 }}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
               >
-                Group
+                <BlenderIcon name="group" size={13} />
+                <span>Group</span>
               </button>
               <button
                 type="button"
@@ -519,8 +528,10 @@ export function FloatingOutliner({
                 onClick={() => {
                   if (commitUngroupSelection(session)) touch();
                 }}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
               >
-                Ungroup
+                <BlenderIcon name="outliner_collection" size={13} />
+                <span>Ungroup</span>
               </button>
             </div>
           </div>
@@ -558,11 +569,27 @@ export function FloatingOutliner({
             {session.document.rootObjectIds.length
               ? rows(session.document.rootObjectIds)
               : (
-                <p className="outliner-empty">
-                  {session.document.kind === 'level'
-                    ? 'Empty level — use Add Model or create geometry in the viewport'
-                    : 'Empty model — add meshes to build a reusable asset'}
-                </p>
+                <div className="outliner-empty">
+                  <strong>{session.document.kind === 'level' ? 'Empty level' : 'Empty scene'}</strong>
+                  <span>
+                    {session.document.kind === 'level'
+                      ? 'Place a model or create geometry.'
+                      : 'Create a primitive to begin modelling.'}
+                  </span>
+                  {session.document.kind !== 'level' && (
+                    <button
+                      type="button"
+                      className="outliner-empty-action"
+                      onClick={() => {
+                        session.tools.setActive('create-primitive', session.context());
+                        onRefresh();
+                      }}
+                    >
+                      <BlenderIcon name="add" size={12} style={{ marginRight: 4 }} />
+                      Add Primitive
+                    </button>
+                  )}
+                </div>
               )}
           </div>
         </div>

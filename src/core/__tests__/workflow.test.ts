@@ -83,6 +83,21 @@ describe('complete workflow contracts', () => {
     expect(image.revision).toBe(2);
   });
 
+  it('fills using tolerance and can include disconnected matching pixels', () => {
+    const doc = createEmptyDocument();
+    const image = createImageAsset(doc, 'Bucket', 3, 1, [100, 100, 100, 255]);
+    setPixel(image, 1, 0, [0, 0, 0, 255]);
+    setPixel(image, 2, 0, [112, 100, 100, 255]);
+
+    expect(floodFill(image, 0, 0, [255, 0, 0, 255], { tolerance: 16 })).toBe(1);
+    const allMatches = createImageAsset(doc, 'Bucket all', 3, 1, [100, 100, 100, 255]);
+    setPixel(allMatches, 1, 0, [0, 0, 0, 255]);
+    setPixel(allMatches, 2, 0, [112, 100, 100, 255]);
+    expect(floodFill(allMatches, 0, 0, [0, 255, 0, 255], { tolerance: 16, contiguous: false })).toBe(2);
+    expect(getPixel(image, 0, 0)).toEqual([255, 0, 0, 255]);
+    expect(getPixel(allMatches, 2, 0)).toEqual([0, 255, 0, 255]);
+  });
+
   it('maps BVH triangle hits back to logical faces', () => {
     const mesh = buildBox({ width: 2, height: 2, depth: 2 }); const bvh = new MeshBvh();
     const hit = bvh.raycast(mesh, { x: 0, y: 4, z: 0 }, { x: 0, y: -1, z: 0 });

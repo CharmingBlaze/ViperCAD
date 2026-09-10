@@ -3,6 +3,7 @@ import type { CommandHistory } from '@/core/history/CommandHistory';
 import type { SelectionManager, SelectionMode } from '@/core/selection/SelectionManager';
 import type { ConstructionPlane, SnapQuery, SnapResult } from '@/core/snap/SnapEngine';
 import type { Vec3 } from '@/core/math/Vec3';
+import type { GizmoMode } from '@/core/transform/types';
 
 export type PointerButton = 'left' | 'middle' | 'right';
 
@@ -16,9 +17,11 @@ export type ToolPointerInput = {
   shiftKey: boolean;
   ctrlKey: boolean;
   altKey: boolean;
+  pressure?: number;
   numericValue?: number;
   /** World units represented by one CSS pixel at the active pivot depth (ortho/persp). */
   worldUnitsPerPixel?: number;
+  viewportId?: string;
 };
 
 export type ModellingContext = {
@@ -30,7 +33,10 @@ export type ModellingContext = {
   gridSize: number;
   resolveSnap: (query: SnapQuery) => SnapResult;
   requestRedraw: () => void;
+  notify?: (text: string, kind?: 'info' | 'success' | 'error') => void;
   constructionPlaneId?: string;
+  setActiveTool?: (id: ToolId) => void;
+  setGizmoMode?: (mode: GizmoMode) => void;
 };
 
 export type ToolId =
@@ -51,7 +57,10 @@ export type ToolId =
   | 'terrain-sculpt'
   | 'mesh-sculpt'
   | 'terrain-object'
-  | 'terrain-feature';
+  | 'terrain-feature'
+  | 'blockout-vector'
+  | 'blockout-solid'
+  | 'blockout-round';
 
 export interface Tool {
   id: ToolId;

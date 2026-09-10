@@ -2,6 +2,11 @@ import { createId } from '@/core/ids/IdService';
 import { defaultTransform, cloneTransform } from '@/core/math/Transform';
 import { v3 } from '@/core/math/Vec3';
 import { cloneMeshPreserveIds } from '@/core/mesh/EditableMesh';
+import {
+  createGeneratedPlaceholderPixels,
+  DEFAULT_PLACEHOLDER_IMAGE_NAME,
+  GENERATED_PLACEHOLDER_SIZE,
+} from '@/core/image/DefaultPlaceholderImage';
 import { normalizeMaterialAsset } from '@/core/material/MaterialPresets';
 import type { EditableMesh, MeshId } from '@/core/mesh/types';
 import {
@@ -18,18 +23,22 @@ import {
   type SceneObject,
   type SceneObjectKind,
   type TextureAsset,
+  type TextureId,
 } from './types';
+
+/** Clear azure tint. Multiplies with the default texture so both colour and detail read. */
+export const DEFAULT_MATERIAL_COLOUR = v3(0.42, 0.68, 0.96);
 
 export function createDefaultMaterial(name = 'Material'): MaterialAsset {
   return normalizeMaterialAsset({
     id: createId('mat'),
     name,
-    shadingModel: 'lit',
-    presetId: 'default',
-    baseColour: v3(0.75, 0.75, 0.78),
+    shadingModel: 'unlit',
+    presetId: 'default-low-poly-terrain',
+    baseColour: { ...DEFAULT_MATERIAL_COLOUR },
     baseColourTextureId: null,
     normalTextureId: null,
-    roughness: 0.6,
+    roughness: 0.55,
     roughnessTextureId: null,
     metallic: 0,
     metallicTextureId: null,
@@ -43,52 +52,41 @@ export function createDefaultMaterial(name = 'Material'): MaterialAsset {
     ior: 1.5,
     clearcoat: 0,
     clearcoatRoughness: 0.03,
-    doubleSided: false,
-    unlit: false,
-    flatShaded: true,
-    textureFiltering: 'nearest',
+    doubleSided: true,
+    unlit: true,
+    flatShaded: false,
+    textureFiltering: 'linear',
     textureWrapping: 'repeat',
     uvLayerIndex: 0,
   });
 }
 
-/** Small nearest-neighbour checker so selection overlays can be verified over real textures. */
-export function createDefaultCheckerAssets(): {
+/** Default material map. Tiny generated pixels until the bundled object texture hydrates. */
+export function createDefaultPlaceholderAssets(): {
   material: MaterialAsset;
   texture: TextureAsset;
   image: ImageAsset;
 } {
-  const size = 8;
-  const pixels = new Uint8ClampedArray(size * size * 4);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = (y * size + x) * 4;
-      const on = ((x ^ y) & 1) === 0;
-      pixels[i] = on ? 220 : 60;
-      pixels[i + 1] = on ? 90 : 140;
-      pixels[i + 2] = on ? 70 : 200;
-      pixels[i + 3] = 255;
-    }
-  }
+  const size = GENERATED_PLACEHOLDER_SIZE;
   const image: ImageAsset = {
     id: createId('img'),
-    name: 'Checker',
+    name: DEFAULT_PLACEHOLDER_IMAGE_NAME,
     width: size,
     height: size,
     colourMode: 'rgba',
-    pixels,
+    pixels: createGeneratedPlaceholderPixels(size),
     revision: 1,
   };
   const texture: TextureAsset = {
     id: createId('tex'),
-    name: 'Checker',
+    name: DEFAULT_PLACEHOLDER_IMAGE_NAME,
     imageAssetId: image.id,
-    filtering: 'nearest',
+    filtering: 'linear',
     wrapping: 'repeat',
     colourSpace: 'srgb',
-    generateMipmaps: false,
+    generateMipmaps: true,
   };
-  const material = createDefaultMaterial('Default');
+  const material = createDefaultMaterial(DEFAULT_PLACEHOLDER_IMAGE_NAME);
   material.baseColourTextureId = texture.id;
   return { material, texture, image };
 }
@@ -97,7 +95,7 @@ export function createEmptyDocument(
   name = 'Untitled',
   options: { modellingProfile?: 'general' | 'character' } = {},
 ): ModelDocument {
-  const { material, texture, image } = createDefaultCheckerAssets();
+  const { material, texture, image } = createDefaultPlaceholderAssets();
   const document: ModelDocument = {
     id: createId('doc'),
     name,
@@ -166,13 +164,102 @@ export function addObjectToDocument(doc: ModelDocument, object: SceneObject): Ob
   return object.id;
 }
 
+/** Material that carries the bundled default object texture, creating it if needed. */
+export function ensureDefaultPlaceholderMaterial(doc: ModelDocument): MaterialId {
+  let textureId = findPlaceholderTextureId(doc);
+  if (!textureId) {
+    const assets = createDefaultPlaceholderAssets();
+    doc.textures.set(assets.texture.id, assets.texture);
+    doc.images.set(assets.image.id, assets.image);
+    textureId = assets.texture.id;
+    const untextured = [...doc.materials.values()].find((material) => !material.baseColourTextureId);
+    if (untextured) {
+      bindPlaceholderTexture(untextured, textureId);
+      doc.dirty = true;
+      return untextured.id;
+    }
+    doc.materials.set(assets.material.id, assets.material);
+    doc.dirty = true;
+    return assets.material.id;
+  }
+
+  for (const material of doc.materials.values()) {
+    if (material.baseColourTextureId === textureId) {
+      if (retuneDefaultPlaceholderMaterial(material)) doc.dirty = true;
+      return material.id;
+    }
+  }
+  const untextured = [...doc.materials.values()].find((material) => !material.baseColourTextureId);
+  if (untextured) {
+    bindPlaceholderTexture(untextured, textureId);
+    doc.dirty = true;
+    return untextured.id;
+  }
+  const material = createDefaultMaterial(DEFAULT_PLACEHOLDER_IMAGE_NAME);
+  material.baseColourTextureId = textureId;
+  doc.materials.set(material.id, material);
+  doc.dirty = true;
+  return material.id;
+}
+
+/** Keep the bundled clay look as unlit + double-sided so it cannot go black under studio lights. */
+export function retuneDefaultPlaceholderMaterial(material: MaterialAsset): boolean {
+  const isPlaceholder =
+    material.presetId === 'default-low-poly-terrain' ||
+    material.presetId === 'default-pixel-clay' ||
+    material.name === DEFAULT_PLACEHOLDER_IMAGE_NAME;
+  if (!isPlaceholder) return false;
+  let changed = false;
+  if (material.presetId !== 'default-low-poly-terrain' && material.presetId !== 'default-pixel-clay') {
+    material.presetId = 'default-low-poly-terrain';
+    changed = true;
+  }
+  if (material.shadingModel !== 'unlit') {
+    material.shadingModel = 'unlit';
+    changed = true;
+  }
+  if (!material.unlit) {
+    material.unlit = true;
+    changed = true;
+  }
+  if (!material.doubleSided) {
+    material.doubleSided = true;
+    changed = true;
+  }
+  if (
+    material.baseColour.x !== DEFAULT_MATERIAL_COLOUR.x ||
+    material.baseColour.y !== DEFAULT_MATERIAL_COLOUR.y ||
+    material.baseColour.z !== DEFAULT_MATERIAL_COLOUR.z
+  ) {
+    material.baseColour = { ...DEFAULT_MATERIAL_COLOUR };
+    changed = true;
+  }
+  return changed;
+}
+
+function bindPlaceholderTexture(material: MaterialAsset, textureId: TextureId): void {
+  material.baseColourTextureId = textureId;
+  if (!material.presetId || material.presetId === 'default') {
+    material.presetId = 'default-low-poly-terrain';
+  }
+  retuneDefaultPlaceholderMaterial(material);
+}
+
+function findPlaceholderTextureId(doc: ModelDocument): TextureId | null {
+  for (const texture of doc.textures.values()) {
+    const image = doc.images.get(texture.imageAssetId);
+    if (image?.name === DEFAULT_PLACEHOLDER_IMAGE_NAME) return texture.id;
+  }
+  return null;
+}
+
 /** Create mesh asset + scene object in one step. */
 export function commitMeshObject(
   doc: ModelDocument,
   mesh: EditableMesh,
   options: { name?: string; materialId?: MaterialId } = {},
 ): { objectId: ObjectId; meshId: MeshId } {
-  const materialId = options.materialId ?? [...doc.materials.keys()][0];
+  const materialId = options.materialId ?? ensureDefaultPlaceholderMaterial(doc);
   if (!materialId) throw new Error('Document has no materials');
   mesh.name = options.name ?? mesh.name;
   addMeshToDocument(doc, mesh);

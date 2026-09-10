@@ -237,6 +237,7 @@ export function createTerrainFeatureMaterial(
     : { x: 0.3, y: 0.22, z: 0.14 });
   const textureId = style.textureId ?? (water ? ensureWaterRippleTexture(document) : null);
   material.baseColourTextureId = textureId;
+  if (water) material.normalTextureId = textureId;
   material.opacity = water ? clamp(style.opacity ?? 0.78, 0.05, 1) : 1;
   material.alphaMode = material.opacity < 1 ? 'blend' : 'opaque';
   material.roughness = water ? 0.08 : 0.82;

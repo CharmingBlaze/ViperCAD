@@ -16,13 +16,15 @@ export function buildRamp(options: RampOptions): EditableMesh {
   const { width, depth, height, name = 'Ramp' } = options;
   const b = new MeshBuilder(name, false);
   const hw = width / 2;
-  // Low edge at -Z, high at +Z
-  const v0 = b.vertex(v3(-hw, 0, -depth / 2));
-  const v1 = b.vertex(v3(hw, 0, -depth / 2));
-  const v2 = b.vertex(v3(hw, 0, depth / 2));
-  const v3v = b.vertex(v3(-hw, 0, depth / 2));
-  const v4 = b.vertex(v3(-hw, height, depth / 2));
-  const v5 = b.vertex(v3(hw, height, depth / 2));
+  const hy = height / 2;
+  const hd = depth / 2;
+  // Low edge at -Z, high at +Z. Centered in Y so create-cage height drag matches the box.
+  const v0 = b.vertex(v3(-hw, -hy, -hd));
+  const v1 = b.vertex(v3(hw, -hy, -hd));
+  const v2 = b.vertex(v3(hw, -hy, hd));
+  const v3v = b.vertex(v3(-hw, -hy, hd));
+  const v4 = b.vertex(v3(-hw, hy, hd));
+  const v5 = b.vertex(v3(hw, hy, hd));
 
   b.quad(v0, v3v, v2, v1); // bottom
   b.quad(v0, v1, v5, v4, [uv(0, 0), uv(1, 0), uv(1, 1), uv(0, 1)]); // slope

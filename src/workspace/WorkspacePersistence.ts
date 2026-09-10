@@ -12,36 +12,36 @@ const STORAGE_KEY = 'vipercad.workspace.v1';
 
 const DEFAULT_CAMERAS: Record<ViewId, CameraSnapshot> = {
   persp: {
-    // Blender-style three-quarter user view (mapped to Viper's Y-up world).
-    position: [7, 5, 7],
-    target: [0, 0, 0],
+    // Unity-like scene view: shallower pitch so the sky fills the shot.
+    position: [16, 5.2, 16],
+    target: [0, 1.2, 0],
     up: [0, 1, 0],
-    fov: 50,
-    orthoHeight: 8,
+    fov: 60,
+    orthoHeight: 16,
     zoom: 1,
   },
   top: {
-    position: [0, 12, 0],
+    position: [0, 20, 0],
     target: [0, 0, 0],
     up: [0, 0, -1],
     fov: 45,
-    orthoHeight: 8,
+    orthoHeight: 16,
     zoom: 1,
   },
   front: {
-    position: [0, 0, 12],
+    position: [0, 0, 20],
     target: [0, 0, 0],
     up: [0, 1, 0],
     fov: 45,
-    orthoHeight: 8,
+    orthoHeight: 16,
     zoom: 1,
   },
   right: {
-    position: [12, 0, 0],
+    position: [20, 0, 0],
     target: [0, 0, 0],
     up: [0, 1, 0],
     fov: 45,
-    orthoHeight: 8,
+    orthoHeight: 16,
     zoom: 1,
   },
 };
@@ -49,9 +49,11 @@ const DEFAULT_CAMERAS: Record<ViewId, CameraSnapshot> = {
 export function defaultPreferences(): WorkspacePreferences {
   const layout = createDefaultLayoutState();
   return {
-    version: 2,
+    version: 3,
     layout,
     viewportNavToolsVisible: true,
+    displayTextures: true,
+    drawOnSurfaces: true,
     viewports: {
       persp: {
         camera: { ...DEFAULT_CAMERAS.persp, position: [...DEFAULT_CAMERAS.persp.position] as [number, number, number], target: [0, 0, 0], up: [0, 1, 0] },
@@ -86,13 +88,17 @@ export function loadWorkspacePreferences(): WorkspacePreferences {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaultPreferences();
     const parsed = JSON.parse(raw) as Omit<WorkspacePreferences, 'version'> & { version?: number };
-    if ((parsed.version !== 1 && parsed.version !== 2) || !parsed.layout?.splits) {
+    if (
+      (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) ||
+      !parsed.layout?.splits
+    ) {
       return defaultPreferences();
     }
 
     const base = defaultPreferences();
+    const migratedFromForcedQuad = parsed.version === 1 || parsed.version === 2;
     return {
-      version: 2,
+      version: 3,
       layout: {
         ...createDefaultLayoutState(),
         ...parsed.layout,
@@ -102,11 +108,29 @@ export function loadWorkspacePreferences(): WorkspacePreferences {
           lowerVertical: parsed.layout.splits.lowerVertical ?? DEFAULT_SPLITS.lowerVertical,
         },
         hoveredViewportId: null,
-        // Restore as quad; maximized on load is confusing across window sizes.
-        mode: 'quad',
-        maximizedViewportId: null,
+        blockoutArrangement: parsed.layout.blockoutArrangement === 'columns' ? 'columns' : 'stack',
+        blockoutColumnA:
+          typeof parsed.layout.blockoutColumnA === 'number'
+            ? parsed.layout.blockoutColumnA
+            : createDefaultLayoutState().blockoutColumnA,
+        blockoutColumnB:
+          typeof parsed.layout.blockoutColumnB === 'number'
+            ? parsed.layout.blockoutColumnB
+            : createDefaultLayoutState().blockoutColumnB,
+        mode: migratedFromForcedQuad
+          ? 'maximized'
+          : parsed.layout.mode === 'maximized'
+            ? 'maximized'
+            : 'quad',
+        maximizedViewportId: migratedFromForcedQuad
+          ? 'persp'
+          : parsed.layout.mode === 'maximized'
+            ? (parsed.layout.maximizedViewportId ?? 'persp')
+            : null,
       },
       viewportNavToolsVisible: parsed.viewportNavToolsVisible ?? true,
+      displayTextures: parsed.displayTextures !== false,
+      drawOnSurfaces: parsed.drawOnSurfaces !== false,
       viewports: {
         persp: {
           ...base.viewports.persp,
@@ -154,10 +178,9 @@ export function saveWorkspacePreferences(prefs: WorkspacePreferences): void {
   try {
     const toSave: WorkspacePreferences = {
       ...prefs,
+      version: 3,
       layout: {
         ...prefs.layout,
-        mode: 'quad',
-        maximizedViewportId: null,
         hoveredViewportId: null,
       } satisfies ViewportLayoutState,
     };

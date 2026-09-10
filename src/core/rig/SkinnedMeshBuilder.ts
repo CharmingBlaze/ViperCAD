@@ -1,7 +1,6 @@
 import {
   Bone,
   BufferAttribute,
-  BufferGeometry,
   Matrix4,
   MeshStandardMaterial,
   Skeleton,
@@ -10,6 +9,7 @@ import {
 } from 'three';
 import type { MaterialAsset } from '@/core/document/types';
 import type { EditableMesh, VertexId } from '@/core/mesh/types';
+import type { Transform } from '@/core/math/Transform';
 import type { Armature, BoneId, SkinBinding } from '@/core/rig/types';
 import type { RenderAssetResolver } from '@/renderer/MeshRenderAdapter';
 import { buildSkinnedMeshMaterials } from '@/core/rig/rigMeshDisplay';
@@ -182,8 +182,12 @@ export function updateSkinnedMeshPose(
   armature: Armature,
   clip: AnimationClip | null,
   time: number,
+  overlay?: Map<BoneId, Transform>,
 ): void {
   const locals = sampledLocalTransforms(armature, clip, time);
+  if (overlay) {
+    for (const [id, transform] of overlay) locals.set(id, transform);
+  }
   const worldCache = new Map<BoneId, Mat4>();
   const boneIds = orderedBoneIds(armature);
 

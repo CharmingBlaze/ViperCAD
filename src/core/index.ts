@@ -36,6 +36,7 @@ export * from '@/core/io/ObjAdapter';
 export * from '@/core/uv/UvOperations';
 export * from '@/core/uv/UvEdit';
 export * from '@/core/uv/UvSelection';
+export * from '@/core/uv/EnsurePaintableUvs';
 export * from '@/core/image/PixelEditor';
 export * from '@/core/derived/DependencyGraph';
 export * from '@/core/spatial/MeshBvh';

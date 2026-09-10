@@ -1,11 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
+import { BlenderIcon } from '@/components/BlenderIcon';
 import { MaterialEditor } from '@/app/MaterialEditor';
-import { PixelateToolControls } from '@/app/PixelateToolControls';
-import { GradientToolControls } from '@/app/GradientToolControls';
 import { IMAGE_FILES, openNativeFile } from '@/app/platform/FileDialogs';
 import { createMaterial } from '@/core/document/ModelDocument';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { importImageFile } from '@/core/image/ImageImport';
+import type { ImageAsset } from '@/core/document/types';
+import {
+  clampPaletteColor,
+  createCustomPalette,
+  findPalette,
+  listPalettes,
+  paletteGroups,
+} from '@/core/image/ColorPalettes';
+import {
+  addPaintLayer,
+  applyPaintStack,
+  clonePaintStack,
+  duplicatePaintLayer,
+  movePaintLayer,
+  patchPaintLayer,
+  removePaintLayer,
+  setActivePaintLayer,
+} from '@/core/image/PaintLayers';
 import { resolveActiveTexture } from '@/core/texture/resolveActiveTexture';
 import { boundsOfUvs, cornersForFaces, resolveUvLayerId, snapshotUvs } from '@/core/uv/UvEdit';
 import type { UvUnwrapMode } from '@/core/uv/UvOperations';
@@ -17,6 +34,14 @@ import type {
   UvPanelTab,
   UvTransformTool,
 } from '@/workspace/TextureWorkspace';
+import {
+  DITHER_MODES,
+  PIXEL_TOOL_HOTKEYS,
+  PIXEL_TOOL_ICONS,
+  PIXEL_TOOL_LABELS,
+  PIXEL_TOOLS,
+  shiftShadeColor,
+} from '@/app/uvEditor/uvEditorUtils';
 
 export type UvEditorSidePanelProps = {
   session: EditorSession;
@@ -39,6 +64,7 @@ export type UvEditorSidePanelProps = {
   onStraighten: () => void;
   onRelax: () => void;
   onRotateToEdge: () => void;
+  onFlipFaces: () => void;
   onToggleSeams: (seam: boolean) => void;
   onFrame: () => void;
   onArmUv: (patch?: {
@@ -47,6 +73,8 @@ export type UvEditorSidePanelProps = {
     uvPanelTab?: UvPanelTab;
     activeRightEditor?: RightEditorMode;
   }) => void;
+  onRefresh?: () => void;
+  embedded?: boolean;
 };
 
 const TABS: { id: UvPanelTab; label: string }[] = [
@@ -56,6 +84,8 @@ const TABS: { id: UvPanelTab; label: string }[] = [
   { id: 'material', label: 'Mat' },
   { id: 'view', label: 'View' },
 ];
+
+const BRUSH_SIZE_PRESETS = [1, 2, 3, 4, 8, 16, 32];
 
 /**
  * Right-side UV / Pixel inspector: tabbed sections + dropdown controls.
@@ -81,9 +111,12 @@ export function UvEditorSidePanel({
   onStraighten,
   onRelax,
   onRotateToEdge,
+  onFlipFaces,
   onToggleSeams,
   onFrame,
   onArmUv,
+  onRefresh,
+  embedded = false,
 }: UvEditorSidePanelProps) {
   const tex = workspace.texture;
   const tab = tex.uvPanelTab;
@@ -91,6 +124,10 @@ export function UvEditorSidePanel({
   const hasUvSelection = session.uvSelection.size > 0 || session.selection.state.selectedFaceIds.size > 0;
   const [resizeW, setResizeW] = useState(16);
   const [resizeH, setResizeH] = useState(16);
+  const palettes = listPalettes(tex.customPalettes);
+  const activePalette = findPalette(tex.activePaletteId, tex.customPalettes);
+  const textureCtx = resolveActiveTexture(session.document, session.selection.state);
+  const paintImage = textureCtx.imageId ? session.document.images.get(textureCtx.imageId) ?? null : null;
 
   useEffect(() => {
     const size = selectionPixelSize(
@@ -105,9 +142,7 @@ export function UvEditorSidePanel({
     session,
     workspace.texture.activeImageId,
     workspace.texture.activeUvLayerId,
-    session.uvSelection.size,
-    session.selection.state.selectedFaceIds.size,
-    selectionSummary,
+    tex.uvEditMode,
   ]);
 
   const setTab = (next: UvPanelTab) => {
@@ -115,6 +150,7 @@ export function UvEditorSidePanel({
     if (next === 'paint') {
       workspace.patchTexture({
         uvPointerMode: false,
+        paintMode3D: tex.paintMode3D,
         activeRightEditor: tex.activeRightEditor === 'uv' ? 'combined' : tex.activeRightEditor,
       });
     } else if (next === 'edit' || next === 'tiles') {
@@ -130,47 +166,103 @@ export function UvEditorSidePanel({
     });
   };
 
-  const setEditMode = (mode: UvEditMode) => {
-    onArmUv({
-      uvEditMode: mode,
-      uvPanelTab: 'edit',
-      activeRightEditor: tex.activeRightEditor === 'combined' ? 'combined' : 'uv',
+  const bumpPaint = () => {
+    session.document.dirty = true;
+    session.requestRedraw();
+    onRefresh?.();
+  };
+
+  const runPaintStack = (image: ImageAsset, name: string, mutate: () => boolean) => {
+    const before = clonePaintStack(image);
+    if (!mutate()) return;
+    const after = clonePaintStack(image);
+    let applied = true;
+    session.history.execute({
+      name,
+      execute: () => {
+        if (applied) return;
+        applyPaintStack(image, after);
+        applied = true;
+        bumpPaint();
+      },
+      undo: () => {
+        applyPaintStack(image, before);
+        applied = false;
+        bumpPaint();
+      },
+    });
+    bumpPaint();
+  };
+
+  const updateCustomPalette = (next: typeof activePalette) => {
+    workspace.patchTexture({
+      customPalettes: tex.customPalettes.map((palette) => (palette.id === next.id ? next : palette)),
+      activePaletteId: next.id,
     });
   };
 
-  const setTransform = (tool: UvTransformTool) => {
-    onArmUv({
-      uvTransformTool: tool,
-      uvPanelTab: 'edit',
-      activeRightEditor: tex.activeRightEditor === 'combined' ? 'combined' : 'uv',
-    });
+  const setInspectorOpen = (open: boolean) => {
+    workspace.patchTexture({ uvInspectorOpen: open });
   };
+
+  if (!embedded && !tex.uvInspectorOpen) {
+    return (
+      <aside className="uv-side-panel is-collapsed" aria-label="UV inspector (hidden)">
+        <div className="sidebar-dock-header">
+          <button
+            type="button"
+            className="sidebar-dock-action-btn"
+            onClick={() => setInspectorOpen(true)}
+            title="Show inspector (N)"
+            aria-label="Show inspector"
+          >
+            <BlenderIcon name="tria_left_bar" size={15} />
+          </button>
+        </div>
+        <div
+          className="sidebar-dock-label-strip"
+          onClick={() => setInspectorOpen(true)}
+          title="Show inspector (N)"
+          role="button"
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              setInspectorOpen(true);
+            }
+          }}
+        >
+          <span className="edge-btn-label">INSPECTOR</span>
+        </div>
+      </aside>
+    );
+  }
 
   return (
     <aside className="uv-side-panel" aria-label="UV and pixel inspector">
       <header className="uv-panel-header">
-        <div className="uv-panel-title">
-          <span className="uv-panel-kicker">Inspector</span>
-          <div className="uv-panel-heading-row">
-            <strong>UV / Pixel</strong>
-            <span className={`uv-panel-mode${uvPointerActive ? ' is-uv' : ' is-paint'}`}>
-              {uvPointerActive ? 'UV EDIT' : 'PAINT'}
-            </span>
+        <div className="uv-panel-header-top">
+          <div className="uv-panel-title">
+            <span className="uv-panel-kicker">Inspector</span>
+            <div className="uv-panel-heading-row">
+              <strong>UV / Pixel</strong>
+              <span className={`uv-panel-mode${uvPointerActive ? ' is-uv' : ' is-paint'}`}>
+                {uvPointerActive ? 'UV EDIT' : 'PAINT'}
+              </span>
+            </div>
           </div>
+          {!embedded && (
+            <button
+              type="button"
+              className="uv-panel-collapse"
+              onClick={() => setInspectorOpen(false)}
+              title="Hide inspector (N)"
+              aria-label="Hide inspector"
+            >
+              <BlenderIcon name="tria_right_bar" size={15} />
+            </button>
+          )}
         </div>
-        <label className="uv-field">
-          <span>Workspace</span>
-          <select
-            className="uv-select"
-            aria-label="Workspace mode"
-            value={tex.activeRightEditor}
-            onChange={(e) => setWorkspaceMode(e.target.value as RightEditorMode)}
-          >
-            <option value="combined">UV + Paint canvas</option>
-            <option value="uv">UV only</option>
-            <option value="pixel">Paint only</option>
-          </select>
-        </label>
       </header>
 
       <nav className="uv-panel-tabs" aria-label="Inspector tabs">
@@ -191,30 +283,7 @@ export function UvEditorSidePanel({
         {tab === 'edit' && (
           <>
             <section className="uv-section">
-              <h3 className="uv-section-title">Component</h3>
-              <div className="uv-btn-grid uv-btn-grid-3">
-                {([
-                  ['face', 'Face'],
-                  ['point', 'Point'],
-                  ['island', 'Island'],
-                ] as const).map(([id, label]) => (
-                  <button
-                    key={id}
-                    type="button"
-                    className={`tool${uvPointerActive && tex.uvEditMode === id ? ' is-active' : ''}`}
-                    onClick={() => setEditMode(id)}
-                    title={
-                      id === 'island'
-                        ? 'Select UV island (L) · double-click face'
-                        : id === 'face'
-                          ? 'Select faces · Ctrl+drag box select'
-                          : 'Select UV points'
-                    }
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              <h3 className="uv-section-title">Selection</h3>
               <button type="button" className="tool uv-btn-block" onClick={onSelectAll}>
                 Select all points
               </button>
@@ -250,23 +319,7 @@ export function UvEditorSidePanel({
             </section>
 
             <section className="uv-section">
-              <h3 className="uv-section-title">Transform</h3>
-              <div className="uv-btn-grid uv-btn-grid-3">
-                {([
-                  ['move', 'Move'],
-                  ['scale', 'Resize'],
-                  ['rotate', 'Rotate'],
-                ] as const).map(([id, label]) => (
-                  <button
-                    key={id}
-                    type="button"
-                    className={`tool${uvPointerActive && tex.uvTransformTool === id ? ' is-active' : ''}`}
-                    onClick={() => setTransform(id)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              <h3 className="uv-section-title">Size</h3>
               <div className="material-size-row">
                 <label className="uv-field">
                   <span>Width px</span>
@@ -343,7 +396,7 @@ export function UvEditorSidePanel({
                 </button>
               </div>
               <p className="uv-hint">
-                Yellow handles resize · blue rotates · drag body to move · G/S/R tools
+                Yellow handles resize · blue rotates · G/S/R on the canvas
               </p>
             </section>
 
@@ -357,6 +410,14 @@ export function UvEditorSidePanel({
                   onClick={() => onUnwrap('auto')}
                 >
                   Auto
+                </button>
+                <button
+                  type="button"
+                  className="tool"
+                  title="Angle-based unwrap · keeps smooth faces together and splits sharp turns"
+                  onClick={() => onUnwrap('angle')}
+                >
+                  Angle
                 </button>
                 <button
                   type="button"
@@ -416,7 +477,7 @@ export function UvEditorSidePanel({
                 </button>
               </div>
               <p className="uv-hint">
-                Auto ≈ Blockbench rearrange · Box ≈ entity net · View uses the active 3D camera
+                Select faces in either view, then unwrap. Angle keeps smooth faces together and cuts at 66° turns; Box ≈ entity net.
               </p>
             </section>
 
@@ -437,6 +498,15 @@ export function UvEditorSidePanel({
                 </button>
                 <button type="button" className="tool" disabled={!hasUvSelection} onClick={onRotateToEdge}>
                   Edge → U
+                </button>
+                <button
+                  type="button"
+                  className="tool"
+                  disabled={!session.selection.state.selectedFaceIds.size}
+                  title="Reverse the winding and normals of selected faces"
+                  onClick={onFlipFaces}
+                >
+                  Flip faces
                 </button>
                 <button
                   type="button"
@@ -490,30 +560,383 @@ export function UvEditorSidePanel({
 
         {tab === 'paint' && (
           <>
-            <section className="uv-section">
-              <h3 className="uv-section-title">Brush</h3>
-              <div className="uv-btn-grid uv-btn-grid-2">
-                {(['pencil', 'eraser', 'eyedropper', 'fill'] as const).map((tool) => (
+            <section className="uv-section uv-paint-section uv-workspace-tools">
+              <h3 className="uv-section-title">UV workspace</h3>
+              <div className="uv-workspace-tool-grid" role="toolbar" aria-label="UV workspace tools">
+                <button
+                  type="button"
+                  className="uv-workspace-tool"
+                  title="Select UV faces, points, or islands"
+                  onClick={() => {
+                    workspace.patchTexture({ uvPanelTab: 'edit' });
+                    onArmUv({ uvEditMode: 'face', uvTransformTool: 'move', uvPanelTab: 'edit' });
+                  }}
+                >
+                  <BlenderIcon name="face_select" size={15} />
+                  <span>Select UVs</span>
+                </button>
+                <button
+                  type="button"
+                  className="uv-workspace-tool"
+                  title="Move the current UV selection"
+                  onClick={() => {
+                    workspace.patchTexture({ uvPanelTab: 'edit' });
+                    onArmUv({ uvTransformTool: 'move', uvPanelTab: 'edit' });
+                  }}
+                >
+                  <BlenderIcon name="empty_arrows" size={15} />
+                  <span>Move UVs</span>
+                </button>
+                <button
+                  type="button"
+                  className="uv-workspace-tool"
+                  title="Frame the selected UVs"
+                  onClick={onFrame}
+                >
+                  <BlenderIcon name="view_selected" size={15} />
+                  <span>Frame</span>
+                </button>
+              </div>
+              <p className="uv-hint">Select in 3D or UV view · Shift adds · Ctrl/Cmd-drag boxes · MMB or Alt-drag pans</p>
+            </section>
+            <section className="uv-section uv-paint-section">
+              <div className="uv-section-header-row">
+                <h3 className="uv-section-title">Texture tools</h3>
+                <span className="uv-section-badge">B · E · I · F</span>
+              </div>
+              <div className="uv-paint-tool-grid" role="toolbar" aria-label="Paint tools">
+                {PIXEL_TOOLS.map((tool) => (
                   <button
                     key={tool}
                     type="button"
-                    className={`tool${!uvPointerActive && tex.pixelTool === tool ? ' is-active' : ''}`}
+                    className={`uv-paint-tool${tex.pixelTool === tool ? ' is-active' : ''}`}
+                    title={`${PIXEL_TOOL_LABELS[tool]} (${PIXEL_TOOL_HOTKEYS[tool]})`}
+                    aria-label={`${PIXEL_TOOL_LABELS[tool]} (${PIXEL_TOOL_HOTKEYS[tool]})`}
+                    aria-pressed={tex.pixelTool === tool}
                     onClick={() =>
                       workspace.patchTexture({
                         pixelTool: tool,
                         uvPointerMode: false,
-                        paintMode3D: true,
-                        activeRightEditor:
-                          tex.activeRightEditor === 'uv' ? 'combined' : tex.activeRightEditor,
+                        paintMode3D: !['line', 'rectangle', 'ellipse', 'replace'].includes(tool),
+                        activeRightEditor: tex.activeRightEditor === 'uv' ? 'combined' : tex.activeRightEditor,
                         uvPanelTab: 'paint',
                       })
                     }
                   >
-                    {tool[0]!.toUpperCase() + tool.slice(1)}
+                    <BlenderIcon name={PIXEL_TOOL_ICONS[tool]} size={15} />
+                    <span>{PIXEL_TOOL_LABELS[tool]}</span>
                   </button>
                 ))}
               </div>
-              <label className="uv-field">
+              <div className="uv-paint-mode-row">
+                <button
+                  type="button"
+                  className={`uv-chip${tex.paintMode3D ? ' is-active' : ''}`}
+                  aria-pressed={tex.paintMode3D}
+                  title="Paint on the 3D mesh"
+                  onClick={() => workspace.patchTexture({ paintMode3D: !tex.paintMode3D })}
+                >
+                  <BlenderIcon name="view3d" size={13} />
+                  3D
+                </button>
+                <button
+                  type="button"
+                  className={`uv-chip${tex.paintMirrorX ? ' is-active' : ''}`}
+                  aria-pressed={tex.paintMirrorX}
+                  title="Mirror paint across X"
+                  onClick={() => workspace.patchTexture({ paintMirrorX: !tex.paintMirrorX })}
+                >
+                  <BlenderIcon name="mod_mirror" size={13} />
+                  X
+                </button>
+                <button
+                  type="button"
+                  className={`uv-chip${tex.paintMirrorY ? ' is-active' : ''}`}
+                  aria-pressed={tex.paintMirrorY}
+                  title="Mirror paint across Y"
+                  onClick={() => workspace.patchTexture({ paintMirrorY: !tex.paintMirrorY })}
+                >
+                  <BlenderIcon name="mod_mirror" size={13} />
+                  Y
+                </button>
+              </div>
+              <p className="uv-hint">
+                {tex.pixelTool === 'fill'
+                  ? 'Click to fill · RMB uses background'
+                  : tex.pixelTool === 'eyedropper'
+                    ? 'Click the canvas or mesh to pick a colour'
+                    : tex.pixelTool === 'line' || tex.pixelTool === 'rectangle' || tex.pixelTool === 'ellipse'
+                      ? 'Drag on the canvas · RMB uses background'
+                      : tex.pixelTool === 'replace'
+                        ? 'Click a colour to replace it · RMB uses background'
+                        : 'LMB foreground · RMB background · Alt picks 3D background'}
+              </p>
+              {(tex.pixelTool === 'fill' || tex.pixelTool === 'replace') && (
+                <div className="paint-fill-options">
+                  <label className="uv-slider-row">
+                    <span>Tolerance</span>
+                    <input
+                      className="uv-range"
+                      type="range"
+                      min={0}
+                      max={255}
+                      value={tex.fillTolerance}
+                      onChange={(e) => workspace.patchTexture({ fillTolerance: Number(e.target.value) })}
+                    />
+                    <span className="uv-field-value">{tex.fillTolerance}</span>
+                  </label>
+                  <label className="uv-check">
+                    <input
+                      type="checkbox"
+                      checked={tex.fillContiguous}
+                      onChange={(e) => workspace.patchTexture({ fillContiguous: e.target.checked })}
+                    />
+                    Contiguous
+                  </label>
+                </div>
+              )}
+            </section>
+
+            <section className="uv-section uv-paint-section">
+              <div className="uv-section-header-row">
+                <h3 className="uv-section-title">Colour & Shading</h3>
+                <select
+                  className="uv-palette-select"
+                  value={activePalette.id}
+                  onChange={(e) => workspace.patchTexture({ activePaletteId: e.target.value })}
+                  title="Select colour palette"
+                  aria-label="Colour palette"
+                >
+                  {paletteGroups(tex.customPalettes).map((group) => (
+                    <optgroup key={group} label={group}>
+                      {palettes.filter((palette) => palette.group === group).map((palette) => (
+                        <option key={palette.id} value={palette.id}>
+                          {palette.name} ({palette.colors.length})
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+
+              <div className="uv-paint-colors">
+                <label className="uv-paint-swatch" title="Foreground colour">
+                  <span
+                    className="uv-paint-swatch-chip"
+                    style={{ backgroundColor: rgbaToHex(tex.foreground) }}
+                  />
+                  <input
+                    type="color"
+                    value={rgbaToHex(tex.foreground)}
+                    onChange={(e) =>
+                      workspace.patchTexture({
+                        foreground: hexToRgba(e.target.value, tex.foreground[3]),
+                      })
+                    }
+                  />
+                  <span className="uv-paint-swatch-meta">
+                    <strong>FG</strong>
+                    <em>{rgbaToHex(tex.foreground)}</em>
+                  </span>
+                </label>
+                <div className="uv-paint-color-actions">
+                  <button
+                    type="button"
+                    className="uv-icon-btn"
+                    title="Swap foreground and background (X)"
+                    aria-label="Swap colours"
+                    onClick={() =>
+                      workspace.patchTexture({
+                        foreground: tex.background,
+                        background: tex.foreground,
+                      })
+                    }
+                  >
+                    <BlenderIcon name="arrow_leftright" size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="uv-icon-btn"
+                    title="Shade darker / cooler ([)"
+                    aria-label="Shade darker"
+                    onClick={() =>
+                      workspace.patchTexture({
+                        foreground: shiftShadeColor(tex.foreground, 'darker'),
+                      })
+                    }
+                  >
+                    <BlenderIcon name="sort_down" size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="uv-icon-btn"
+                    title="Shade lighter / warmer (])"
+                    aria-label="Shade lighter"
+                    onClick={() =>
+                      workspace.patchTexture({
+                        foreground: shiftShadeColor(tex.foreground, 'lighter'),
+                      })
+                    }
+                  >
+                    <BlenderIcon name="sort_up" size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="uv-icon-btn"
+                    title="Reset to black and white (D)"
+                    aria-label="Reset colours"
+                    onClick={() =>
+                      workspace.patchTexture({
+                        foreground: [0, 0, 0, 255],
+                        background: [255, 255, 255, 255],
+                      })
+                    }
+                  >
+                    <BlenderIcon name="file_refresh" size={14} />
+                  </button>
+                </div>
+                <label className="uv-paint-swatch" title="Background colour">
+                  <span
+                    className="uv-paint-swatch-chip"
+                    style={{
+                      backgroundColor: rgbaToHex([tex.background[0], tex.background[1], tex.background[2], 255]),
+                    }}
+                  />
+                  <input
+                    type="color"
+                    value={rgbaToHex([tex.background[0], tex.background[1], tex.background[2], 255])}
+                    onChange={(e) =>
+                      workspace.patchTexture({
+                        background: hexToRgba(e.target.value, tex.background[3]),
+                      })
+                    }
+                  />
+                  <span className="uv-paint-swatch-meta">
+                    <strong>BG</strong>
+                    <em>{rgbaToHex([tex.background[0], tex.background[1], tex.background[2], 255])}</em>
+                  </span>
+                </label>
+              </div>
+
+              <div className="uv-palette-grid" role="group" aria-label="Colour palette">
+                {activePalette.colors.map((colour, index) => {
+                  const fgHex = rgbaToHex(tex.foreground).toLowerCase();
+                  const bgHex = rgbaToHex(tex.background).toLowerCase();
+                  const curHex = colour.toLowerCase();
+                  const isFg = fgHex === curHex;
+                  const isBg = bgHex === curHex;
+                  return (
+                    <button
+                      key={`${colour}-${index}`}
+                      type="button"
+                      className={`uv-palette-cell${isFg ? ' is-fg' : ''}${isBg ? ' is-bg' : ''}`}
+                      style={{ backgroundColor: colour }}
+                      title={`${colour} · LMB foreground · RMB background${activePalette.custom ? ' · Shift+click remove' : ''}`}
+                      aria-label={`${colour} (LMB: FG, RMB: BG)`}
+                      onClick={(event) => {
+                        if (event.shiftKey && activePalette.custom && activePalette.colors.length > 1) {
+                          updateCustomPalette({
+                            ...activePalette,
+                            colors: activePalette.colors.filter((_, i) => i !== index),
+                          });
+                          return;
+                        }
+                        workspace.patchTexture({
+                          foreground: hexToRgba(colour, tex.foreground[3]),
+                        });
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        workspace.patchTexture({
+                          background: hexToRgba(colour, tex.background[3]),
+                        });
+                      }}
+                    />
+                  );
+                })}
+              </div>
+              <div className="uv-palette-actions">
+                <button
+                  type="button"
+                  className="tool"
+                  onClick={() => {
+                    const created = createCustomPalette(
+                      `${activePalette.name} copy`,
+                      activePalette.colors,
+                    );
+                    workspace.patchTexture({
+                      customPalettes: [...tex.customPalettes, created],
+                      activePaletteId: created.id,
+                    });
+                  }}
+                >
+                  New
+                </button>
+                {activePalette.custom && (
+                  <>
+                    <input
+                      className="uv-text uv-palette-name"
+                      aria-label="Palette name"
+                      value={activePalette.name}
+                      onChange={(event) =>
+                        updateCustomPalette({ ...activePalette, name: event.target.value })
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="tool"
+                      title="Add foreground colour"
+                      onClick={() => {
+                        const hex = clampPaletteColor(rgbaToHex(tex.foreground));
+                        if (!hex || activePalette.colors.includes(hex)) return;
+                        updateCustomPalette({
+                          ...activePalette,
+                          colors: [...activePalette.colors, hex],
+                        });
+                      }}
+                    >
+                      Add FG
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      onClick={() => {
+                        const remaining = tex.customPalettes.filter((palette) => palette.id !== activePalette.id);
+                        workspace.patchTexture({
+                          customPalettes: remaining,
+                          activePaletteId: remaining[0]?.id ?? 'pico8',
+                        });
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </>
+                )}
+              </div>
+              {activePalette.custom && (
+                <p className="uv-hint">Add FG to grow the palette. Shift-click a swatch to remove it.</p>
+              )}
+            </section>
+
+            <section className="uv-section uv-paint-section">
+              <div className="uv-section-header-row">
+                <h3 className="uv-section-title">Brush</h3>
+                <span className="uv-section-badge">{tex.brushSize}px · {tex.brushShape}</span>
+              </div>
+              <div className="uv-brush-preset-row">
+                {BRUSH_SIZE_PRESETS.map((sz) => (
+                  <button
+                    key={sz}
+                    type="button"
+                    className={`uv-preset-btn${tex.brushSize === sz ? ' is-active' : ''}`}
+                    onClick={() => workspace.patchTexture({ brushSize: sz })}
+                    title={`${sz}px brush`}
+                  >
+                    {sz}
+                  </button>
+                ))}
+              </div>
+              <label className="uv-slider-row">
                 <span>Size</span>
                 <input
                   className="uv-range"
@@ -525,107 +948,217 @@ export function UvEditorSidePanel({
                 />
                 <span className="uv-field-value">{tex.brushSize}px</span>
               </label>
-              <div className="uv-btn-grid uv-btn-grid-2">
+              <label className="uv-slider-row">
+                <span>Opacity</span>
+                <input
+                  className="uv-range"
+                  type="range"
+                  min={1}
+                  max={100}
+                  value={Math.max(1, Math.round((tex.foreground[3] / 255) * 100))}
+                  onChange={(e) => {
+                    const alpha = Math.round((Number(e.target.value) / 100) * 255);
+                    workspace.patchTexture({
+                      foreground: [tex.foreground[0], tex.foreground[1], tex.foreground[2], alpha],
+                    });
+                  }}
+                />
+                <span className="uv-field-value">
+                  {Math.max(1, Math.round((tex.foreground[3] / 255) * 100))}%
+                </span>
+              </label>
+              <div className="uv-segmented" role="group" aria-label="Brush shape">
                 <button
                   type="button"
-                  className={`tool${tex.brushShape === 'square' ? ' is-active' : ''}`}
+                  className={tex.brushShape === 'square' ? 'is-active' : ''}
                   onClick={() => workspace.patchTexture({ brushShape: 'square' })}
+                  title="Square brush (C)"
                 >
                   Square
                 </button>
                 <button
                   type="button"
-                  className={`tool${tex.brushShape === 'circle' ? ' is-active' : ''}`}
+                  className={tex.brushShape === 'circle' ? 'is-active' : ''}
                   onClick={() => workspace.patchTexture({ brushShape: 'circle' })}
+                  title="Circle brush (C)"
                 >
                   Circle
                 </button>
               </div>
-              <button
-                type="button"
-                className={`tool uv-btn-block${tex.paintMode3D ? ' is-active' : ''}`}
-                title="Paint directly on the mesh in the left 3D view"
-                onClick={() =>
-                  workspace.patchTexture({
-                    paintMode3D: !tex.paintMode3D,
-                    uvPointerMode: tex.paintMode3D ? tex.uvPointerMode : false,
-                  })
-                }
-              >
-                3D paint {tex.paintMode3D ? 'on' : 'off'}
-              </button>
-              <p className="uv-hint">
-                LMB paints the model · RMB uses background · B/E/I/F tools · [ ] size · X swap · C
-                shape
-              </p>
-            </section>
-            <section className="uv-section">
-              <h3 className="uv-section-title">Colour</h3>
-              <div className="uv-color-row">
-                <label className="uv-color-swatch" title="Foreground">
-                  <span>FG</span>
-                  <input
-                    type="color"
-                    value={rgbaToHex(tex.foreground)}
-                    onChange={(e) =>
-                      workspace.patchTexture({
-                        foreground: hexToRgba(e.target.value, tex.foreground[3]),
-                      })
-                    }
-                  />
-                </label>
-                <label className="uv-color-swatch" title="Background">
-                  <span>BG</span>
-                  <input
-                    type="color"
-                    value={rgbaToHex([
-                      tex.background[0],
-                      tex.background[1],
-                      tex.background[2],
-                      255,
-                    ])}
-                    onChange={(e) =>
-                      workspace.patchTexture({
-                        background: hexToRgba(e.target.value, tex.background[3]),
-                      })
-                    }
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="tool"
-                  title="Swap colours (X)"
-                  onClick={() =>
-                    workspace.patchTexture({
-                      foreground: tex.background,
-                      background: tex.foreground,
-                    })
-                  }
-                >
-                  Swap
-                </button>
+
+              <div className="uv-section-header-row" style={{ marginTop: '6px' }}>
+                <span className="uv-field-label" style={{ fontSize: '0.64rem', color: '#aaa' }}>Dither Pattern</span>
+                <span className="uv-section-badge">{tex.ditherMode}</span>
               </div>
+              <div className="uv-segmented" role="group" aria-label="Dither pattern">
+                {DITHER_MODES.map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={tex.ditherMode === mode ? 'is-active' : ''}
+                    onClick={() => workspace.patchTexture({ ditherMode: mode })}
+                    title={`Dither: ${mode}`}
+                  >
+                    {mode === 'none' ? 'Off' : mode === 'checker' ? 'Checker' : 'Bayer 4×4'}
+                  </button>
+                ))}
+              </div>
+              <label className="uv-check" style={{ marginTop: '4px' }}>
+                <input
+                  type="checkbox"
+                  checked={tex.recolorOnlyBg}
+                  onChange={(e) => workspace.patchTexture({ recolorOnlyBg: e.target.checked })}
+                />
+                Recolor mode (replaces BG only)
+              </label>
             </section>
-            <GradientToolControls
-              session={session}
-              workspace={workspace}
-              image={workspace.texture.activeImageId
-                ? session.document.images.get(workspace.texture.activeImageId)
-                : null}
-              material={workspace.texture.activeMaterialId
-                ? session.document.materials.get(workspace.texture.activeMaterialId)
-                : null}
-            />
-            <PixelateToolControls
-              session={session}
-              workspace={workspace}
-              image={workspace.texture.activeImageId
-                ? session.document.images.get(workspace.texture.activeImageId)
-                : null}
-              material={workspace.texture.activeMaterialId
-                ? session.document.materials.get(workspace.texture.activeMaterialId)
-                : null}
-            />
+
+            <section className="uv-section uv-paint-section">
+              <div className="uv-section-header-row">
+                <h3 className="uv-section-title">Layers</h3>
+                <span className="uv-section-badge">{paintImage?.paintLayers?.length ?? 1}</span>
+              </div>
+              {!paintImage ? (
+                <p className="uv-hint">Select a textured object to edit paint layers.</p>
+              ) : (
+                <>
+                  <div className="uv-layer-list" role="listbox" aria-label="Paint layers">
+                    {[...(paintImage.paintLayers ?? [{
+                      id: paintImage.id,
+                      name: 'Background',
+                      visible: true,
+                      opacity: 1,
+                      locked: false,
+                    }])].reverse().map((layer) => {
+                      const active = (paintImage.activePaintLayerId ?? paintImage.id) === layer.id;
+                      return (
+                        <div
+                          key={layer.id}
+                          className={`uv-layer-row${active ? ' is-active' : ''}`}
+                          role="option"
+                          aria-selected={active}
+                          onClick={() => {
+                            if (!paintImage.paintLayers) return;
+                            setActivePaintLayer(paintImage, layer.id);
+                            bumpPaint();
+                          }}
+                        >
+                          <button
+                            type="button"
+                            className={`uv-layer-icon${layer.visible ? ' is-on' : ''}`}
+                            title={layer.visible ? 'Hide layer' : 'Show layer'}
+                            disabled={!paintImage.paintLayers}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              if (!paintImage.paintLayers) return;
+                              runPaintStack(paintImage, layer.visible ? 'Hide Layer' : 'Show Layer', () =>
+                                patchPaintLayer(paintImage, layer.id, { visible: !layer.visible }),
+                              );
+                            }}
+                          >
+                            <BlenderIcon name={layer.visible ? 'hide_off' : 'hide_on'} size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            className={`uv-layer-icon${layer.locked ? ' is-on' : ''}`}
+                            title={layer.locked ? 'Unlock layer' : 'Lock layer'}
+                            disabled={!paintImage.paintLayers}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              if (!paintImage.paintLayers) return;
+                              runPaintStack(paintImage, layer.locked ? 'Unlock Layer' : 'Lock Layer', () =>
+                                patchPaintLayer(paintImage, layer.id, { locked: !layer.locked }),
+                              );
+                            }}
+                          >
+                            <BlenderIcon name={layer.locked ? 'locked' : 'unlocked'} size={12} />
+                          </button>
+                          <span className="uv-layer-name">{layer.name}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {paintImage.paintLayers && (
+                    <label className="uv-slider-row">
+                      <span>Opacity</span>
+                      <input
+                        className="uv-range"
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={Math.round((paintImage.paintLayers.find((layer) => layer.id === paintImage.activePaintLayerId)?.opacity ?? 1) * 100)}
+                        onChange={(event) => {
+                          const layerId = paintImage.activePaintLayerId;
+                          if (!layerId) return;
+                          patchPaintLayer(paintImage, layerId, { opacity: Number(event.target.value) / 100 });
+                          bumpPaint();
+                        }}
+                      />
+                    </label>
+                  )}
+                  <div className="uv-palette-actions">
+                    <button
+                      type="button"
+                      className="tool"
+                      onClick={() => runPaintStack(paintImage, 'Add Paint Layer', () => {
+                        addPaintLayer(paintImage);
+                        return true;
+                      })}
+                    >
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!paintImage.paintLayers || !paintImage.activePaintLayerId}
+                      onClick={() => {
+                        const id = paintImage.activePaintLayerId;
+                        if (!id) return;
+                        runPaintStack(paintImage, 'Duplicate Paint Layer', () => !!duplicatePaintLayer(paintImage, id));
+                      }}
+                    >
+                      Dup
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!paintImage.paintLayers || (paintImage.paintLayers.length ?? 0) <= 1}
+                      onClick={() => {
+                        const id = paintImage.activePaintLayerId;
+                        if (!id) return;
+                        runPaintStack(paintImage, 'Delete Paint Layer', () => removePaintLayer(paintImage, id));
+                      }}
+                    >
+                      Del
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!paintImage.paintLayers}
+                      onClick={() => {
+                        const id = paintImage.activePaintLayerId;
+                        if (!id) return;
+                        runPaintStack(paintImage, 'Raise Paint Layer', () => movePaintLayer(paintImage, id, 1));
+                      }}
+                    >
+                      Up
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!paintImage.paintLayers}
+                      onClick={() => {
+                        const id = paintImage.activePaintLayerId;
+                        if (!id) return;
+                        runPaintStack(paintImage, 'Lower Paint Layer', () => movePaintLayer(paintImage, id, -1));
+                      }}
+                    >
+                      Down
+                    </button>
+                  </div>
+                </>
+              )}
+            </section>
           </>
         )}
 
@@ -644,6 +1177,22 @@ export function UvEditorSidePanel({
         {tab === 'view' && (
           <>
             <section className="uv-section">
+              <h3 className="uv-section-title">Workspace</h3>
+              <label className="uv-field">
+                <span>Canvas</span>
+                <select
+                  className="uv-select"
+                  aria-label="Workspace mode"
+                  value={tex.activeRightEditor}
+                  onChange={(e) => setWorkspaceMode(e.target.value as RightEditorMode)}
+                >
+                  <option value="combined">UV + Paint</option>
+                  <option value="uv">UV only</option>
+                  <option value="pixel">Paint only</option>
+                </select>
+              </label>
+            </section>
+            <section className="uv-section">
               <h3 className="uv-section-title">Display</h3>
               <label className="uv-check">
                 <input
@@ -656,10 +1205,26 @@ export function UvEditorSidePanel({
               <label className="uv-check">
                 <input
                   type="checkbox"
+                  checked={tex.showUvGrid}
+                  onChange={(e) => workspace.patchTexture({ showUvGrid: e.target.checked })}
+                />
+                16×16 UV guide
+              </label>
+              <label className="uv-check">
+                <input
+                  type="checkbox"
                   checked={tex.showPixelGrid}
                   onChange={(e) => workspace.patchTexture({ showPixelGrid: e.target.checked })}
                 />
                 Pixel grid
+              </label>
+              <label className="uv-check">
+                <input
+                  type="checkbox"
+                  checked={tex.uvSnapToPixels}
+                  onChange={(e) => workspace.patchTexture({ uvSnapToPixels: e.target.checked })}
+                />
+                Snap UV moves to pixels
               </label>
               <label className="uv-field">
                 <span>UV diagnostics</span>
@@ -690,7 +1255,9 @@ export function UvEditorSidePanel({
             <section className="uv-section">
               <h3 className="uv-section-title">Asset</h3>
               <p className="uv-meta">{imageLabel ?? 'No active texture'}</p>
-              <p className="uv-hint">Wheel zoom · MMB / Alt+LMB pan · Tab maximizes panes</p>
+              <p className="uv-hint">
+                Hover the window title for LightWave pan/zoom · ⧉ detaches a pane
+              </p>
             </section>
           </>
         )}

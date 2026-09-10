@@ -57,7 +57,21 @@ describe('terrain prop reproject', () => {
     expect(placed.transform.position.y).toBeGreaterThan(surface);
   });
 
-  it('samples flatten height with Alt+click without sculpting', () => {
+  it('samples flatten height with Ctrl+click without sculpting', () => {
+    const session = new EditorSession();
+    const terrain = createTerrain(session, { size: 10, resolution: 4 });
+    const mesh = session.document.meshes.get(terrain.meshId)!;
+    for (const vertex of mesh.vertices.values()) vertex.position.y = 1.5;
+
+    const sculpt = session.tools.get('terrain-sculpt') as TerrainSculptTool;
+    sculpt.mode = 'flatten';
+    sculpt.flattenHeight = 0;
+    sculpt.begin(pointer(0, 1.5, 0, { ctrlKey: true }), session.context());
+    expect(sculpt.flattenHeight).toBeCloseTo(1.5, 4);
+    expect(sculpt.dragging).toBe(false);
+  });
+
+  it('still samples flatten height with Alt+click on the tool', () => {
     const session = new EditorSession();
     const terrain = createTerrain(session, { size: 10, resolution: 4 });
     const mesh = session.document.meshes.get(terrain.meshId)!;

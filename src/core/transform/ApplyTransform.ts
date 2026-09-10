@@ -1,3 +1,4 @@
+import { Euler, Quaternion, Vector3 as ThreeVector3 } from 'three';
 import type { ModelDocument } from '@/core/document/types';
 import { cloneTransform, type Transform } from '@/core/math/Transform';
 import {
@@ -15,14 +16,26 @@ import type { VertexId } from '@/core/mesh/types';
 import type { TransformDelta, TransformSnapshot } from './types';
 import { applyLiveSymmetricVertexEdit } from '@/core/symmetry/Symmetry';
 
+import { setObjectOrigin } from '@/core/editor/OriginTools';
+
 /** Restore initial snapshot then apply current delta (idempotent live preview). */
 export function applyDeltaFromSnapshot(
   doc: ModelDocument,
   snapshot: TransformSnapshot,
   delta: TransformDelta,
   pivot: Vec3,
+  isOrigin = false,
 ): void {
   restoreObjectsAndVerts(doc, snapshot);
+
+  if (isOrigin && snapshot.mode === 'object') {
+    for (const entry of snapshot.objects) {
+      const newOrigin = addVec3(pivot, delta.translation);
+      setObjectOrigin(doc, entry.objectId, newOrigin);
+    }
+    doc.dirty = true;
+    return;
+  }
 
   if (snapshot.mode === 'object') {
     for (const entry of snapshot.objects) {
@@ -71,6 +84,18 @@ function restoreObjectsAndVerts(doc: ModelDocument, snapshot: TransformSnapshot)
       }
     }
   }
+  if (snapshot.objectMeshes) {
+    for (const [meshId, positions] of snapshot.objectMeshes) {
+      const mesh = doc.meshes.get(meshId);
+      if (mesh) {
+        for (const [id, pos] of positions) {
+          const v = mesh.vertices.get(id);
+          if (v) v.position = { ...pos };
+        }
+        bumpPositions(mesh);
+      }
+    }
+  }
 }
 
 function transformObject(initial: Transform, delta: TransformDelta, pivot: Vec3): Transform {
@@ -78,39 +103,12 @@ function transformObject(initial: Transform, delta: TransformDelta, pivot: Vec3)
   // Translate
   next.position = addVec3(initial.position, delta.translation);
 
-  // Rotate around pivot (object origin relative to pivot)
+  // Rotate around pivot in world space (quaternion / matrix, not Euler-axis hacks).
   if (Math.abs(delta.rotationAngle) > 1e-12) {
     const offset = subVec3(initial.position, pivot);
     const rotated = rotateAroundAxis(offset, delta.rotationAxis, delta.rotationAngle);
     next.position = addVec3(pivot, rotated);
-    next.rotation = {
-      x: initial.rotation.x + delta.rotationAxis.x * delta.rotationAngle,
-      y: initial.rotation.y + delta.rotationAxis.y * delta.rotationAngle,
-      z: initial.rotation.z + delta.rotationAxis.z * delta.rotationAngle,
-    };
-    // For axis-aligned rotations, apply euler on matching axis more cleanly
-    const ax = Math.abs(delta.rotationAxis.x);
-    const ay = Math.abs(delta.rotationAxis.y);
-    const az = Math.abs(delta.rotationAxis.z);
-    if (ax > 0.99 && ay < 0.1 && az < 0.1) {
-      next.rotation = {
-        x: initial.rotation.x + delta.rotationAngle * Math.sign(delta.rotationAxis.x || 1),
-        y: initial.rotation.y,
-        z: initial.rotation.z,
-      };
-    } else if (ay > 0.99 && ax < 0.1 && az < 0.1) {
-      next.rotation = {
-        x: initial.rotation.x,
-        y: initial.rotation.y + delta.rotationAngle * Math.sign(delta.rotationAxis.y || 1),
-        z: initial.rotation.z,
-      };
-    } else if (az > 0.99 && ax < 0.1 && ay < 0.1) {
-      next.rotation = {
-        x: initial.rotation.x,
-        y: initial.rotation.y,
-        z: initial.rotation.z + delta.rotationAngle * Math.sign(delta.rotationAxis.z || 1),
-      };
-    }
+    next.rotation = composeWorldRotation(initial.rotation, delta.rotationAxis, delta.rotationAngle);
   }
 
   next.scale = {
@@ -167,6 +165,16 @@ export function rotateAroundAxis(v: Vec3, axis: Vec3, angle: number): Vec3 {
     addVec3(scaleVec3(v, cos), scaleVec3(cross, sin)),
     scaleVec3(a, dot * (1 - cos)),
   );
+}
+
+/** Apply a world-space axis-angle rotation on top of an Euler XYZ orientation. */
+function composeWorldRotation(euler: Vec3, axis: Vec3, angle: number): Vec3 {
+  const current = new Quaternion().setFromEuler(new Euler(euler.x, euler.y, euler.z, 'XYZ'));
+  const a = normalizeVec3(axis);
+  const delta = new Quaternion().setFromAxisAngle(new ThreeVector3(a.x, a.y, a.z), angle);
+  const next = delta.multiply(current);
+  const e = new Euler().setFromQuaternion(next, 'XYZ');
+  return v3(e.x, e.y, e.z);
 }
 
 function objectPointToWorld(local: Vec3, transform: Transform): Vec3 {

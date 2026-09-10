@@ -1,4 +1,3 @@
-import { createId } from '@/core/ids/IdService';
 import { defaultTransform } from '@/core/math/Transform';
 import { v3 } from '@/core/math/Vec3';
 import { createBone } from '@/core/rig/ArmatureFactory';
@@ -91,4 +90,34 @@ export function resetBonePose(armature: Armature, boneId?: BoneId): void {
     const bone = armature.bones.get(id);
     if (bone) bone.localTransform = defaultTransform();
   }
+}
+
+export function subdivideBone(armature: Armature, boneId: BoneId, cuts = 1): Bone[] {
+  const bone = armature.bones.get(boneId);
+  if (!bone || cuts < 1) return [];
+
+  const originalTail = { ...bone.tailLocal };
+  const step = 1 / (cuts + 1);
+
+  bone.tailLocal = {
+    x: originalTail.x * step,
+    y: originalTail.y * step,
+    z: originalTail.z * step,
+  };
+
+  let prevBone = bone;
+  const newBones: Bone[] = [];
+
+  for (let i = 1; i <= cuts; i++) {
+    const childTail = {
+      x: originalTail.x * step,
+      y: originalTail.y * step,
+      z: originalTail.z * step,
+    };
+    const child = addBone(armature, `${bone.name}_sub_${i}`, prevBone.id, childTail);
+    newBones.push(child);
+    prevBone = child;
+  }
+
+  return newBones;
 }

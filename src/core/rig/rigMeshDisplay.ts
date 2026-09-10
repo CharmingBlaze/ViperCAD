@@ -108,10 +108,16 @@ export function applyRigMeshDisplayMode(
     weightPaint?: boolean;
     binding?: SkinBinding;
     boneId?: BoneId | null;
+    xray?: boolean;
   } = {},
 ): void {
   if (options.weightPaint && options.binding && options.boneId) {
     applyWeightPaintColors(rigMesh, options.binding, options.boneId);
+    const material = rigMesh.weightPaintMaterial;
+    material.transparent = !!options.xray;
+    material.opacity = options.xray ? 0.52 : 1;
+    material.depthWrite = !options.xray;
+    material.needsUpdate = true;
     return;
   }
 
@@ -123,7 +129,9 @@ export function applyRigMeshDisplayMode(
   }
 
   for (const material of asMaterialArray(rigMesh.baseMaterials)) {
-    material.wireframe = mode === 'wireframe';
+    if ('wireframe' in material) {
+      (material as unknown as { wireframe: boolean }).wireframe = mode === 'wireframe';
+    }
     material.vertexColors = false;
     material.needsUpdate = true;
   }
@@ -136,7 +144,9 @@ export function applyStaticMeshDisplayMode(
 ): Material | Material[] {
   if (mode === 'uv') return createUvCheckerMaterial();
   for (const material of materials) {
-    material.wireframe = mode === 'wireframe';
+    if ('wireframe' in material) {
+      (material as unknown as { wireframe: boolean }).wireframe = mode === 'wireframe';
+    }
     material.needsUpdate = true;
   }
   return materials.length === 1 ? materials[0]! : materials;

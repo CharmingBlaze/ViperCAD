@@ -1,12 +1,29 @@
 import type { EditableMesh, FaceId } from '@/core/mesh/types';
 import { analyseUvs } from '@/core/uv/UvDiagnostics';
-import { projectUvPlanar, unwrapUvAuto } from '@/core/uv/UvOperations';
+import { createUvLayer, projectUvPlanar, unwrapUvAuto } from '@/core/uv/UvOperations';
 
 export type PaintableUvResult = {
   changed: boolean;
   repairedFaceIds: FaceId[];
   mode: 'none' | 'auto-unwrapped' | 'repaired';
 };
+
+/**
+ * Guarantees a mesh has a UV layer the editor can work with. Imported or
+ * procedural meshes are allowed to have no UV layer at all; create one before
+ * running the normal paintability repair so the UV editor never has to reject
+ * an otherwise editable mesh.
+ */
+export function ensureEditableUvs(mesh: EditableMesh): PaintableUvResult {
+  const hasValidDefault = !!mesh.defaultUvLayerId && mesh.uvLayers.has(mesh.defaultUvLayerId);
+  if (!hasValidDefault) {
+    createUvLayer(mesh, 'UVMap');
+    const faceIds = [...mesh.faces.keys()];
+    if (faceIds.length) unwrapUvAuto(mesh, faceIds, mesh.defaultUvLayerId!);
+    return { changed: true, repairedFaceIds: faceIds, mode: 'auto-unwrapped' };
+  }
+  return ensurePaintableUvs(mesh);
+}
 
 /**
  * Make zero-area UVs paintable without disturbing healthy mapping.

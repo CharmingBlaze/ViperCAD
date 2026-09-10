@@ -17,7 +17,10 @@ export type TransformPivotMode =
   | 'active'
   | 'object-origin';
 
-export type GizmoMode = 'select' | 'move' | 'rotate' | 'scale' | 'combined';
+export type GizmoMode = 'select' | 'move' | 'rotate' | 'scale' | 'combined' | 'origin';
+
+/** All-in-one translate / rotate / scale handles after creating or selecting. */
+export const DEFAULT_GIZMO_MODE: GizmoMode = 'combined';
 
 export type TransformSource = 'gizmo' | 'keyboard' | 'numeric-field';
 
@@ -65,10 +68,12 @@ export type TransformSnapshot = {
     activeEdgeId: EdgeId | null;
     activeFaceId: FaceId | null;
   };
+  objectMeshes?: Map<string, Map<VertexId, Vec3>> | null;
 };
 
 export type TransformSession = {
   type: TransformType;
+  isOriginTransform?: boolean;
   targetObjectIds: Set<ObjectId>;
   targetVertexIds: Set<VertexId>;
   targetEdgeIds: Set<EdgeId>;

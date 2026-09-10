@@ -63,9 +63,9 @@ export function perspectiveFrameDistance(radius: number, verticalFovDegrees: num
   const vertical = Math.max(1, Math.min(179, verticalFovDegrees)) * Math.PI / 180;
   const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * Math.max(aspect, 1e-3));
   const limitingFov = Math.min(vertical, horizontal);
-  return Math.max(0.5, radius) / Math.sin(limitingFov / 2) * 1.15;
+  return Math.max(0.5, radius) / Math.sin(limitingFov / 2) * 1.7;
 }
 
 export function orthographicFrameHeight(radius: number, aspect: number): number {
-  return Math.max(1, radius * 2.3 / Math.min(1, Math.max(aspect, 1e-3)));
+  return Math.max(1, radius * 3.4 / Math.min(1, Math.max(aspect, 1e-3)));
 }

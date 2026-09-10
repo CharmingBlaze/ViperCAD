@@ -38,6 +38,8 @@ type Props = {
   document: ModelDocument;
   currentObjectId?: string | null;
   onChange: (patch: Partial<PathSettingsValue>) => void;
+  /** Arms the curve tool after the user has chosen an output/settings preset. */
+  onStartDrawing?: () => void;
 };
 
 const CAPS: CurveSweepCapStyle[] = ['flat', 'round', 'pointed', 'open'];
@@ -47,6 +49,7 @@ export function PathSettingsControls({
   document,
   currentObjectId,
   onChange,
+  onStartDrawing,
 }: Props) {
   const capOutput =
     value.pathOutput === 'tube' ||
@@ -67,6 +70,7 @@ export function PathSettingsControls({
         <strong>PATH SETTINGS</strong>
         <span>Live procedural output</span>
       </div>
+      <PathOutputPreview output={value.pathOutput} />
       <label className="uv-field">
         <span>Path output</span>
         <select
@@ -103,6 +107,15 @@ export function PathSettingsControls({
           <option value="profile-sweep">Profile Sweep</option>
         </select>
       </label>
+      {onStartDrawing && (
+        <button
+          type="button"
+          className="tool primary path-start-draw"
+          onClick={onStartDrawing}
+        >
+          Start drawing {pathOutputLabel(value.pathOutput)}
+        </button>
+      )}
 
       {capOutput && (
         <>
@@ -166,25 +179,30 @@ export function PathSettingsControls({
           <Range label="Card height" display={`${Math.round(value.profileHeight * 100)}%`} value={value.profileHeight} min={0.25} max={4} step={0.05} onChange={(profileHeight) => onChange({ profileHeight })} />
           <Range label="Vertical detail" display={String(Math.max(1, Math.round(value.pathRadialSegments / 2)))} value={value.pathRadialSegments} min={2} max={12} step={1} onChange={(pathRadialSegments) => onChange({ pathRadialSegments })} />
           <p className="uv-hint">
-            Upright tapered cards follow the path with pinched tips. Crossed mode builds an X-shaped foliage cluster at each point. Use a double-sided material for backface visibility.
+            Upright tapered cards follow the path with pinched tips. Cards are built two-sided for reliable visibility; crossed mode makes an X-shaped foliage cluster at each point.
           </p>
         </>
       )}
       {value.pathOutput === 'object-array' && (
-        <label className="uv-field">
-          <span>Array source</span>
-          <select
-            className="uv-select"
-            aria-label="Path array source"
-            value={value.pathSourceObjectId ?? ''}
-            onChange={(event) => onChange({ pathSourceObjectId: event.target.value || null })}
-          >
-            <option value="">Built-in box</option>
-            {sourceObjects.map((object) => (
-              <option key={object.id} value={object.id}>{object.name}</option>
-            ))}
-          </select>
-        </label>
+        <>
+          <label className="uv-field">
+            <span>Array source</span>
+            <select
+              className="uv-select"
+              aria-label="Path array source"
+              value={value.pathSourceObjectId ?? ''}
+              onChange={(event) => onChange({ pathSourceObjectId: event.target.value || null })}
+            >
+              <option value="">Built-in box</option>
+              {sourceObjects.map((object) => (
+                <option key={object.id} value={object.id}>{object.name}</option>
+              ))}
+            </select>
+          </label>
+          <p className="uv-hint">
+            Copies follow the curve’s direction. Rotation rolls them around the path; mirrored alternating copies keep correct lighting.
+          </p>
+        </>
       )}
       {value.pathOutput === 'profile-sweep' && (
         <>
@@ -210,6 +228,47 @@ export function PathSettingsControls({
       </p>
     </div>
   );
+}
+
+function PathOutputPreview({ output }: { output: PathSettingsValue['pathOutput'] }) {
+  return (
+    <div className="path-output-preview" aria-label={`${pathOutputLabel(output)} preview`}>
+      <svg viewBox="0 0 180 42" role="img" aria-hidden="true">
+        <path className="path-preview-guide" d="M8 29 C38 5 62 37 91 20 S140 7 172 24" />
+        {output === 'chain' && [28, 52, 77, 103, 129, 154].map((x, index) => (
+          <ellipse key={x} className="path-preview-chain" cx={x} cy={index % 2 ? 18 : 22} rx="10" ry="5" transform={`rotate(${index % 2 ? -32 : 32} ${x} ${index % 2 ? 18 : 22})`} />
+        ))}
+        {output === 'rope' && [-3, 0, 3].map((offset) => (
+          <path key={offset} className="path-preview-rope" d={`M8 ${29 + offset} C38 ${5 + offset} 62 ${37 + offset} 91 ${20 + offset} S140 ${7 + offset} 172 ${24 + offset}`} />
+        ))}
+        {output === 'cards' && [32, 68, 104, 140].map((x, index) => (
+          <path key={x} className="path-preview-card" d={`M${x - 5} ${index % 2 ? 27 : 25} L${x} ${index % 2 ? 8 : 10} L${x + 5} ${index % 2 ? 27 : 25} Z`} />
+        ))}
+        {output === 'object-array' && [28, 61, 96, 132, 160].map((x, index) => (
+          <rect
+            key={x}
+            className="path-preview-solid"
+            x={x - 6}
+            y={index % 2 ? 16 : 18}
+            width="12"
+            height="8"
+            rx="1"
+            transform={`rotate(${index % 2 ? -24 : 24} ${x} ${index % 2 ? 20 : 22})`}
+          />
+        ))}
+        {output === 'vine' && [45, 82, 121, 153].map((x, index) => (
+          <ellipse key={x} className="path-preview-leaf" cx={x} cy={index % 2 ? 13 : 28} rx="5" ry="2.5" transform={`rotate(${index % 2 ? -28 : 28} ${x} ${index % 2 ? 13 : 28})`} />
+        ))}
+        {output === 'ribbon' && <path className="path-preview-ribbon" d="M8 25 C38 1 62 33 91 16 S140 3 172 20 L172 29 C140 12 118 36 91 25 S38 10 8 34 Z" />}
+        {(output === 'tube' || output === 'profile-sweep') && <path className="path-preview-solid" d="M8 29 C38 5 62 37 91 20 S140 7 172 24" />}
+      </svg>
+      <span>{pathOutputLabel(output)} · choose settings, then draw</span>
+    </div>
+  );
+}
+
+function pathOutputLabel(output: PathSettingsValue['pathOutput']): string {
+  return output === 'cards' ? '2D Cards' : output === 'object-array' ? 'Object Array' : output === 'profile-sweep' ? 'Profile Sweep' : `${output[0]!.toUpperCase()}${output.slice(1)}`;
 }
 
 function CapButtons({

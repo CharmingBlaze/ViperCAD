@@ -32,6 +32,7 @@ import { cloneMeshPreserveIds, isBoundaryEdge } from '@/core/mesh/EditableMesh';
 import { bevelEdges } from '@/core/mesh/ops/bevel';
 import { solidifyMesh } from '@/core/mesh/ops/solidify';
 import { applyObjectTransform } from '@/core/document/ObjectTransforms';
+import { transformPoint } from '@/core/math/Transform';
 import {
   generateBoxCollider,
   generateConvexCollider,
@@ -46,6 +47,14 @@ import {
   separateFacesToObject,
   ungroupObject,
 } from '@/core/editor/GameAssetTools';
+import {
+  getObjectOrigin,
+  setObjectOrigin,
+  centerObjectOrigin,
+  setObjectOriginToBase,
+  setObjectOriginToTop,
+  setObjectOriginToScene,
+} from '@/core/editor/OriginTools';
 import {
   expandSymmetryEdgeIds,
   expandSymmetryFaceIds,
@@ -84,7 +93,7 @@ import {
   type DoodleStyle,
 } from '@/core/tools/CreateDoodleTool';
 import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
-import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
+import { DrawPolyTool, type DrawPlaneLock } from '@/core/tools/DrawPolyTool';
 import type { GizmoMode, TransformOrientation, TransformPivotMode } from '@/core/transform/types';
 import type {
   InspectorSection,
@@ -92,8 +101,24 @@ import type {
   WorkspaceController,
 } from '@/workspace/WorkspaceController';
 
+import { BlenderIcon, type KnownBlenderIcon } from '@/components/BlenderIcon';
+import { PrimitiveIcon } from '@/components/PrimitiveIcon';
+import { formatAutosaveTime, type AutosavePayload } from '@/app/autosave';
+import { projectIsDirty } from '@/core/document/ViperProject';
+
 type CreateMode = 'primitive' | 'doodle' | 'draw';
-type SceneToolMode = 'construct' | 'modifiers' | 'output';
+type SceneToolMode = 'construct' | 'modifiers' | 'output' | 'recovery';
+
+export type RecoveryControlsState = {
+  autosaves: AutosavePayload[];
+  promptRecoveryOnStartup: boolean;
+  onTogglePromptRecoveryOnStartup: (val: boolean) => void;
+  onOpenRecoveryDialog: () => void;
+  onCreateCheckpoint: () => void;
+  onClearAllSnapshots: () => void;
+  onRestoreSnapshot: (autosave: AutosavePayload) => void;
+  onDiscardSnapshot: (id: string) => void;
+};
 
 type Props = {
   session: EditorSession;
@@ -101,24 +126,25 @@ type Props = {
   onRefresh: () => void;
   editFaces: (kind: 'extrude' | 'inset' | 'knife' | 'bevel') => void;
   chooseMode: (mode: 'object' | 'vertex' | 'edge' | 'face') => void;
-  toggleXRay: () => void;
   setGizmoMode: (mode: GizmoMode) => void;
   setOrientation: (orientation: TransformOrientation) => void;
   setPivot: (mode: TransformPivotMode) => void;
+  docked?: boolean;
+  recoveryState?: RecoveryControlsState;
 };
 
-const TABS: { id: InspectorTab; label: string }[] = [
-  { id: 'create', label: 'Build' },
-  { id: 'edit', label: 'Model' },
-  { id: 'material', label: 'Material' },
+const TABS: { id: InspectorTab; label: string; icon: KnownBlenderIcon }[] = [
+  { id: 'create', label: 'Build', icon: 'tool_settings' },
+  { id: 'edit', label: 'Model', icon: 'mesh_data' },
+  { id: 'material', label: 'Material', icon: 'material' },
 ];
 
-const EDIT_SECTIONS: { id: InspectorSection; label: string; short: string }[] = [
-  { id: 'select', label: 'Select & Objects', short: 'Select' },
-  { id: 'transform', label: 'Transform', short: 'Xform' },
-  { id: 'geometry', label: 'Mesh Geometry', short: 'Mesh' },
-  { id: 'symmetry', label: 'Symmetry', short: 'Sym' },
-  { id: 'scene', label: 'Construct & Game', short: 'Game' },
+const EDIT_SECTIONS: { id: InspectorSection; label: string; short: string; icon: KnownBlenderIcon }[] = [
+  { id: 'select', label: 'Select & Objects', short: 'Select', icon: 'restrict_select_off' },
+  { id: 'transform', label: 'Transform', short: 'Xform', icon: 'empty_arrows' },
+  { id: 'geometry', label: 'Mesh Geometry', short: 'Mesh', icon: 'editmode_hlt' },
+  { id: 'symmetry', label: 'Symmetry', short: 'Sym', icon: 'mod_mirror' },
+  { id: 'scene', label: 'Construct & Game', short: 'Game', icon: 'scene_data' },
 ];
 
 /**
@@ -131,10 +157,11 @@ export function AppInspectorPanel({
   onRefresh,
   editFaces,
   chooseMode,
-  toggleXRay,
   setGizmoMode,
   setOrientation,
   setPivot,
+  docked = false,
+  recoveryState,
 }: Props) {
   const tab = workspace.inspectorTab;
   const editSection = workspace.inspectorSection;
@@ -178,7 +205,9 @@ export function AppInspectorPanel({
   const chainLen = drawTool.state.chain.length;
   const canCloseChain = chainLen >= 3;
   const canCommitDraw =
-    drawTool.buildMode === 'faces' ? canCloseChain : drawTool.state.createdInChain.length > 0;
+    drawTool.topologyMode === 'points'
+      ? drawTool.state.createdInChain.length > 0
+      : canCloseChain;
   const gizmoMode = session.transform.prefs.gizmoMode;
   const faceEditReady = sel.mode === 'face' && sel.selectedFaceIds.size > 0;
   const objectCount = session.document.objects.size;
@@ -362,6 +391,24 @@ export function AppInspectorPanel({
     workspace.setSelectedCurvePointIndex(0);
     workspace.input.end('tool');
     onRefresh();
+  };
+
+  const armCurveDraw = () => {
+    primitiveTool.cancel(session.context());
+    drawTool.cancel(session.context());
+    setCreateModePref('doodle');
+    session.tools.setActive('create-doodle', session.context());
+    workspace.setCurveNodeEditMode(false);
+    workspace.setSelectedCurvePointIndex(0);
+    session.requestRedraw();
+    onRefresh();
+  };
+
+  const startCurveStyle = (style: DoodleStyle) => {
+    if (doodleTool.state.stage === 'drawing') doodleTool.cancel(session.context());
+    doodleTool.setSolidMode('extrude', session.context());
+    doodleTool.setStyle(style, session.context());
+    armCurveDraw();
   };
 
   const setTab = (next: InspectorTab) => {
@@ -678,19 +725,21 @@ export function AppInspectorPanel({
   );
 
   return (
-    <aside className="app-inspector" aria-label="Modelling inspector">
-      <header className="app-inspector-header">
-        <div className="uv-panel-title">
-          <span className="uv-panel-kicker">Inspector</span>
-          <strong>Model</strong>
-        </div>
-        <p className="uv-meta">
-          {objectCount === 0 ? 'Empty scene' : `${objectCount} object${objectCount === 1 ? '' : 's'}`}
-          {' · '}
-          {sel.mode}
-          {sel.xRay ? ' · x-ray' : ''}
-        </p>
-      </header>
+    <aside className={`app-inspector${docked ? ' is-docked' : ''}`} aria-label="Modelling inspector">
+      {!docked && (
+        <header className="app-inspector-header">
+          <div className="uv-panel-title">
+            <span className="uv-panel-kicker">Inspector</span>
+            <strong>Model</strong>
+          </div>
+          <p className="uv-meta">
+            {objectCount === 0 ? 'Empty scene' : `${objectCount} object${objectCount === 1 ? '' : 's'}`}
+            {' · '}
+            {sel.mode}
+            {sel.xRay ? ' · x-ray' : ''}
+          </p>
+        </header>
+      )}
 
       <nav className="app-inspector-tabs" aria-label="Inspector tabs">
         {TABS.map((t) => (
@@ -698,10 +747,13 @@ export function AppInspectorPanel({
             key={t.id}
             type="button"
             className={`uv-tab${tab === t.id ? ' is-active' : ''}`}
+            data-tab={t.id}
             aria-selected={tab === t.id}
             onClick={() => setTab(t.id)}
+            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
           >
-            {t.label}
+            <BlenderIcon name={t.icon} size={14} />
+            <span>{t.label}</span>
           </button>
         ))}
       </nav>
@@ -731,8 +783,10 @@ export function AppInspectorPanel({
                 aria-selected={editSection === item.id}
                 title={item.label}
                 onClick={() => workspace.setInspectorSection(item.id)}
+                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
               >
-                {item.short}
+                <BlenderIcon name={item.icon} size={13} />
+                <span>{item.short}</span>
               </button>
             ))}
           </nav>
@@ -744,10 +798,10 @@ export function AppInspectorPanel({
           <>
             <section className="uv-section">
               <h3 className="uv-section-title">Mode</h3>
-              <div className="uv-btn-grid uv-btn-grid-3">
+              <div className="inspector-segmented" role="group" aria-label="Create mode">
                 <button
                   type="button"
-                  className={`tool${createMode === 'primitive' ? ' is-active' : ''}`}
+                  className={createMode === 'primitive' ? 'is-active' : ''}
                   aria-pressed={createMode === 'primitive'}
                   onClick={() => {
                     cancelCreateTools();
@@ -756,32 +810,36 @@ export function AppInspectorPanel({
                     onRefresh();
                   }}
                 >
+                  <BlenderIcon name="mesh_cube" size={12} />
                   Primitive
                 </button>
                 <button
                   type="button"
-                  className={`tool${createMode === 'doodle' ? ' is-active' : ''}`}
+                  className={createMode === 'doodle' ? 'is-active' : ''}
                   aria-pressed={createMode === 'doodle'}
                   onClick={() => {
                     cancelCreateTools();
                     setCreateModePref('doodle');
-                    session.tools.setActive('create-doodle', session.context());
+                    session.tools.setActive('select', session.context());
                     onRefresh();
                   }}
                 >
+                  <BlenderIcon name="curve_data" size={12} />
                   Curves
                 </button>
                 <button
                   type="button"
-                  className={`tool${createMode === 'draw' ? ' is-active' : ''}`}
+                  className={createMode === 'draw' ? 'is-active' : ''}
                   aria-pressed={createMode === 'draw'}
                   onClick={() => {
                     cancelCreateTools();
                     setCreateModePref('draw');
                     session.tools.setActive('draw-poly', session.context());
+                    drawTool.startNewMesh(session.context());
                     onRefresh();
                   }}
                 >
+                  <BlenderIcon name="greasepencil" size={12} />
                   Draw
                 </button>
               </div>
@@ -798,7 +856,7 @@ export function AppInspectorPanel({
                       aria-pressed={doodleTool.inputMode === 'sketch'}
                       onClick={() => {
                         doodleTool.setInputMode('sketch', session.context());
-                        onRefresh();
+                        armCurveDraw();
                       }}
                     >
                       Sketch · Freehand
@@ -809,7 +867,7 @@ export function AppInspectorPanel({
                       aria-pressed={doodleTool.inputMode === 'pen'}
                       onClick={() => {
                         doodleTool.setInputMode('pen', session.context());
-                        onRefresh();
+                        armCurveDraw();
                       }}
                     >
                       Vector Pen
@@ -820,6 +878,18 @@ export function AppInspectorPanel({
                       ? 'Press and draw a fluid path · release to create'
                       : 'Click precise control points · Enter or Finish Curve to create'}
                   </p>
+                  <label className="uv-check">
+                    <input
+                      type="checkbox"
+                      aria-label="On surfaces"
+                      checked={workspace.getDrawOnSurfaces()}
+                      onChange={(e) => {
+                        workspace.setDrawOnSurfaces(e.target.checked);
+                        onRefresh();
+                      }}
+                    />
+                    On surfaces
+                  </label>
                 </section>
 
                 <section className="uv-section">
@@ -838,11 +908,7 @@ export function AppInspectorPanel({
                         type="button"
                         className={`tool${doodleTool.style === style && doodleTool.solidMode === 'extrude' ? ' is-active' : ''}`}
                         aria-pressed={doodleTool.style === style && doodleTool.solidMode === 'extrude'}
-                        onClick={() => {
-                          doodleTool.setSolidMode('extrude', session.context());
-                          doodleTool.setStyle(style, session.context());
-                          onRefresh();
-                        }}
+                        onClick={() => startCurveStyle(style)}
                       >
                         {label}
                       </button>
@@ -875,11 +941,7 @@ export function AppInspectorPanel({
                         type="button"
                         className={`tool${doodleTool.style === style && doodleTool.solidMode === 'extrude' ? ' is-active' : ''}`}
                         aria-pressed={doodleTool.style === style && doodleTool.solidMode === 'extrude'}
-                        onClick={() => {
-                          doodleTool.setSolidMode('extrude', session.context());
-                          doodleTool.setStyle(style, session.context());
-                          onRefresh();
-                        }}
+                        onClick={() => startCurveStyle(style)}
                       >
                         {label}
                       </button>
@@ -900,11 +962,7 @@ export function AppInspectorPanel({
                         type="button"
                         className={`tool${doodleTool.style === style && doodleTool.solidMode === 'extrude' ? ' is-active' : ''}`}
                         aria-pressed={doodleTool.style === style && doodleTool.solidMode === 'extrude'}
-                        onClick={() => {
-                          doodleTool.setSolidMode('extrude', session.context());
-                          doodleTool.setStyle(style, session.context());
-                          onRefresh();
-                        }}
+                        onClick={() => startCurveStyle(style)}
                       >
                         {label}
                       </button>
@@ -943,6 +1001,7 @@ export function AppInspectorPanel({
                         pathSourceObjectId: doodleTool.pathSourceObjectId,
                       }}
                       onChange={applyNewPathSettings}
+                      onStartDrawing={armCurveDraw}
                     />
                   )}
                   {doodleTool.style === 'capsule' && doodleTool.solidMode === 'extrude' && (
@@ -1070,7 +1129,7 @@ export function AppInspectorPanel({
                         </label>
                       ))}
                     </div>
-                    <p>Draw in a viewport to create the stroke. Texture mapping and tip settings are saved on the new object.</p>
+                    <p>New curves use the default object texture. Click Draw, then sketch in a viewport.</p>
                   </section>
                   <h3 className="uv-section-title">3D Operation</h3>
                   <div className="uv-btn-grid uv-btn-grid-2">
@@ -1080,7 +1139,7 @@ export function AppInspectorPanel({
                       aria-pressed={doodleTool.solidMode === 'extrude'}
                       onClick={() => {
                         doodleTool.setSolidMode('extrude', session.context());
-                        onRefresh();
+                        armCurveDraw();
                       }}
                     >
                       Extrude / Sweep
@@ -1091,7 +1150,7 @@ export function AppInspectorPanel({
                       aria-pressed={doodleTool.solidMode === 'lathe'}
                       onClick={() => {
                         doodleTool.setSolidMode('lathe', session.context());
-                        onRefresh();
+                        armCurveDraw();
                       }}
                     >
                       Lathe
@@ -1349,16 +1408,43 @@ export function AppInspectorPanel({
                   ) : (
                     <p className="uv-hint">
                       {doodleTool.inputMode === 'sketch'
-                        ? 'LMB drag to sketch · release to finish stroke'
-                        : 'LMB place points · Enter to finish'}
+                        ? 'LMB drag to sketch · release to create the object'
+                        : 'LMB place points · Enter or Finish Curve to create'}
                     </p>
                   )
+                  ) : isDoodling ? (
+                    <>
+                      <p className="uv-hint">
+                        {doodleTool.inputMode === 'sketch'
+                          ? 'LMB drag in a viewport · release to create the object'
+                          : 'LMB place points · Enter or Finish Curve to create'}
+                      </p>
+                      <button
+                        type="button"
+                        className="tool uv-btn-block"
+                        onClick={() => {
+                          doodleTool.cancel(session.context());
+                          session.tools.setActive('select', session.context());
+                          workspace.setCurveNodeEditMode(false);
+                          onRefresh();
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </>
                   ) : (
-                    <p className="uv-hint">
-                      {doodleTool.inputMode === 'sketch'
-                        ? 'Select curve objects and use G/R/S · LMB drag empty space to sketch another curve'
-                        : 'Select curve objects and use G/R/S · LMB place points on empty space for the next curve'}
-                    </p>
+                    <>
+                      <button
+                        type="button"
+                        className="tool primary uv-btn-block"
+                        onClick={() => armCurveDraw()}
+                      >
+                        Draw
+                      </button>
+                      <p className="uv-hint">
+                        Click Draw (or a stroke shape), then sketch in a viewport. Release to create a mesh object. Click Draw again for the next curve.
+                      </p>
+                    </>
                   )}
                   <p className="uv-meta">
                     {doodleTool.state.stage === 'drawing'
@@ -1385,14 +1471,6 @@ export function AppInspectorPanel({
 
             {createMode === 'draw' && (
               <section className="uv-section draw-workflow">
-                <div className="draw-heading">
-                  <div>
-                    <h3 className="uv-section-title">Model from scratch</h3>
-                    <p className="uv-meta">Draw connected geometry with smart snapping and exact control.</p>
-                  </div>
-                  {isDrawing && <span className="draw-live-badge">Drawing</span>}
-                </div>
-
                 {!isDrawing ? (
                   <div className="draw-start">
                     <button
@@ -1407,7 +1485,7 @@ export function AppInspectorPanel({
                       }}
                     >
                       <strong>Start a new model</strong>
-                      <span>Create a clean mesh and draw its first surface</span>
+                      <span>Create a clean mesh and draw quad or tri faces</span>
                     </button>
                     <button
                       type="button"
@@ -1425,17 +1503,11 @@ export function AppInspectorPanel({
                       <span>{activeMesh ? `Add geometry to ${activeObject?.name}` : 'Select a mesh first'}</span>
                     </button>
                     <p className="uv-hint">
-                      Tip: select vertices or an edge before continuing to grow directly from them.
+                      Tip: select existing vertices or an edge before continuing to bridge directly from them.
                     </p>
                   </div>
                 ) : (
                   <>
-                    <div className="draw-steps" aria-label="Draw workflow progress">
-                      <span className="is-done"><b>1</b> Target</span>
-                      <span className={chainLen ? 'is-done' : 'is-active'}><b>2</b> Draw</span>
-                      <span className={canCommitDraw ? 'is-active' : ''}><b>3</b> Finish</span>
-                    </div>
-
                     <div className="draw-target-card">
                       <div>
                         <span className="draw-label">Editing</span>
@@ -1468,36 +1540,60 @@ export function AppInspectorPanel({
                     </div>
 
                     <div className="uv-field">
-                      <span>What are you drawing?</span>
-                      <div className="draw-mode-grid">
+                      <span>Topology Mode</span>
+                      <div className="draw-topology-grid">
                         <button
                           type="button"
-                          className={`draw-mode${drawTool.buildMode === 'faces' ? ' is-active' : ''}`}
-                          aria-pressed={drawTool.buildMode === 'faces'}
+                          className={`draw-mode${drawTool.topologyMode === 'quad' ? ' is-active' : ''}`}
+                          aria-pressed={drawTool.topologyMode === 'quad'}
                           onClick={() => {
-                            drawTool.setBuildMode('faces', session.context());
+                            drawTool.setTopologyMode('quad', session.context());
                             onRefresh();
                           }}
                         >
-                          <strong>Surface</strong>
-                          <span>3+ points become a face</span>
+                          <strong>Quad</strong>
+                          <span>4-point face</span>
                         </button>
                         <button
                           type="button"
-                          className={`draw-mode${drawTool.buildMode === 'vertices' ? ' is-active' : ''}`}
-                          aria-pressed={drawTool.buildMode === 'vertices'}
+                          className={`draw-mode${drawTool.topologyMode === 'tri' ? ' is-active' : ''}`}
+                          aria-pressed={drawTool.topologyMode === 'tri'}
                           onClick={() => {
-                            drawTool.setBuildMode('vertices', session.context());
+                            drawTool.setTopologyMode('tri', session.context());
+                            onRefresh();
+                          }}
+                        >
+                          <strong>Tri</strong>
+                          <span>3-point face</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={`draw-mode${drawTool.topologyMode === 'ngon' ? ' is-active' : ''}`}
+                          aria-pressed={drawTool.topologyMode === 'ngon'}
+                          onClick={() => {
+                            drawTool.setTopologyMode('ngon', session.context());
+                            onRefresh();
+                          }}
+                        >
+                          <strong>Polygon</strong>
+                          <span>3+ point face</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={`draw-mode${drawTool.topologyMode === 'points' ? ' is-active' : ''}`}
+                          aria-pressed={drawTool.topologyMode === 'points'}
+                          onClick={() => {
+                            drawTool.setTopologyMode('points', session.context());
                             onRefresh();
                           }}
                         >
                           <strong>Points</strong>
-                          <span>Place loose vertices precisely</span>
+                          <span>Loose vertices</span>
                         </button>
                       </div>
                     </div>
 
-                    {drawTool.buildMode === 'faces' && (
+                    {drawTool.topologyMode !== 'points' && (
                       <div className="uv-field">
                         <span>Surface sides</span>
                         <div className="uv-btn-grid uv-btn-grid-2">
@@ -1528,36 +1624,93 @@ export function AppInspectorPanel({
                     )}
 
                     <div className="uv-field">
-                      <span>Draw plane</span>
-                      <div className="uv-btn-grid uv-btn-grid-3">
-                        {(['top', 'front', 'right'] as const).map((plane) => (
+                      <span>Place</span>
+                      <div className="uv-btn-grid uv-btn-grid-4">
+                        {(
+                          [
+                            ['view', 'Any view'],
+                            ['top', 'Top'],
+                            ['front', 'Front'],
+                            ['right', 'Right'],
+                          ] as [DrawPlaneLock, string][]
+                        ).map(([lock, label]) => (
                           <button
-                            key={plane}
+                            key={lock}
                             type="button"
-                            className={`tool${session.constructionPlaneId.startsWith(plane) ? ' is-active' : ''}`}
+                            className={`tool${drawTool.planeLock === lock ? ' is-active' : ''}`}
+                            aria-pressed={drawTool.planeLock === lock}
+                            title={
+                              lock === 'view'
+                                ? 'Click in Top, Front, Right, or Perspective — each view has its own plane'
+                                : `Keep every click on the ${label} plane, from any viewport`
+                            }
                             onClick={() => {
-                              session.setConstructionPlanePreset(plane);
-                              setConstructionOffset(0);
+                              drawTool.setPlaneLock(lock, session.context());
+                              if (lock !== 'view') {
+                                session.setConstructionPlanePreset(lock);
+                                setConstructionOffset(0);
+                              }
                               onRefresh();
                             }}
                           >
-                            {plane[0]!.toUpperCase() + plane.slice(1)}
+                            {label}
                           </button>
                         ))}
                       </div>
-                      <button
-                        type="button"
-                        className={`tool${session.constructionPlaneId.startsWith('face:') ? ' is-active' : ''}`}
-                        disabled={!session.selection.state.activeFaceId}
-                        onClick={() => {
-                          if (session.setConstructionPlaneFromSelection()) {
-                            setConstructionOffset(0);
+                      <label className="uv-check">
+                        <input
+                          type="checkbox"
+                          aria-label="On surfaces"
+                          checked={workspace.getDrawOnSurfaces()}
+                          onChange={(event) => {
+                            workspace.setDrawOnSurfaces(event.target.checked);
                             onRefresh();
-                          }
-                        }}
-                      >
-                        Draw on selected face
-                      </button>
+                          }}
+                        />
+                        On surfaces
+                      </label>
+                      <details className="draw-advanced-placement">
+                        <summary>More placement options</summary>
+                        <div className="uv-btn-grid uv-btn-grid-2">
+                          <button
+                            type="button"
+                            className={`tool${session.constructionPlaneId.startsWith('face:') ? ' is-active' : ''}`}
+                            disabled={!session.selection.state.activeFaceId}
+                            onClick={() => {
+                              if (session.setConstructionPlaneFromSelection()) {
+                                setConstructionOffset(0);
+                                onRefresh();
+                              }
+                            }}
+                          >
+                            On selected face
+                          </button>
+                          <button
+                            type="button"
+                            className="tool"
+                            disabled={chainLen === 0 && sel.selectedVertexIds.size === 0}
+                            title="Move the current draw plane so it passes through the last point"
+                            onClick={() => {
+                              const lastId = chainLen > 0 ? drawTool.state.chain[chainLen - 1] : [...sel.selectedVertexIds][0];
+                              if (lastId && activeMesh) {
+                                const v = activeMesh.vertices.get(lastId);
+                                if (v) {
+                                  const worldPos = activeObject ? transformPoint(v.position, activeObject.transform) : v.position;
+                                  const currentPlane = session.constructionPlane;
+                                  const dist = (worldPos.x - currentPlane.origin.x) * currentPlane.normal.x +
+                                               (worldPos.y - currentPlane.origin.y) * currentPlane.normal.y +
+                                               (worldPos.z - currentPlane.origin.z) * currentPlane.normal.z;
+                                  session.offsetConstructionPlane(dist);
+                                  setConstructionOffset(dist);
+                                  onRefresh();
+                                }
+                              }
+                            }}
+                          >
+                            Align to point
+                          </button>
+                        </div>
+                      </details>
                     </div>
 
                     <div className={`draw-status${drawTool.state.lastError ? ' is-error' : ''}`}>
@@ -1566,15 +1719,26 @@ export function AppInspectorPanel({
                         <strong>
                           {drawTool.state.lastError
                             ? 'Needs attention'
-                            : drawTool.buildMode === 'faces'
-                              ? chainLen < 3
-                                ? `${3 - chainLen} more point${3 - chainLen === 1 ? '' : 's'} to make a surface`
-                                : 'Surface is ready'
-                              : chainLen
-                                ? `${drawTool.state.createdInChain.length} new point${drawTool.state.createdInChain.length === 1 ? '' : 's'}`
-                                : 'Click in a viewport to place the first point'}
+                            : drawTool.topologyMode === 'quad'
+                              ? chainLen === 0
+                                ? 'Click in 3D to place point 1'
+                                : chainLen < 4
+                                  ? `${4 - chainLen} more point${4 - chainLen === 1 ? '' : 's'} to make Quad`
+                                  : 'Quad is ready'
+                              : drawTool.topologyMode === 'tri'
+                                ? chainLen === 0
+                                  ? 'Click in 3D to place point 1'
+                                  : chainLen < 3
+                                    ? `${3 - chainLen} more point${3 - chainLen === 1 ? '' : 's'} to make Tri`
+                                    : 'Tri is ready'
+                                : drawTool.topologyMode === 'ngon'
+                                  ? chainLen < 3
+                                    ? `${3 - chainLen} more point${3 - chainLen === 1 ? '' : 's'} for Polygon`
+                                    : 'Polygon is ready'
+                                  : chainLen
+                                    ? `${drawTool.state.createdInChain.length} loose 3D point${drawTool.state.createdInChain.length === 1 ? '' : 's'}`
+                                    : 'Click in a viewport to place loose 3D vertices'}
                         </strong>
-                        <span>{drawTool.statusLine()}</span>
                       </div>
                     </div>
 
@@ -1587,20 +1751,30 @@ export function AppInspectorPanel({
                         onRefresh();
                       }}
                     >
-                      {drawTool.buildMode === 'faces' ? 'Create surface' : 'Commit points'}
+                      {drawTool.topologyMode === 'points'
+                        ? 'Commit points'
+                        : drawTool.topologyMode === 'quad'
+                          ? 'Create Quad Face'
+                          : drawTool.topologyMode === 'tri'
+                            ? 'Create Tri Face'
+                            : 'Create Polygon'}
                       <kbd>Enter</kbd>
                     </button>
                     <div className="uv-btn-grid uv-btn-grid-3">
                       <button
                         type="button"
                         className="tool"
-                        disabled={chainLen === 0}
+                        disabled={!drawTool.canUndoDraw(session.history.canUndo())}
+                        title="Undo last point or last committed face"
                         onClick={() => {
-                          drawTool.popLast(session.context());
+                          if (!drawTool.undoDraw(session.context())) {
+                            if (session.undo()) drawTool.syncAfterHistory(session.context());
+                          }
                           onRefresh();
                         }}
                       >
-                        Undo point
+                        Undo
+                        <kbd>Ctrl+Z</kbd>
                       </button>
                       <button
                         type="button"
@@ -1612,6 +1786,7 @@ export function AppInspectorPanel({
                         }}
                       >
                         Clear
+                        <kbd>Esc</kbd>
                       </button>
                       <button
                         type="button"
@@ -1622,17 +1797,33 @@ export function AppInspectorPanel({
                             (sel.mode === 'edge' && sel.selectedEdgeIds.size > 0)
                           )
                         }
+                        title="Seed selected vertices/edges into the polygon to extend or bridge old geometry"
                         onClick={() => {
                           drawTool.seedFromSelection(session.context());
                           onRefresh();
                         }}
                       >
-                        Use selection
+                        {sel.mode === 'vertex' && sel.selectedVertexIds.size > 0
+                          ? `Use ${sel.selectedVertexIds.size} vert${sel.selectedVertexIds.size > 1 ? 's' : ''}`
+                          : sel.mode === 'edge' && sel.selectedEdgeIds.size > 0
+                            ? `Use ${sel.selectedEdgeIds.size} edge${sel.selectedEdgeIds.size > 1 ? 's' : ''}`
+                            : 'Use selection'}
                       </button>
                     </div>
 
                     <details className="draw-details">
-                      <summary>Precision &amp; snapping</summary>
+                      <summary>Precision &amp; 3D snapping</summary>
+                      <label className="uv-check">
+                        <input
+                          type="checkbox"
+                          checked={drawTool.autoCommitOnTargetCount}
+                          onChange={(event) => {
+                            drawTool.setAutoCommit(event.target.checked, session.context());
+                            onRefresh();
+                          }}
+                        />
+                        Auto-create face on 3/4 points
+                      </label>
                       <label className="uv-check">
                         <input
                           type="checkbox"
@@ -1644,7 +1835,7 @@ export function AppInspectorPanel({
                             onRefresh();
                           }}
                         />
-                        Smart snapping
+                        Smart 3D vertex &amp; edge snapping
                       </label>
                       <label className="uv-field">
                         <span>Grid increment</span>
@@ -1677,7 +1868,7 @@ export function AppInspectorPanel({
                           }}
                         />
                       </label>
-                      <span className="draw-label">Place exact world coordinate</span>
+                      <span className="draw-label">Place exact 3D world coordinate</span>
                       <div className="draw-coordinates">
                         {(['x', 'y', 'z'] as const).map((axis) => (
                           <label key={axis}>
@@ -1703,36 +1894,27 @@ export function AppInspectorPanel({
                           onRefresh();
                         }}
                       >
-                        Place exact point
+                        Place exact 3D point
                       </button>
                     </details>
-
-                    <p className="uv-hint">
-                      Click to place · click an old vertex to reuse it · Shift locks an axis · Ctrl temporarily
-                      toggles snapping · Backspace removes the last point · between strokes press R or use the
-                      rotate gizmo to reorient the whole draw object.
-                    </p>
 
                     <button
                       type="button"
                       className="tool primary uv-btn-block"
                       onClick={() => {
-                        if (canCommitDraw) drawTool.confirm(session.context());
-                        else if (chainLen) drawTool.cancel(session.context());
-                        const drawObjectId =
-                          drawTool.state.meshObjectId ?? session.selection.state.activeObjectId;
+                        const drawObjectId = drawTool.finishDraw(session.context());
                         session.tools.setActive('select', session.context());
                         setTab('edit');
                         if (drawObjectId) {
                           session.selection.setMode('object');
                           session.selection.selectObjects([drawObjectId], 'replace');
                         } else {
-                          chooseMode(drawTool.buildMode === 'faces' ? 'face' : 'vertex');
+                          chooseMode(drawTool.topologyMode === 'points' ? 'vertex' : 'face');
                         }
                         onRefresh();
                       }}
                     >
-                      Finish drawing and refine model
+                      Finish mesh
                     </button>
 
                     <details
@@ -1742,10 +1924,6 @@ export function AppInspectorPanel({
                     >
                       <summary>Advanced topology tools</summary>
                       {topologyActions}
-                      <p className="uv-hint">
-                        Select mesh components to unlock the relevant operation. These tools remain
-                        available in the Edit tab.
-                      </p>
                     </details>
                   </>
                 )}
@@ -1755,67 +1933,140 @@ export function AppInspectorPanel({
             {createMode === 'primitive' && (
             <section className="uv-section">
               <h3 className="uv-section-title">Primitive</h3>
-              <label className="uv-field">
-                <span>Type</span>
-                <select
-                  className="uv-select"
-                  aria-label="Primitive"
-                  value={primitiveTool.state.kind}
-                  onChange={(e) => {
-                    session.tools.setActive('create-primitive', session.context());
-                    primitiveTool.selectPrimitive(e.target.value as PrimitiveKind, session.context());
-                    onRefresh();
-                  }}
-                >
-                  {PRIMITIVE_KINDS.map((kind) => (
-                    <option key={kind} value={kind}>
-                      {PRIMITIVE_LABELS[kind]}
+              <div className="primitive-card-grid">
+                {PRIMITIVE_KINDS.map((kind) => {
+                  const isSelected =
+                    isCreatingPrimitive && primitiveTool.kindChosen && primitiveTool.state.kind === kind;
+                  return (
+                    <button
+                      key={kind}
+                      type="button"
+                      className={`primitive-card-btn${isSelected ? ' is-active' : ''}`}
+                      aria-pressed={isSelected}
+                      onClick={() => {
+                        session.tools.setActive('create-primitive', session.context());
+                        primitiveTool.selectPrimitive(kind, session.context());
+                        onRefresh();
+                      }}
+                      title={PRIMITIVE_LABELS[kind]}
+                    >
+                      <PrimitiveIcon kind={kind} size={19} />
+                      <span>{PRIMITIVE_LABELS[kind]}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="inspector-field-row">
+                <label className="uv-field">
+                  <span>Type</span>
+                  <select
+                    className="uv-select"
+                    aria-label="Primitive"
+                    value={primitiveTool.kindChosen ? primitiveTool.state.kind : ''}
+                    onChange={(e) => {
+                      const next = e.target.value as PrimitiveKind;
+                      if (!next) return;
+                      session.tools.setActive('create-primitive', session.context());
+                      primitiveTool.selectPrimitive(next, session.context());
+                      onRefresh();
+                    }}
+                  >
+                    <option value="" disabled>
+                      Select…
                     </option>
-                  ))}
-                </select>
-              </label>
-              <label className="uv-field">
-                <span>Complexity</span>
-                <select
-                  className="uv-select"
-                  aria-label="Complexity"
-                  value={primitiveTool.parameters.preset}
+                    {PRIMITIVE_KINDS.map((kind) => (
+                      <option key={kind} value={kind}>
+                        {PRIMITIVE_LABELS[kind]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="uv-field">
+                  <span>Complexity</span>
+                  <select
+                    className="uv-select"
+                    aria-label="Complexity"
+                    value={primitiveTool.parameters.preset}
+                    onChange={(e) => {
+                      primitiveTool.setPreset(
+                        e.target.value as 'low' | 'medium' | 'custom',
+                        session.context(),
+                      );
+                      onRefresh();
+                    }}
+                  >
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+              </div>
+              <label className="uv-check">
+                <input
+                  type="checkbox"
+                  aria-label="On surfaces"
+                  checked={workspace.getDrawOnSurfaces()}
                   onChange={(e) => {
-                    primitiveTool.setPreset(
-                      e.target.value as 'low' | 'medium' | 'custom',
-                      session.context(),
-                    );
+                    workspace.setDrawOnSurfaces(e.target.checked);
                     onRefresh();
                   }}
-                >
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="custom">Custom</option>
-                </select>
+                />
+                On surfaces
               </label>
+              <label className="uv-check">
+                <input
+                  type="checkbox"
+                  aria-label="Continuous"
+                  checked={primitiveTool.continuous}
+                  onChange={(e) => {
+                    primitiveTool.setContinuous(e.target.checked, session.context());
+                    onRefresh();
+                  }}
+                />
+                Continuous
+              </label>
+              <p className="uv-hint">
+                Click a surface to place. Click empty space to use the view plane.
+              </p>
               {!isCreatingPrimitive ? (
                 <button
                   type="button"
                   className="tool primary uv-btn-block"
+                  disabled={!primitiveTool.kindChosen}
                   onClick={() => {
                     session.tools.setActive('create-primitive', session.context());
                     onRefresh();
                   }}
                 >
-                  Start create
+                  {primitiveTool.kindChosen
+                    ? `Create ${PRIMITIVE_LABELS[primitiveTool.state.kind]}`
+                    : 'Create'}
                 </button>
               ) : (
-                <button
-                  type="button"
-                  className="tool uv-btn-block"
-                  onClick={() => {
-                    primitiveTool.cancel(session.context());
-                    session.tools.setActive('select', session.context());
-                    onRefresh();
-                  }}
-                >
-                  Cancel create
-                </button>
+                <div className="uv-btn-grid uv-btn-grid-2" style={{ marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="tool primary"
+                    onClick={() => {
+                      primitiveTool.confirm(session.context());
+                      onRefresh();
+                    }}
+                  >
+                    Commit
+                  </button>
+                  <button
+                    type="button"
+                    className="tool"
+                    onClick={() => {
+                      primitiveTool.cancel(session.context());
+                      session.tools.setActive('select', session.context());
+                      onRefresh();
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
               )}
             </section>
             )}
@@ -1845,7 +2096,7 @@ export function AppInspectorPanel({
                     />
                   </label>
                 ))}
-                {['cylinder', 'cone', 'sphere', 'capsule', 'column', 'tube'].includes(
+                {['cylinder', 'cone', 'sphere', 'capsule', 'tube'].includes(
                   primitiveTool.state.kind,
                 ) && (
                   <label className="uv-field">
@@ -1966,43 +2217,33 @@ export function AppInspectorPanel({
           <>
             {editSection === 'select' && <section className="uv-section">
               <h3 className="uv-section-title">Mode</h3>
-              <label className="uv-field">
-                <span>Selection</span>
-                <select
-                  className="uv-select"
-                  aria-label="Selection mode"
-                  value={sel.mode}
-                  onChange={(e) =>
-                    chooseMode(e.target.value as 'object' | 'vertex' | 'edge' | 'face')
-                  }
-                >
-                  <option value="object">Object</option>
-                  <option value="vertex">Vertex</option>
-                  <option value="edge">Edge</option>
-                  <option value="face">Face</option>
-                </select>
-              </label>
-              <div className="uv-btn-grid uv-btn-grid-2">
-                {(['object', 'vertex', 'edge', 'face'] as const).map((mode) => (
+              <div className="selection-mode-strip" role="group" aria-label="Selection mode">
+                {(
+                  [
+                    ['object', 'Object', 'object_datamode', 'Tab'],
+                    ['vertex', 'Vertex', 'vertex_select', '1'],
+                    ['edge', 'Edge', 'edge_select', '2'],
+                    ['face', 'Face', 'face_select', '3'],
+                  ] as const
+                ).map(([mode, label, icon, key]) => (
                   <button
                     key={mode}
                     type="button"
-                    className={`tool${sel.mode === mode ? ' is-active' : ''}`}
+                    className={`selection-mode-btn selection-mode-btn-${mode}${sel.mode === mode ? ' is-active' : ''}`}
                     onClick={() => chooseMode(mode)}
                     aria-pressed={sel.mode === mode}
+                    title={`${label} (${key})`}
                   >
-                    {mode[0]!.toUpperCase() + mode.slice(1)}
+                    <BlenderIcon name={icon} size={14} />
+                    <span>{label}</span>
                   </button>
                 ))}
               </div>
-              <button
-                type="button"
-                className={`tool uv-btn-block${sel.xRay ? ' is-active' : ''}`}
-                onClick={toggleXRay}
-                aria-pressed={sel.xRay}
-              >
-                X-Ray {sel.xRay ? 'on' : 'off'}
-              </button>
+              <p className="selection-legend">
+                <span className="selection-legend-swatch is-idle" /> Idle
+                <span className="selection-legend-swatch is-hover" /> Hover
+                <span className="selection-legend-swatch is-selected" /> Selected
+              </p>
               <div className="uv-btn-grid uv-btn-grid-2">
                 <button
                   type="button"
@@ -2050,6 +2291,18 @@ export function AppInspectorPanel({
                   }}
                 >
                   Grow
+                </button>
+                <button
+                  type="button"
+                  className="tool"
+                  disabled={!activeMesh || sel.mode === 'object'}
+                  onClick={() => {
+                    session.selection.shrink(activeMesh!);
+                    session.requestRedraw();
+                    onRefresh();
+                  }}
+                >
+                  Shrink
                 </button>
                 <button
                   type="button"
@@ -2188,8 +2441,83 @@ export function AppInspectorPanel({
                     })}
                   </div>
                 ))}
+                <div className="exact-transform-row">
+                  <span title="Origin / Pivot point (world coordinates)">O</span>
+                  {(['x', 'y', 'z'] as const).map((axis) => {
+                    const origin = getObjectOrigin(session.document, activeObject.id);
+                    return (
+                      <input
+                        key={axis}
+                        className="uv-text"
+                        aria-label={`Origin ${axis}`}
+                        type="number"
+                        step={session.document.settings.snapIncrement}
+                        value={Number(origin[axis].toFixed(4))}
+                        onChange={(event) => {
+                          const value = Number(event.target.value);
+                          const current = getObjectOrigin(session.document, activeObject.id);
+                          const next = { ...current, [axis]: value };
+                          setObjectOrigin(session.document, activeObject.id, next);
+                          session.document.dirty = true;
+                          session.requestRedraw();
+                          onRefresh();
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+                <div className="uv-btn-grid uv-btn-grid-2" style={{ marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="tool"
+                    onClick={() => {
+                      centerObjectOrigin(session.document, activeObject.id);
+                      session.requestRedraw();
+                      onRefresh();
+                    }}
+                    title="Center origin to geometry bounding box"
+                  >
+                    Center Pivot
+                  </button>
+                  <button
+                    type="button"
+                    className="tool"
+                    onClick={() => {
+                      setObjectOriginToBase(session.document, activeObject.id);
+                      session.requestRedraw();
+                      onRefresh();
+                    }}
+                    title="Set origin to bottom of bounding box (base / floor)"
+                  >
+                    Pivot to Base
+                  </button>
+                  <button
+                    type="button"
+                    className="tool"
+                    onClick={() => {
+                      setObjectOriginToTop(session.document, activeObject.id);
+                      session.requestRedraw();
+                      onRefresh();
+                    }}
+                    title="Set origin to top of bounding box"
+                  >
+                    Pivot to Top
+                  </button>
+                  <button
+                    type="button"
+                    className="tool"
+                    onClick={() => {
+                      setObjectOriginToScene(session.document, activeObject.id);
+                      session.requestRedraw();
+                      onRefresh();
+                    }}
+                    title="Set origin to scene center (0, 0, 0)"
+                  >
+                    Pivot to Scene
+                  </button>
+                </div>
                 <p className="uv-hint">
-                  Parameters remain editable after every move · position and scale use project units · rotation uses degrees
+                  P = Position · R = Rotation · S = Scale · O = Origin (Pivot point)
                 </p>
               </section>
             )}
@@ -2209,15 +2537,17 @@ export function AppInspectorPanel({
                   <option value="rotate">Rotate (R)</option>
                   <option value="scale">Scale (S)</option>
                   <option value="combined">Combined</option>
+                  <option value="origin">Origin (P)</option>
                 </select>
               </label>
-              <div className="uv-btn-grid uv-btn-grid-2">
+              <div className="uv-btn-grid uv-btn-grid-3">
                 {([
                   ['select', 'Select'],
                   ['move', 'Move'],
                   ['rotate', 'Rotate'],
                   ['scale', 'Scale'],
                   ['combined', 'Combo'],
+                  ['origin', 'Origin (P)'],
                 ] as const).map(([mode, label]) => (
                   <button
                     key={mode}
@@ -2231,7 +2561,7 @@ export function AppInspectorPanel({
                 ))}
               </div>
               <p className="uv-hint">
-                Move: drag selection freely · Select: drag selection to tweak · Gizmo axes constrain
+                Origin (P): move pivot point freely without moving geometry · Gizmo axes constrain
               </p>
             </section>}
 
@@ -2571,6 +2901,7 @@ export function AppInspectorPanel({
                   ['construct', 'Construct'],
                   ['modifiers', 'Modifiers'],
                   ['output', 'Game Output'],
+                  ['recovery', 'Recovery'],
                 ] as const).map(([mode, label]) => (
                   <button
                     type="button"
@@ -3055,10 +3386,109 @@ export function AppInspectorPanel({
               )}
               <p className="uv-hint">Prefab groups and arrays preserve hierarchy · GLB exports UV2, transforms, collision roles, and game metadata</p>
               </>}
+
+              {sceneToolMode === 'recovery' && (
+                <div className="inspector-recovery-pane">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                    <BlenderIcon name="recover_last" size={15} />
+                    <strong style={{ fontSize: '0.85rem' }}>Autosave &amp; Project Recovery</strong>
+                  </div>
+
+                  <label className="uv-check">
+                    <input
+                      type="checkbox"
+                      checked={recoveryState?.promptRecoveryOnStartup ?? false}
+                      onChange={(event) => recoveryState?.onTogglePromptRecoveryOnStartup(event.target.checked)}
+                    />
+                    <span>Prompt for recovery on startup</span>
+                  </label>
+                  <p className="uv-hint" style={{ marginTop: 2, marginBottom: 8 }}>
+                    When enabled, ViperCAD automatically offers to restore autosaved sessions upon startup.
+                  </p>
+
+                  <div className="inspector-recovery-stats">
+                    <div>Snapshots in storage: <strong>{recoveryState?.autosaves.length ?? 0}</strong></div>
+                    <div>Project state: <strong>{projectIsDirty(session.project) ? 'Unsaved changes pending' : 'Saved / Clean'}</strong></div>
+                    <div>Autosave interval: <strong>Every 5s on changes</strong></div>
+                  </div>
+
+                  <div className="uv-btn-grid uv-btn-grid-2" style={{ marginTop: 8 }}>
+                    <button
+                      type="button"
+                      className="tool primary"
+                      onClick={() => recoveryState?.onOpenRecoveryDialog()}
+                      title="Open full recovery dialog modal"
+                    >
+                      Open History Modal
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      onClick={() => recoveryState?.onCreateCheckpoint()}
+                      title="Snapshot project right now"
+                    >
+                      Snapshot Now
+                    </button>
+                  </div>
+
+                  {recoveryState && recoveryState.autosaves.length > 0 ? (
+                    <>
+                      <div className="inspector-recovery-subhead">
+                        <span>Recovery Snapshots ({recoveryState.autosaves.length})</span>
+                      </div>
+                      <div className="inspector-recovery-list">
+                        {recoveryState.autosaves.map((snap) => (
+                          <div key={snap.id} className="inspector-recovery-item">
+                            <div className="inspector-recovery-info">
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                                <span className={`recovery-badge recovery-badge-${snap.kind}`}>
+                                  {snap.kind === 'named' ? 'Checkpoint' : 'Autosave'}
+                                </span>
+                                <strong className="inspector-recovery-name">{snap.name}</strong>
+                              </div>
+                              <span className="inspector-recovery-time">{formatAutosaveTime(snap.savedAt)}</span>
+                            </div>
+                            <div className="inspector-recovery-btns">
+                              <button
+                                type="button"
+                                className="tool"
+                                onClick={() => recoveryState.onDiscardSnapshot(snap.id)}
+                                title="Remove this snapshot"
+                              >
+                                Remove
+                              </button>
+                              <button
+                                type="button"
+                                className="tool primary"
+                                onClick={() => recoveryState.onRestoreSnapshot(snap)}
+                                title="Restore project from this snapshot"
+                              >
+                                Restore
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        className="tool"
+                        style={{ marginTop: 8, width: '100%' }}
+                        onClick={() => recoveryState.onClearAllSnapshots()}
+                      >
+                        Clear All Recovery Snapshots
+                      </button>
+                    </>
+                  ) : (
+                    <p className="uv-hint" style={{ marginTop: 10 }}>
+                      No recovery snapshots saved yet. Snapshots are created automatically every 5s while you edit.
+                    </p>
+                  )}
+                </div>
+              )}
             </section>}
 
             <section className="uv-section">
-              <h3 className="uv-section-title">History</h3>
+              <h3 className="uv-section-title">History &amp; Recovery</h3>
               <div className="uv-btn-grid uv-btn-grid-2">
                 <button
                   type="button"
@@ -3083,6 +3513,36 @@ export function AppInspectorPanel({
                   Redo
                 </button>
               </div>
+              {recoveryState && (
+                <div style={{ marginTop: 8, display: 'grid', gap: 6 }}>
+                  <label className="uv-check">
+                    <input
+                      type="checkbox"
+                      checked={recoveryState.promptRecoveryOnStartup}
+                      onChange={(event) => recoveryState.onTogglePromptRecoveryOnStartup(event.target.checked)}
+                    />
+                    <span>Prompt for recovery on startup</span>
+                  </label>
+                  <div className="uv-btn-grid uv-btn-grid-2">
+                    <button
+                      type="button"
+                      className="tool"
+                      onClick={() => recoveryState.onOpenRecoveryDialog()}
+                      title="Open full recovery dialog"
+                    >
+                      Recovery ({recoveryState.autosaves.length})…
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      onClick={() => recoveryState.onCreateCheckpoint()}
+                      title="Create a snapshot checkpoint right now"
+                    >
+                      Snapshot
+                    </button>
+                  </div>
+                </div>
+              )}
             </section>
           </>
         )}

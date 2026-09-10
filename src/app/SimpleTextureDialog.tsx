@@ -73,7 +73,7 @@ export function SimpleTextureDialog({
         : `linear-gradient(${settings.color}, ${settings.color})`;
   const useThemeAccent = () => {
     const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
-    patch({ mode: 'color', color: /^#[0-9a-f]{6}$/i.test(accent) ? accent : '#ff8c28' });
+    patch({ mode: 'color', color: /^#[0-9a-f]{6}$/i.test(accent) ? accent : '#1473e6' });
   };
 
   return (

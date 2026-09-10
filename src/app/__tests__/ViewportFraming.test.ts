@@ -15,7 +15,7 @@ describe('viewport framing', () => {
   });
 
   it('expands an orthographic frame for portrait panes', () => {
-    expect(orthographicFrameHeight(2, 0.5)).toBeCloseTo(9.2);
-    expect(orthographicFrameHeight(2, 2)).toBeCloseTo(4.6);
+    expect(orthographicFrameHeight(2, 0.5)).toBeCloseTo(13.6);
+    expect(orthographicFrameHeight(2, 2)).toBeCloseTo(6.8);
   });
 });

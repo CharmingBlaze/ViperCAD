@@ -13,6 +13,12 @@ type Marquee = {
   currentScreenX: number;
 };
 
+type PixelShapePreview = {
+  tool: 'line' | 'rectangle' | 'ellipse';
+  start: { x: number; y: number };
+  current: { x: number; y: number };
+};
+
 type Options = {
   canvas: HTMLCanvasElement;
   host: HTMLDivElement;
@@ -23,11 +29,12 @@ type Options = {
   activeMesh: { mesh: EditableMesh; layerId: UvLayerId } | null;
   hoverPixel: { x: number; y: number } | null;
   marquee: Marquee | null;
+  pixelShapePreview?: PixelShapePreview | null;
 };
 
 /** Draws the shared UV/image canvas; interaction state remains in the editor controller. */
 export function drawUvPixelCanvas(options: Options): void {
-  const { canvas, host, image, session, workspace, uvPointerActive, activeMesh, hoverPixel, marquee } = options;
+  const { canvas, host, image, session, workspace, uvPointerActive, activeMesh, hoverPixel, marquee, pixelShapePreview } = options;
   const width = Math.max(1, Math.floor(host.clientWidth));
   const height = Math.max(1, Math.floor(host.clientHeight));
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -54,14 +61,7 @@ export function drawUvPixelCanvas(options: Options): void {
     drawMessage(context, 'Texture image data is invalid');
     return;
   }
-  const offscreen = document.createElement('canvas');
-  offscreen.width = image.width;
-  offscreen.height = image.height;
-  offscreen.getContext('2d')!.putImageData(
-    new ImageData(new Uint8ClampedArray(image.pixels), image.width, image.height),
-    0,
-    0,
-  );
+  const offscreen = blitCanvasForImage(image);
   const imageX = camera.panX;
   const imageY = camera.panY;
   const imageWidth = image.width * camera.zoom;
@@ -77,21 +77,92 @@ export function drawUvPixelCanvas(options: Options): void {
   if (workspace.texture.showPixelGrid && camera.zoom >= 8 && mode !== 'uv') {
     drawPixelGrid(context, image.width, image.height, camera.zoom);
   }
-  if (workspace.texture.showUvOverlay && mode !== 'pixel' && activeMesh) {
+  if (workspace.texture.showUvGrid && uvPointerActive && mode !== 'pixel') {
+    drawUvGrid(context, image.width, image.height, camera.zoom);
+  }
+  if (workspace.texture.showUvOverlay && uvPointerActive && mode !== 'pixel' && activeMesh) {
     const diagnostics = analyseUvs(activeMesh.mesh, activeMesh.layerId, image.width, image.height);
     drawUvOverlay(
       context, session, image.width, image.height, camera.zoom, workspace.texture.uvEditMode,
       true, activeMesh.layerId, workspace.texture.uvDiagnosticMode, diagnostics,
     );
   }
+  if (!uvPointerActive && (workspace.texture.paintMirrorX || workspace.texture.paintMirrorY)) {
+    drawSymmetryGuides(context, image.width, image.height, workspace, camera.zoom);
+  }
   if (!uvPointerActive && hoverPixel && mode !== 'uv') {
     drawBrushPreview(context, hoverPixel, workspace, camera.zoom);
   }
+  if (pixelShapePreview && mode !== 'uv') drawShapePreview(context, pixelShapePreview, workspace, camera.zoom);
   if (marquee) drawMarquee(context, marquee, image.width, image.height, camera.zoom);
   context.restore();
-  context.strokeStyle = uvPointerActive ? 'rgba(255,173,82,0.78)' : 'rgba(124,145,173,0.72)';
+  context.strokeStyle = uvPointerActive ? 'rgba(20,115,230,0.6)' : 'rgba(255,255,255,0.1)';
   context.lineWidth = 1;
   context.strokeRect(imageX + 0.5, imageY + 0.5, Math.max(0, imageWidth - 1), Math.max(0, imageHeight - 1));
+}
+
+function drawShapePreview(context: CanvasRenderingContext2D, shape: PixelShapePreview, workspace: WorkspaceController, zoom: number): void {
+  const size = Math.max(1, workspace.texture.brushSize);
+  const offset = Math.floor((size - 1) / 2);
+  context.save();
+  context.strokeStyle = 'rgba(255, 236, 154, 0.96)';
+  context.lineWidth = Math.max(1 / zoom, size / 3);
+  context.setLineDash([3 / zoom, 2 / zoom]);
+  if (shape.tool === 'line') {
+    context.beginPath();
+    context.moveTo(shape.start.x + 0.5, shape.start.y + 0.5);
+    context.lineTo(shape.current.x + 0.5, shape.current.y + 0.5);
+    context.stroke();
+  } else if (shape.tool === 'rectangle') {
+    const x = Math.min(shape.start.x, shape.current.x) - offset;
+    const y = Math.min(shape.start.y, shape.current.y) - offset;
+    const w = Math.abs(shape.current.x - shape.start.x) + size;
+    const h = Math.abs(shape.current.y - shape.start.y) + size;
+    context.strokeRect(x, y, w, h);
+  } else {
+    const cx = (shape.start.x + shape.current.x + 1) / 2;
+    const cy = (shape.start.y + shape.current.y + 1) / 2;
+    const rx = Math.max(.5, Math.abs(shape.current.x - shape.start.x + 1) / 2);
+    const ry = Math.max(.5, Math.abs(shape.current.y - shape.start.y + 1) / 2);
+    context.beginPath();
+    context.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    context.stroke();
+  }
+  context.restore();
+}
+
+type ImageBlitCache = {
+  imageId: string;
+  revision: number;
+  canvas: HTMLCanvasElement;
+};
+
+let blitCache: ImageBlitCache | null = null;
+
+function blitCanvasForImage(image: ImageAsset): HTMLCanvasElement {
+  const reusable =
+    blitCache?.canvas &&
+    blitCache.canvas.width === image.width &&
+    blitCache.canvas.height === image.height
+      ? blitCache.canvas
+      : document.createElement('canvas');
+  if (
+    blitCache &&
+    blitCache.canvas === reusable &&
+    blitCache.imageId === image.id &&
+    blitCache.revision === image.revision
+  ) {
+    return reusable;
+  }
+  reusable.width = image.width;
+  reusable.height = image.height;
+  reusable.getContext('2d')!.putImageData(
+    new ImageData(new Uint8ClampedArray(image.pixels), image.width, image.height),
+    0,
+    0,
+  );
+  blitCache = { imageId: image.id, revision: image.revision, canvas: reusable };
+  return reusable;
 }
 
 function drawBackground(context: CanvasRenderingContext2D, width: number, height: number): void {
@@ -133,10 +204,49 @@ function drawArtboard(context: CanvasRenderingContext2D, x: number, y: number, w
 }
 
 function drawPixelGrid(context: CanvasRenderingContext2D, width: number, height: number, zoom: number): void {
-  context.strokeStyle = 'rgba(255,255,255,0.12)'; context.lineWidth = 1 / zoom; context.beginPath();
+  context.strokeStyle = 'rgba(255,255,255,0.06)';
+  context.lineWidth = 1 / zoom;
+  context.beginPath();
   for (let x = 0; x <= width; x++) { context.moveTo(x, 0); context.lineTo(x, height); }
   for (let y = 0; y <= height; y++) { context.moveTo(0, y); context.lineTo(width, y); }
   context.stroke();
+}
+
+function drawSymmetryGuides(context: CanvasRenderingContext2D, width: number, height: number, workspace: WorkspaceController, zoom: number): void {
+  context.save();
+  context.strokeStyle = 'rgba(20, 115, 230, 0.45)';
+  context.lineWidth = 1 / zoom;
+  context.setLineDash([4 / zoom, 3 / zoom]);
+  context.beginPath();
+  if (workspace.texture.paintMirrorX) {
+    const midX = width / 2;
+    context.moveTo(midX, 0);
+    context.lineTo(midX, height);
+  }
+  if (workspace.texture.paintMirrorY) {
+    const midY = height / 2;
+    context.moveTo(0, midY);
+    context.lineTo(width, midY);
+  }
+  context.stroke();
+  context.restore();
+}
+
+/** A light 16×16 guide remains useful at any zoom, unlike the per-texel grid. */
+function drawUvGrid(context: CanvasRenderingContext2D, width: number, height: number, zoom: number): void {
+  const divisions = 16;
+  context.strokeStyle = 'rgba(101, 177, 255, 0.22)';
+  context.lineWidth = 1 / zoom;
+  context.beginPath();
+  for (let i = 1; i < divisions; i++) {
+    const x = (width * i) / divisions;
+    const y = (height * i) / divisions;
+    context.moveTo(x, 0); context.lineTo(x, height);
+    context.moveTo(0, y); context.lineTo(width, y);
+  }
+  context.stroke();
+  context.strokeStyle = 'rgba(131, 204, 255, 0.5)';
+  context.strokeRect(0.5 / zoom, 0.5 / zoom, width - 1 / zoom, height - 1 / zoom);
 }
 
 function drawBrushPreview(context: CanvasRenderingContext2D, pixel: { x: number; y: number }, workspace: WorkspaceController, zoom: number): void {

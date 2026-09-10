@@ -21,8 +21,8 @@ export function BoneEditorPanel({ session, onRefresh }: Props) {
   if (!armature) {
     return (
       <section className="rig-panel">
-        <h3 className="rig-panel-title">Bone editor</h3>
-        <p className="rig-hint">Create an armature with Quick setup first.</p>
+        <h3 className="rig-panel-title">Armature</h3>
+        <p className="rig-empty-text">No armature found. Run Quick Setup above to generate one.</p>
       </section>
     );
   }
@@ -48,23 +48,44 @@ export function BoneEditorPanel({ session, onRefresh }: Props) {
   return (
     <section className="rig-panel rig-bone-editor">
       <div className="rig-panel-head">
-        <h3 className="rig-panel-title">Bone editor</h3>
+        <h3 className="rig-panel-title">
+          {session.editMode === 'edit'
+            ? 'Bone Structure'
+            : session.editMode === 'pose'
+              ? 'Pose & Transforms'
+              : 'Bone Hierarchy'}
+        </h3>
         {session.editMode === 'edit' && (
           <div className="rig-inline-actions">
-            <button type="button" className="rig-btn-sm" title="Add child bone" onClick={() => { session.addBoneToSelection(); onRefresh(); }}>+</button>
-            <button type="button" className="rig-btn-sm" title="Extrude from tail" onClick={() => { session.extrudeSelectedBone(); onRefresh(); }}>↧</button>
-            <button type="button" className="rig-btn-sm" title="Delete bone" onClick={() => { session.deleteSelectedBone(); onRefresh(); }}>×</button>
+            <button
+              type="button"
+              className="rig-btn-sm"
+              title="Add child bone"
+              onClick={() => { session.addBoneToSelection(); onRefresh(); }}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              className="rig-btn-sm"
+              title="Extrude bone from tail"
+              onClick={() => { session.extrudeSelectedBone(); onRefresh(); }}
+            >
+              ↧
+            </button>
+            <button
+              type="button"
+              className="rig-btn-sm rig-btn-sm-danger"
+              title="Delete selected bone"
+              onClick={() => { session.deleteSelectedBone(); onRefresh(); }}
+            >
+              ×
+            </button>
           </div>
         )}
       </div>
 
-      <p className="rig-hint rig-bone-editor-hint">
-        {session.editMode === 'edit'
-          ? 'Click bones in the viewport. Drag orange/yellow handles to move head and tail.'
-          : 'Switch to Edit mode to change bone structure.'}
-      </p>
-
-      <ul className="rig-bone-list rig-bone-list-tall">
+      <ul className="rig-bone-list rig-bone-list-tall" aria-label="Bones">
         {boneTree.map(({ bone, depth }) => (
           <li key={bone.id}>
             <button
@@ -82,8 +103,8 @@ export function BoneEditorPanel({ session, onRefresh }: Props) {
 
       {selectedBone && (
         <>
-          <label className="rig-field">
-            <span>Name</span>
+          <label className="rig-field" style={{ marginTop: '8px' }}>
+            <span>Bone name</span>
             <input
               className="rig-input"
               value={selectedBone.name}
@@ -120,20 +141,20 @@ export function BoneEditorPanel({ session, onRefresh }: Props) {
           )}
 
           {boneTail && session.editMode === 'edit' && (
-            <div>
-              <p className="rig-hint" style={{ marginBottom: 6 }}>Tail (local)</p>
-              <div className="rig-transform-grid">
+            <div className="rig-prop-group">
+              <div className="rig-prop-title">Tail Offset (Local)</div>
+              <div className="rig-axis-row">
                 {(['x', 'y', 'z'] as const).map((axis) => (
-                  <label key={`tail-${axis}`} className="rig-field">
-                    <span>{axis.toUpperCase()}</span>
+                  <div key={`tail-${axis}`} className="rig-axis-input-group" title={`Tail ${axis.toUpperCase()}`}>
+                    <span className={`rig-axis-chip axis-${axis}`}>{axis.toUpperCase()}</span>
                     <input
                       className="rig-input"
                       type="number"
                       step={0.01}
-                      value={Number(boneTail[axis].toFixed(4))}
+                      value={Number(boneTail[axis].toFixed(3))}
                       onChange={(event) => updateTail(axis, Number(event.target.value))}
                     />
-                  </label>
+                  </div>
                 ))}
               </div>
             </div>
@@ -146,7 +167,7 @@ export function BoneEditorPanel({ session, onRefresh }: Props) {
                 className="rig-input"
                 type="number"
                 step={0.05}
-                value={Number(selectedBone.roll.toFixed(4))}
+                value={Number(selectedBone.roll.toFixed(3))}
                 onChange={(event) => {
                   session.setSelectedBoneRoll(Number(event.target.value));
                   onRefresh();
@@ -156,45 +177,103 @@ export function BoneEditorPanel({ session, onRefresh }: Props) {
           )}
 
           {boneTransform && (session.editMode === 'edit' || session.editMode === 'pose') && (
-            <div>
-              <p className="rig-hint" style={{ marginBottom: 6 }}>
-                {session.editMode === 'edit' ? 'Rest transform' : 'Pose transform'}
-              </p>
-              {(['position', 'rotation', 'scale'] as const).map((channel) => (
-                <div key={channel} className="rig-channel-block">
-                  <span className="rig-channel-label">{channel}</span>
-                  <div className="rig-transform-grid">
-                    {(['x', 'y', 'z'] as const).map((axis) => (
-                      <label key={`${channel}-${axis}`} className="rig-field">
-                        <span>{axis.toUpperCase()}</span>
-                        <input
-                          className="rig-input"
-                          type="number"
-                          step={channel === 'rotation' ? 0.05 : 0.01}
-                          value={Number(boneTransform[channel][axis].toFixed(4))}
-                          onChange={(event) => updateField(axis, channel, Number(event.target.value))}
-                        />
-                      </label>
-                    ))}
-                  </div>
+            <div className="rig-transforms-section">
+              <div className="rig-prop-title">
+                {session.editMode === 'edit' ? 'Rest Transform' : 'Pose Transform'}
+              </div>
+
+              {/* Position */}
+              <div className="rig-channel-block">
+                <span className="rig-channel-label">Position</span>
+                <div className="rig-axis-row">
+                  {(['x', 'y', 'z'] as const).map((axis) => (
+                    <div key={`pos-${axis}`} className="rig-axis-input-group" title={`Position ${axis.toUpperCase()}`}>
+                      <span className={`rig-axis-chip axis-${axis}`}>{axis.toUpperCase()}</span>
+                      <input
+                        className="rig-input"
+                        type="number"
+                        step={0.01}
+                        value={Number(boneTransform.position[axis].toFixed(3))}
+                        onChange={(event) => updateField(axis, 'position', Number(event.target.value))}
+                      />
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </div>
+
+              {/* Rotation */}
+              <div className="rig-channel-block">
+                <span className="rig-channel-label">Rotation</span>
+                <div className="rig-axis-row">
+                  {(['x', 'y', 'z'] as const).map((axis) => (
+                    <div key={`rot-${axis}`} className="rig-axis-input-group" title={`Rotation ${axis.toUpperCase()}`}>
+                      <span className={`rig-axis-chip axis-${axis}`}>{axis.toUpperCase()}</span>
+                      <input
+                        className="rig-input"
+                        type="number"
+                        step={0.05}
+                        value={Number(boneTransform.rotation[axis].toFixed(3))}
+                        onChange={(event) => updateField(axis, 'rotation', Number(event.target.value))}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Scale - tucked under expandable disclosure */}
+              <details className="rig-scale-disclosure">
+                <summary className="rig-scale-summary">
+                  <span className="rig-channel-label">Scale</span>
+                  <span className="rig-scale-preview">
+                    {Number(boneTransform.scale.x.toFixed(2))}, {Number(boneTransform.scale.y.toFixed(2))}, {Number(boneTransform.scale.z.toFixed(2))}
+                  </span>
+                </summary>
+                <div className="rig-axis-row" style={{ marginTop: '6px' }}>
+                  {(['x', 'y', 'z'] as const).map((axis) => (
+                    <div key={`scale-${axis}`} className="rig-axis-input-group" title={`Scale ${axis.toUpperCase()}`}>
+                      <span className={`rig-axis-chip axis-${axis}`}>{axis.toUpperCase()}</span>
+                      <input
+                        className="rig-input"
+                        type="number"
+                        step={0.01}
+                        value={Number(boneTransform.scale[axis].toFixed(3))}
+                        onChange={(event) => updateField(axis, 'scale', Number(event.target.value))}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </details>
             </div>
           )}
 
           {session.editMode === 'edit' && (
-            <button type="button" className="rig-btn" onClick={() => { session.resetRestPose(); onRefresh(); }}>
-              Reset rest pose
-            </button>
+            <div className="rig-btn-row" style={{ marginTop: '12px' }}>
+              <button
+                type="button"
+                className="rig-btn rig-btn-secondary"
+                onClick={() => { session.resetRestPose(); onRefresh(); }}
+              >
+                Reset Rest Pose
+              </button>
+            </div>
           )}
 
           {session.editMode === 'pose' && (
-            <div className="rig-btn-row">
-              <button type="button" className="rig-btn" onClick={() => { session.insertKeyframeForSelectedBone(); onRefresh(); }}>
-                Keyframe bone
+            <div className="rig-btn-row" style={{ marginTop: '12px' }}>
+              <button
+                type="button"
+                className="rig-btn rig-btn-primary"
+                onClick={() => { session.insertKeyframeForSelectedBone(); onRefresh(); }}
+              >
+                Keyframe Bone
               </button>
-              <button type="button" className="rig-btn" onClick={() => { session.applyPoseAsRest(); onRefresh(); }}>
-                Apply as rest
+              <button
+                type="button"
+                className="rig-btn rig-btn-caution"
+                title="Overwrites base rest pose with current pose transforms"
+                onClick={() => { session.applyPoseAsRest(); onRefresh(); }}
+              >
+                Apply Pose as Rest…
               </button>
             </div>
           )}

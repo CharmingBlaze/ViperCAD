@@ -3,13 +3,17 @@ import { getObjectWorldTransform } from '@/core/editor/Hierarchy';
 import { transformPoint } from '@/core/math/Transform';
 import {
   crossVec3,
+  dotVec3,
+  lengthSqVec3,
   normalizeVec3,
+  scaleVec3,
   subVec3,
   v3,
   type Vec3,
 } from '@/core/math/Vec3';
+import { computeSelectionInterior } from './Pivot';
 import { faceVertexIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
-import { computeFaceNormal } from '@/core/mesh/Normals';
+import { computeEdgeNormal, computeFaceNormal, computeVertexNormal } from '@/core/mesh/Normals';
 import type { SelectionState } from '@/core/selection/SelectionManager';
 import type { ViewId } from '@/workspace/types';
 import { identityBasis, type OrientationBasis, type TransformOrientation } from './types';
@@ -121,14 +125,26 @@ function normalBasis(doc: ModelDocument, selection: SelectionState): Orientation
     const a = transformPoint(mesh.vertices.get(pair[0])!.position, world);
     const b = transformPoint(mesh.vertices.get(pair[1])!.position, world);
     const dir = normalizeVec3(subVec3(b, a));
-    normal = dir;
-    tangent =
-      Math.abs(dir.y) < 0.9
-        ? normalizeVec3(crossVec3(dir, v3(0, 1, 0)))
-        : normalizeVec3(crossVec3(dir, v3(1, 0, 0)));
-  } else if (selection.mode === 'vertex' && selection.activeVertexId) {
-    normal = v3(0, 1, 0);
-    tangent = v3(1, 0, 0);
+    tangent = dir;
+    const nLocal = computeEdgeNormal(mesh, edgeId);
+    normal = normalizeVec3(rotateDirection(nLocal, world.rotation));
+    if (Math.hypot(normal.x, normal.y, normal.z) < 1e-6) {
+      normal =
+        Math.abs(dir.y) < 0.9
+          ? normalizeVec3(crossVec3(dir, v3(0, 1, 0)))
+          : normalizeVec3(crossVec3(dir, v3(1, 0, 0)));
+    }
+  } else if (selection.mode === 'vertex') {
+    const vertexId = selection.activeVertexId ?? [...selection.selectedVertexIds][0];
+    if (!vertexId) return null;
+    const nLocal = computeVertexNormal(mesh, vertexId);
+    normal = normalizeVec3(rotateDirection(nLocal, world.rotation));
+    const v = mesh.vertices.get(vertexId);
+    if (v) {
+      const fallback =
+        Math.abs(normal.y) < 0.9 ? v3(0, 1, 0) : v3(1, 0, 0);
+      tangent = normalizeVec3(crossVec3(fallback, normal));
+    }
   } else {
     return null;
   }
@@ -163,6 +179,36 @@ export function freeMovePlaneNormal(viewId: ViewId, camera: CameraAxes): Vec3 {
 
 export function axisVector(basis: OrientationBasis, axis: 'x' | 'y' | 'z'): Vec3 {
   return axis === 'x' ? basis.x : axis === 'y' ? basis.y : basis.z;
+}
+
+/**
+ * Flip each basis axis so +X/+Y/+Z point away from the mesh interior when the
+ * pivot sits on a corner or face (primitives store origin at the cage min).
+ * No-op when the pivot is at the centroid so world/local stay standard.
+ */
+export function flipBasisOutward(
+  basis: OrientationBasis,
+  pivot: Vec3,
+  interior: Vec3,
+): OrientationBasis {
+  const outward = subVec3(pivot, interior);
+  if (lengthSqVec3(outward) < 1e-8) return basis;
+  const flip = (axis: Vec3): Vec3 =>
+    dotVec3(axis, outward) < -1e-6 ? scaleVec3(axis, -1) : axis;
+  return { x: flip(basis.x), y: flip(basis.y), z: flip(basis.z) };
+}
+
+export function orientedBasisForSelection(
+  doc: ModelDocument,
+  selection: SelectionState,
+  orientation: TransformOrientation,
+  camera: CameraAxes | null,
+  forceLocal: boolean,
+  pivot: Vec3,
+): OrientationBasis {
+  const basis = buildOrientationBasis(doc, selection, orientation, camera, forceLocal);
+  const interior = computeSelectionInterior(doc, selection);
+  return interior ? flipBasisOutward(basis, pivot, interior) : basis;
 }
 
 const ORIENTATION_CYCLE: TransformOrientation[] = ['local', 'global', 'normal', 'view'];

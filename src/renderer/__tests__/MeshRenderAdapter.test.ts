@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { createDefaultMaterial } from '@/core/document/ModelDocument';
+import { createEmptyDocument, createDefaultMaterial } from '@/core/document/ModelDocument';
+import { DEFAULT_PLACEHOLDER_IMAGE_NAME } from '@/core/image/DefaultPlaceholderImage';
 import { faceCornerIds } from '@/core/mesh/EditableMesh';
 import { buildPlane } from '@/core/mesh/builders/PlaneBuilder';
-import { createObjectRenderHandle, updateObjectRenderHandle } from '@/renderer/MeshRenderAdapter';
+import {
+  createObjectRenderHandle,
+  disposeOwnedTexture,
+  materialAssetToThree,
+  updateObjectRenderHandle,
+} from '@/renderer/MeshRenderAdapter';
 import { evaluateMeshAsync } from '@/renderer/workers/MeshEvaluationWorkerClient';
-import type { BufferAttribute } from 'three';
+import { ClampToEdgeWrapping, DataTexture, LinearFilter, type BufferAttribute } from 'three';
 
 describe('MeshRenderAdapter live updates', () => {
   it('updates the Three.js UV buffer when editable UV coordinates change', () => {
@@ -43,6 +49,71 @@ describe('MeshRenderAdapter live updates', () => {
     const range = position.updateRanges[0]!;
     expect(range.start).toBe(Math.min(...renderIndices) * 3);
     expect(range.start + range.count).toBe(Math.max(...renderIndices) * 3 + 3);
+  });
+
+  it('uploads default placeholder pixels as Uint8Array so WebGL can sample them', () => {
+    const doc = createEmptyDocument();
+    const material = [...doc.materials.values()][0]!;
+    const image = [...doc.images.values()][0]!;
+    expect(image.name).toBe(DEFAULT_PLACEHOLDER_IMAGE_NAME);
+    const three = materialAssetToThree(material, {
+      textures: doc.textures,
+      images: doc.images,
+    });
+    expect(three.color.b).toBeGreaterThan(three.color.g);
+    expect(three.map).toBeInstanceOf(DataTexture);
+    const data = (three.map as DataTexture).image.data;
+    expect(data).toBeInstanceOf(Uint8Array);
+    expect(data).not.toBeInstanceOf(Uint8ClampedArray);
+    expect(data![3]).toBe(255);
+    expect(three.toneMapped).toBe(false);
+  });
+
+  it('uploads painted placeholder pixels instead of the shared clay PNG', () => {
+    const doc = createEmptyDocument();
+    const material = [...doc.materials.values()][0]!;
+    const image = [...doc.images.values()][0]!;
+    image.width = 2;
+    image.height = 2;
+    image.pixels = new Uint8ClampedArray([255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255]);
+    image.revision += 1;
+    image.userEdited = true;
+    const three = materialAssetToThree(material, {
+      textures: doc.textures,
+      images: doc.images,
+    });
+    expect(three.map).toBeInstanceOf(DataTexture);
+    const data = (three.map as DataTexture).image.data;
+    expect(data![0]).toBe(255);
+    expect(data![1]).toBe(0);
+    expect(data![2]).toBe(0);
+  });
+
+  it('avoids WebGL1-incomplete settings on non-power-of-two maps', () => {
+    const doc = createEmptyDocument();
+    const material = [...doc.materials.values()][0]!;
+    material.presetId = 'custom-paint';
+    const image = [...doc.images.values()][0]!;
+    image.name = 'Paint';
+    image.width = 3;
+    image.height = 3;
+    image.pixels = new Uint8ClampedArray(3 * 3 * 4).fill(180);
+    const three = materialAssetToThree(material, {
+      textures: doc.textures,
+      images: doc.images,
+    });
+    expect(three.map).toBeInstanceOf(DataTexture);
+    const map = three.map as DataTexture;
+    expect(map.generateMipmaps).toBe(false);
+    expect(map.wrapS).toBe(ClampToEdgeWrapping);
+    expect(map.minFilter).toBe(LinearFilter);
+  });
+
+  it('does not dispose the shared viewport placeholder texture', () => {
+    const texture = new DataTexture(new Uint8Array([10, 20, 30, 255]), 1, 1);
+    texture.userData.viperSharedPlaceholder = true;
+    disposeOwnedTexture(texture);
+    expect(texture.image.data![0]).toBe(10);
   });
 
   it('evaluates transferable mesh buffers through the worker fallback', async () => {

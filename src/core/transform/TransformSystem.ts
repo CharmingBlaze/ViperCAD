@@ -1,6 +1,6 @@
 import type { CommandHistory } from '@/core/history/CommandHistory';
 import type { ModelDocument } from '@/core/document/types';
-import { topmostObjectIds } from '@/core/editor/Hierarchy';
+import { getObjectWorldTransform, topmostObjectIds } from '@/core/editor/Hierarchy';
 import {
   addVec3,
   crossVec3,
@@ -31,11 +31,13 @@ import { applyAxisKey, constraintLabel } from './Constraints';
 import { parseTransformNumber } from './NumericParser';
 import {
   buildOrientationBasis,
+  flipBasisOutward,
   freeMovePlaneNormal,
+  orientedBasisForSelection,
   axisVector,
   type CameraAxes,
 } from './Orientation';
-import { computePivot } from './Pivot';
+import { computePivot, computeSelectionInterior } from './Pivot';
 import { captureAfterSnapshot, captureSnapshot, restoreSnapshot } from './Snapshot';
 import { gatherTargetVertexIds, selectionHasTransformTarget } from './Targets';
 import {
@@ -67,7 +69,7 @@ export type PointerSample = {
 
 export class TransformSystem {
   prefs: TransformPrefs = {
-    gizmoMode: 'move',
+    gizmoMode: 'combined',
     orientation: 'local',
     pivotMode: 'object-origin',
   };
@@ -134,7 +136,15 @@ export class TransformSystem {
   }
 
   canBegin(): boolean {
-    return selectionHasTransformTarget(this.selection.state) && !this.active;
+    return selectionHasTransformTarget(this.selection.state) && !this.active && !this.hasLockedSelection();
+  }
+
+  private hasLockedSelection(): boolean {
+    if (this.selection.state.mode !== 'object') return false;
+    for (const id of this.selection.state.selectedObjectIds) {
+      if (this.doc.objects.get(id)?.locked) return true;
+    }
+    return false;
   }
 
   begin(options: {
@@ -152,21 +162,28 @@ export class TransformSystem {
     undoHistoryOnCancel?: boolean;
     statusLabel?: string | null;
   }): boolean {
-    if (!selectionHasTransformTarget(this.selection.state)) return false;
+    if (!selectionHasTransformTarget(this.selection.state) || this.hasLockedSelection()) return false;
     if (this.session?.status === 'active') this.cancel();
 
     const sel = this.selection.state;
     const camera = options.camera ?? options.pointer?.camera ?? null;
-    const pivot = computePivot(this.doc, sel, this.prefs.pivotMode);
+    // Origin editing always operates on the active object's actual origin.
+    // Unlike regular transforms, it must not inherit Median/Bounds pivot settings:
+    // the visible handle is the pivot that will be moved while the mesh stays put.
+    const originObjectId = sel.activeObjectId ?? [...sel.selectedObjectIds][0] ?? null;
+    const isOrigin = this.prefs.gizmoMode === 'origin' && sel.mode === 'object' && !!originObjectId;
+    const pivot = isOrigin
+      ? getObjectWorldTransform(this.doc, originObjectId!).position
+      : computePivot(this.doc, sel, this.prefs.pivotMode);
     const orientation = options.orientation ?? this.prefs.orientation;
     const basis =
       options.orientationBasis ??
-      buildOrientationBasis(this.doc, sel, orientation, camera, false);
+      orientedBasisForSelection(this.doc, sel, orientation, camera, false, pivot);
 
     const target = gatherTargetVertexIds(this.doc, sel);
-
     this.session = {
       type: options.type,
+      isOriginTransform: isOrigin,
       targetObjectIds: new Set(
         sel.mode === 'object' ? topmostObjectIds(this.doc, sel.selectedObjectIds) : sel.selectedObjectIds,
       ),
@@ -186,7 +203,7 @@ export class TransformSystem {
         : null,
       initialWorldPoint: null,
       currentWorldPoint: null,
-      initialState: captureSnapshot(this.doc, sel),
+      initialState: captureSnapshot(this.doc, sel, isOrigin),
       currentDelta: emptyDelta(),
       numericInput: null,
       snappingEnabled: false,
@@ -230,13 +247,9 @@ export class TransformSystem {
     s.activeViewportId = pointer.viewportId;
     s.currentPointer = { x: pointer.screenX, y: pointer.screenY };
     s.precisionMode = pointer.shiftKey;
-    // Gizmos should remain responsive to tiny drags. Match Blender's direct
-    // manipulation: free movement by default, Ctrl temporarily enables snap.
-    // Keyboard/modal transforms retain the project-wide snap preference.
-    s.snappingEnabled =
-      s.source === 'gizmo'
-        ? pointer.ctrlKey
-        : this.doc.settings.snapEnabled !== pointer.ctrlKey;
+    // Gizmo and keyboard G/R/S share one rule: free by default, Ctrl snaps.
+    // Drawing tools still use Project snap; it is not applied to modal transforms.
+    s.snappingEnabled = pointer.ctrlKey;
     s.snapTargetType = 'none';
     // Orientation is locked for the gesture — do not rebuild from moving selection.
 
@@ -265,15 +278,35 @@ export class TransformSystem {
     s.currentWorldPoint = hit;
 
     if (s.type === 'translate') {
-      let delta = subVec3(hit, s.initialWorldPoint ?? hit);
+      let delta: Vec3;
+      const axis =
+        s.axisConstraint === 'x'
+          ? s.orientationBasis.x
+          : s.axisConstraint === 'y'
+            ? s.orientationBasis.y
+            : s.axisConstraint === 'z'
+              ? s.orientationBasis.z
+              : null;
+      const camFwd = pointer.camera.forward;
+      const isParallelToCam = axis && Math.abs(dotVec3(normalizeVec3(axis), normalizeVec3(camFwd))) > 0.90;
+
+      if (isParallelToCam && s.initialPointer) {
+        // Ray-plane hit is degenerate when axis is pointing directly at/away from the camera.
+        // Drag along screen Y: moving mouse up moves forward/along the axis.
+        const sign = dotVec3(normalizeVec3(axis), normalizeVec3(camFwd)) > 0 ? 1 : -1;
+        const dy = (s.initialPointer.y - pointer.screenY) * 0.05;
+        delta = scaleVec3(normalizeVec3(axis), sign * dy);
+      } else {
+        delta = subVec3(hit, s.initialWorldPoint ?? hit);
+        delta = constrainTranslation(
+          delta,
+          s.axisConstraint,
+          s.orientationBasis.x,
+          s.orientationBasis.y,
+          s.orientationBasis.z,
+        );
+      }
       if (s.precisionMode) delta = scaleVec3(delta, PRECISION_FACTOR);
-      delta = constrainTranslation(
-        delta,
-        s.axisConstraint,
-        s.orientationBasis.x,
-        s.orientationBasis.y,
-        s.orientationBasis.z,
-      );
       if (s.snappingEnabled) {
         const target = addVec3(s.pivotPosition, delta);
         const acquireRadius = this.doc.settings.snapIncrement * 0.4;
@@ -381,12 +414,8 @@ export class TransformSystem {
       if (next.constraintUsesLocal && !s.orientationBasisLocked) {
         this.refreshOrientation(camera);
       } else if (next.constraintUsesLocal) {
-        s.orientationBasis = buildOrientationBasis(
-          this.doc,
-          this.selection.state,
-          'local',
-          camera,
-          true,
+        s.orientationBasis = this.withOutwardFlip(
+          buildOrientationBasis(this.doc, this.selection.state, 'local', camera, true),
         );
       }
       this.lockDragPlane(sample);
@@ -428,7 +457,7 @@ export class TransformSystem {
     const after = captureAfterSnapshot(this.doc, before);
     const name =
       s.statusLabel ??
-      (s.type === 'translate' ? 'Move' : s.type === 'rotate' ? 'Rotate' : 'Scale');
+      (s.isOriginTransform ? 'Set Origin' : s.type === 'translate' ? 'Move' : s.type === 'rotate' ? 'Rotate' : 'Scale');
 
     let applied = true;
     this.history.execute({
@@ -466,7 +495,9 @@ export class TransformSystem {
   statusLine(): string {
     const s = this.session;
     if (!s) return '';
-    const label = s.statusLabel ?? (s.type === 'translate' ? 'Move' : s.type === 'rotate' ? 'Rotate' : 'Scale');
+    const label =
+      s.statusLabel ??
+      (s.isOriginTransform ? 'Set Origin' : s.type === 'translate' ? 'Move' : s.type === 'rotate' ? 'Rotate' : 'Scale');
     const orient = s.constraintUsesLocal ? 'Local' : s.orientation[0]!.toUpperCase() + s.orientation.slice(1);
     const c = constraintLabel(s.axisConstraint);
     const snap = s.snapTargetType === 'none' ? '' : ` · snap ${SNAP_TARGET_LABELS[s.snapTargetType]}`;
@@ -536,7 +567,13 @@ export class TransformSystem {
   private reapply(): void {
     const s = this.session;
     if (!s) return;
-    applyDeltaFromSnapshot(this.doc, s.initialState, s.currentDelta, s.pivotPosition);
+    applyDeltaFromSnapshot(
+      this.doc,
+      s.initialState,
+      s.currentDelta,
+      s.pivotPosition,
+      s.isOriginTransform ?? false,
+    );
     // Live preview: viewport syncs from pointer/hotkey paths. Avoid requestRedraw
     // here — it re-renders React every mousemove and feels choppy.
   }
@@ -571,13 +608,22 @@ export class TransformSystem {
   private refreshOrientation(camera: CameraAxes | null): void {
     const s = this.session;
     if (!s || s.orientationBasisLocked) return;
-    s.orientationBasis = buildOrientationBasis(
-      this.doc,
-      this.selection.state,
-      s.orientation,
-      camera,
-      s.constraintUsesLocal,
+    s.orientationBasis = this.withOutwardFlip(
+      buildOrientationBasis(
+        this.doc,
+        this.selection.state,
+        s.orientation,
+        camera,
+        s.constraintUsesLocal,
+      ),
     );
+  }
+
+  private withOutwardFlip(basis: OrientationBasis): OrientationBasis {
+    const s = this.session;
+    if (!s) return basis;
+    const interior = computeSelectionInterior(this.doc, this.selection.state);
+    return interior ? flipBasisOutward(basis, s.pivotPosition, interior) : basis;
   }
 
   private lockDragPlane(pointer: PointerSample): Vec3 {
@@ -651,11 +697,13 @@ export class TransformSystem {
     const start = s.initialWorldPoint ?? hit;
     const v0 = normalizeVec3(reject(subVec3(start, pivot), axis));
     const v1 = normalizeVec3(reject(subVec3(hit, pivot), axis));
-    if (lengthVec3(v0) < 1e-8 || lengthVec3(v1) < 1e-8) {
+    const isEdgeOn = Math.abs(dotVec3(normalizeVec3(axis), normalizeVec3(pointer.camera.forward))) < 0.08;
+    if (isEdgeOn || lengthVec3(v0) < 1e-8 || lengthVec3(v1) < 1e-8) {
       // fallback screen space
       if (!s.initialPointer) return 0;
       const dx = pointer.screenX - s.initialPointer.x;
-      return dx * 0.01;
+      const dy = pointer.screenY - s.initialPointer.y;
+      return (Math.abs(dx) > Math.abs(dy) ? dx : -dy) * 0.015;
     }
     const cross = crossVec3(v0, v1);
     const ang = Math.atan2(dotVec3(cross, axis), dotVec3(v0, v1));

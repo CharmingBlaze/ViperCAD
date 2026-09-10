@@ -12,7 +12,6 @@ export type PrimitiveBuilderId =
   | 'ramp'
   | 'stairs'
   | 'arch'
-  | 'column'
   | 'torus'
   | 'tube';
 

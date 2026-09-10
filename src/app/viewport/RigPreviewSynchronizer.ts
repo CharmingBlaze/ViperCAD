@@ -1,16 +1,22 @@
-import { Scene } from 'three';
+import { Scene, type Mesh } from 'three';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { getObjectWorldMatrix } from '@/core/editor/Hierarchy';
 import type { ModelDocument } from '@/core/document/types';
 import { getActiveClip, getSkinBindingsForRig, readRigDocumentSettings } from '@/core/rig/RigDocument';
 import { findPrimaryRigForModel } from '@/core/rig/RigLookup';
-import { disposeRigMeshMaterials, resolveObjectMaterials } from '@/core/rig/rigMeshDisplay';
+import {
+  applyRigMeshDisplayMode,
+  disposeRigMeshMaterials,
+  resolveObjectMaterials,
+  type RigViewportDisplayMode,
+} from '@/core/rig/rigMeshDisplay';
 import { skinBindingSignature } from '@/core/rig/skinning';
 import {
   buildSkinnedMesh,
   updateSkinnedMeshPose,
   type RigSkinnedMesh,
 } from '@/core/rig/SkinnedMeshBuilder';
+import type { BoneId } from '@/core/rig/types';
 
 type PreviewEntry = {
   rigMesh: RigSkinnedMesh;
@@ -27,14 +33,29 @@ function disposePreviewMesh(rigMesh: RigSkinnedMesh): void {
 export class RigPreviewSynchronizer {
   private entries = new Map<string, PreviewEntry>();
   private previewTime = 0;
+  private poseOverlay: Map<BoneId, import('@/core/math/Transform').Transform> | undefined;
   private enabled = true;
+  private displayMode: RigViewportDisplayMode = 'material';
+  private weightPaintBoneId: BoneId | null = null;
+  private weightXray = false;
 
   setEnabled(value: boolean): void {
     this.enabled = value;
   }
 
-  setPreviewTime(time: number): void {
+  setPreviewTime(time: number, overlay?: Map<BoneId, import('@/core/math/Transform').Transform>): void {
     this.previewTime = time;
+    this.poseOverlay = overlay && overlay.size > 0 ? overlay : undefined;
+  }
+
+  setDisplay(mode: RigViewportDisplayMode, weightPaintBoneId: BoneId | null = null, weightXray = false): void {
+    this.displayMode = mode;
+    this.weightPaintBoneId = weightPaintBoneId;
+    this.weightXray = weightXray;
+  }
+
+  pickMeshes(): Mesh[] {
+    return [...this.entries.values()].map((entry) => entry.rigMesh.mesh);
   }
 
   reset(): void {
@@ -95,7 +116,13 @@ export class RigPreviewSynchronizer {
         entry.signature = signature;
       }
 
-      updateSkinnedMeshPose(entry.rigMesh, armature, clip, this.previewTime);
+      updateSkinnedMeshPose(entry.rigMesh, armature, clip, this.previewTime, this.poseOverlay);
+      applyRigMeshDisplayMode(entry.rigMesh, this.displayMode, {
+        weightPaint: !!this.weightPaintBoneId,
+        binding,
+        boneId: this.weightPaintBoneId,
+        xray: this.weightXray,
+      });
       const world = getObjectWorldMatrix(modelDoc, binding.objectId);
       entry.rigMesh.mesh.matrixAutoUpdate = false;
       entry.rigMesh.mesh.matrix.copy(world);

@@ -1,15 +1,26 @@
-import { BufferAttribute, BufferGeometry, Color, DoubleSide, Group, LineBasicMaterial, LineSegments, Mesh, MeshStandardMaterial, Points, PointsMaterial } from 'three';
+import { BufferAttribute, BufferGeometry, Color, DoubleSide, Group, LineBasicMaterial, LineSegments, Mesh, MeshStandardMaterial, Points, PointsMaterial, type Material } from 'three';
+import type { MaterialAsset } from '@/core/document/types';
 import { addVec3, scaleVec3, type Vec3 } from '@/core/math/Vec3';
 import { getEdgeVertices } from '@/core/mesh/EditableMesh';
 import type { EditableMesh } from '@/core/mesh/types';
 import type { PrimitiveConstructionCage } from '@/core/primitives/PrimitiveFactory';
-import { editableMeshToRenderData } from './MeshRenderAdapter';
+import {
+  disposeOwnedTexture,
+  editableMeshToRenderData,
+  materialAssetToThree,
+  type RenderAssetResolver,
+} from './MeshRenderAdapter';
+
+export type PrimitivePreviewAppearance = {
+  material: MaterialAsset;
+  assets: RenderAssetResolver;
+};
 
 /** One temporary preview group rendered by every viewport camera. */
 export class PrimitivePreviewHandle {
   readonly group = new Group();
-  private ghostMaterial = new MeshStandardMaterial({ color: new Color(0x65b8ff), transparent: true, opacity: 0.34, depthWrite: false, side: DoubleSide, roughness: 0.72, metalness: 0 });
-  private cageMaterial = new LineBasicMaterial({ color: 0x9bd4ff, transparent: true, opacity: 0.92, depthTest: false, depthWrite: false });
+  private ghostMaterial = new MeshStandardMaterial({ color: new Color(0xe3a23b), transparent: true, opacity: 0.22, depthWrite: false, side: DoubleSide, roughness: 0.72, metalness: 0 });
+  private cageMaterial = new LineBasicMaterial({ color: 0xe3a23b, transparent: true, opacity: 0.78, depthTest: false, depthWrite: false });
   private baseMaterial = new LineBasicMaterial({ color: 0xd7efff, transparent: true, opacity: 1, depthTest: false, depthWrite: false });
   private edgeMaterial = new LineBasicMaterial({ color: 0x5d9fd1, transparent: true, opacity: 0.55, depthTest: true, depthWrite: false });
   private allEdgeMaterial = new LineBasicMaterial({ color: 0x62849d, transparent: true, opacity: 0.72, depthTest: false, depthWrite: false });
@@ -17,10 +28,13 @@ export class PrimitivePreviewHandle {
   private closeMaterial = new LineBasicMaterial({ color: 0x7dffb0, transparent: true, opacity: 1, depthTest: false, depthWrite: false });
   private faceGhostMaterial = new MeshStandardMaterial({ color: new Color(0x7dffb0), transparent: true, opacity: 0.22, depthWrite: false, side: DoubleSide, roughness: 0.8, metalness: 0 });
   private originMaterial = new PointsMaterial({ color: 0xffffff, size: 7, sizeAttenuation: false, depthTest: false, depthWrite: false });
-  private allVertexMaterial = new PointsMaterial({ color: 0x7fa7c5, size: 6, sizeAttenuation: false, transparent: true, opacity: 0.82, depthTest: false, depthWrite: false });
+  private allVertexMaterial = new PointsMaterial({ color: 0x8fb4d0, size: 8, sizeAttenuation: false, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false });
   private vertexMaterial = new PointsMaterial({ color: 0x9bd4ff, size: 8, sizeAttenuation: false, depthTest: false, depthWrite: false });
   private newVertexMaterial = new PointsMaterial({ color: 0xffb84d, size: 10, sizeAttenuation: false, depthTest: false, depthWrite: false });
   private startMaterial = new PointsMaterial({ color: 0x7dffb0, size: 12, sizeAttenuation: false, depthTest: false, depthWrite: false });
+  private hoverContinueMaterial = new PointsMaterial({ color: 0x7ecbff, size: 16, sizeAttenuation: false, depthTest: false, depthWrite: false });
+  private hoverMergeMaterial = new PointsMaterial({ color: 0xffc14d, size: 16, sizeAttenuation: false, depthTest: false, depthWrite: false });
+  private hoverCloseMaterial = new PointsMaterial({ color: 0x7dffb0, size: 18, sizeAttenuation: false, depthTest: false, depthWrite: false });
   private ghost: Mesh | null = null;
   private cageLines: LineSegments | null = null;
   private baseLines: LineSegments | null = null;
@@ -34,6 +48,8 @@ export class PrimitivePreviewHandle {
   private vertexPoints: Points | null = null;
   private newVertexPoints: Points | null = null;
   private startPoint: Points | null = null;
+  private hoverPoint: Points | null = null;
+  private surfaceMaterial: Material | null = null;
   revision = -1;
 
   constructor() {
@@ -42,7 +58,12 @@ export class PrimitivePreviewHandle {
     this.group.renderOrder = 100;
   }
 
-  update(mesh: EditableMesh | null, cage: PrimitiveConstructionCage | null, revision: number): void {
+  update(
+    mesh: EditableMesh | null,
+    cage: PrimitiveConstructionCage | null,
+    revision: number,
+    appearance?: PrimitivePreviewAppearance,
+  ): void {
     if (this.revision === revision) return;
     this.clearGeometry();
     this.revision = revision;
@@ -52,7 +73,18 @@ export class PrimitivePreviewHandle {
     }
     this.group.visible = true;
     const render = editableMeshToRenderData(mesh);
-    this.ghost = new Mesh(render.geometry, this.ghostMaterial);
+    const surface = appearance
+      ? materialAssetToThree(appearance.material, appearance.assets)
+      : this.ghostMaterial;
+    if (appearance) {
+      surface.side = DoubleSide;
+      surface.transparent = true;
+      surface.opacity = 0.92;
+      surface.depthWrite = false;
+      surface.toneMapped = false;
+      this.surfaceMaterial = surface;
+    }
+    this.ghost = new Mesh(render.geometry, surface);
     this.ghost.renderOrder = 50;
     this.ghost.userData.nonSelectable = true;
     this.group.add(this.ghost);
@@ -110,6 +142,8 @@ export class PrimitivePreviewHandle {
       allEdgeSegments?: Array<[Vec3, Vec3]>;
       chainPoints?: Vec3[];
       createdPoints?: Vec3[];
+      hoverPoint?: Vec3 | null;
+      hoverKind?: 'none' | 'continue' | 'merge' | 'close';
       showFaceGhost?: boolean;
     } = {},
   ): void {
@@ -180,6 +214,18 @@ export class PrimitivePreviewHandle {
       this.startPoint.renderOrder = 64;
       this.group.add(this.startPoint);
     }
+
+    if (options.hoverPoint && options.hoverKind && options.hoverKind !== 'none') {
+      const hoverMat =
+        options.hoverKind === 'close'
+          ? this.hoverCloseMaterial
+          : options.hoverKind === 'merge'
+            ? this.hoverMergeMaterial
+            : this.hoverContinueMaterial;
+      this.hoverPoint = new Points(pointGeometry(options.hoverPoint), hoverMat);
+      this.hoverPoint.renderOrder = 66;
+      this.group.add(this.hoverPoint);
+    }
   }
 
   /** Disconnected world-space segments for loop/knife-style previews. */
@@ -201,6 +247,7 @@ export class PrimitivePreviewHandle {
 
   dispose(): void {
     this.clearGeometry();
+    this.disposeSurfaceMaterial();
     this.ghostMaterial.dispose();
     this.cageMaterial.dispose();
     this.baseMaterial.dispose();
@@ -214,6 +261,9 @@ export class PrimitivePreviewHandle {
     this.vertexMaterial.dispose();
     this.newVertexMaterial.dispose();
     this.startMaterial.dispose();
+    this.hoverContinueMaterial.dispose();
+    this.hoverMergeMaterial.dispose();
+    this.hoverCloseMaterial.dispose();
   }
 
   private clearGeometry(): void {
@@ -231,12 +281,14 @@ export class PrimitivePreviewHandle {
       this.vertexPoints,
       this.newVertexPoints,
       this.startPoint,
+      this.hoverPoint,
     ]) {
       if (object) {
         this.group.remove(object);
         object.geometry.dispose();
       }
     }
+    this.disposeSurfaceMaterial();
     this.ghost = null;
     this.cageLines = null;
     this.baseLines = null;
@@ -250,6 +302,15 @@ export class PrimitivePreviewHandle {
     this.vertexPoints = null;
     this.newVertexPoints = null;
     this.startPoint = null;
+    this.hoverPoint = null;
+  }
+
+  private disposeSurfaceMaterial(): void {
+    if (!this.surfaceMaterial) return;
+    const maps = this.surfaceMaterial as MeshStandardMaterial;
+    disposeOwnedTexture(maps.map);
+    this.surfaceMaterial.dispose();
+    this.surfaceMaterial = null;
   }
 }
 

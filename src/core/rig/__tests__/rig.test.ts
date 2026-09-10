@@ -34,6 +34,34 @@ describe('rig project integration', () => {
     expect(loaded.animationClips.get(clip.id)?.duration).toBe(2.5);
   });
 
+  it('round-trips clip events, loop, root motion, and interpolation', () => {
+    const project = createEmptyProject();
+    const rigDoc = project.documents.get(project.rigDocumentIds[0]!)!;
+    const clip = ensureActiveClip(project, rigDoc);
+    clip.loopMode = 'pingpong';
+    clip.rootMotion = true;
+    clip.rootMotionMode = 'xz';
+    clip.animationType = 'additive';
+    clip.events = [{ id: 'evt_foot', time: 0.25, name: 'footstep', category: 'audio' }];
+    clip.tracks = [{
+      boneId: 'bone_root',
+      keyframes: [{
+        time: 0,
+        value: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
+        interpolation: 'step',
+      }],
+    }];
+
+    const loaded = deserializeViperProject(serializeViperProject(project)).project;
+    const restored = loaded.animationClips.get(clip.id)!;
+    expect(restored.loopMode).toBe('pingpong');
+    expect(restored.rootMotion).toBe(true);
+    expect(restored.rootMotionMode).toBe('xz');
+    expect(restored.animationType).toBe('additive');
+    expect(restored.events?.[0]?.name).toBe('footstep');
+    expect(restored.tracks[0]?.keyframes[0]?.interpolation).toBe('step');
+  });
+
   it('evaluates armature pose at time zero', () => {
     const armature = createDefaultArmature();
     const poses = evaluateArmaturePose(armature, null, 0);

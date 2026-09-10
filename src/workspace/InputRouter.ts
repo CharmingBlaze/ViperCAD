@@ -15,7 +15,8 @@ export type InputOwner =
   | 'panel'
   | 'text'
   | 'tool'
-  | 'transform';
+  | 'transform'
+  | 'nav';
 
 export class InputRouter {
   owner: InputOwner = 'none';
@@ -37,7 +38,7 @@ export class InputRouter {
   canHandleTab(event: KeyboardEvent): boolean {
     if (event.key !== 'Tab') return false;
     if (isTypingTarget(event.target)) return false;
-    if (this.owner === 'divider' || this.owner === 'text' || this.owner === 'transform') return false;
+    if (this.owner === 'divider' || this.owner === 'text' || this.owner === 'transform' || this.owner === 'nav') return false;
     return true;
   }
 }

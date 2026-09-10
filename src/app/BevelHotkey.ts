@@ -7,7 +7,7 @@ import type { CameraAxes } from '@/app/TransformHotkeys';
 import type { PointerSample } from '@/core/transform/TransformSystem';
 import { pushToast } from '@/app/Toast';
 import { expandSymmetryEdgeIds } from '@/core/symmetry/Symmetry';
-import { getEdgeVertices } from '@/core/mesh/EditableMesh';
+import { faceHalfEdgeIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
 
 /**
  * Interactive bevel (Ctrl+B): chamfer selected edges, then scale for width.
@@ -22,11 +22,6 @@ export function beginInteractiveBevel(
   if (session.transform.active) return false;
 
   const sel = session.selection.state;
-  if (sel.mode !== 'edge' || sel.selectedEdgeIds.size === 0) {
-    pushToast('Select edges to bevel', 'error');
-    return false;
-  }
-
   const objectId = sel.activeObjectId ?? [...sel.selectedObjectIds][0] ?? null;
   if (!objectId) return false;
   const object = session.document.objects.get(objectId);
@@ -34,10 +29,23 @@ export function beginInteractiveBevel(
   const mesh = session.document.meshes.get(object.meshId);
   if (!mesh) return false;
 
-  const primaryIds = new Set(sel.selectedEdgeIds);
+  const selectedEdges =
+    sel.mode === 'edge'
+      ? [...sel.selectedEdgeIds]
+      : sel.mode === 'face'
+        ? [...new Set([...sel.selectedFaceIds].flatMap((faceId) =>
+            faceHalfEdgeIds(mesh, faceId).map((halfEdgeId) => mesh.halfEdges.get(halfEdgeId)!.edgeId),
+          ))]
+        : [];
+  if (!selectedEdges.length) {
+    pushToast('Select edges or faces to bevel', 'error');
+    return false;
+  }
+
+  const primaryIds = new Set(selectedEdges);
   const ids = [...expandSymmetryEdgeIds(
     mesh,
-    sel.selectedEdgeIds,
+    selectedEdges,
     session.document.settings.symmetry,
   )];
   const orderedPrimary = ids

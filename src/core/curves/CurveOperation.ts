@@ -441,6 +441,47 @@ export function readCurveOperation(raw: string | undefined): CurveOperation | nu
   }
 }
 
+/** Put curve mesh vertices and stored stroke points around a local origin at the bbox centre. */
+export function localizeCurveOperationToMeshCenter(
+  mesh: EditableMesh,
+  operation: CurveOperation,
+): { origin: Vec3; operation: CurveOperation } {
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (const vertex of mesh.vertices.values()) {
+    const p = vertex.position;
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    minZ = Math.min(minZ, p.z);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+    maxZ = Math.max(maxZ, p.z);
+  }
+  if (!Number.isFinite(minX)) {
+    return { origin: v3(), operation };
+  }
+  const origin = v3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
+  for (const vertex of mesh.vertices.values()) {
+    vertex.position = subVec3(vertex.position, origin);
+  }
+  mesh.geometryVersion += 1;
+  mesh.dirty.positions = mesh.dirty.normals = mesh.dirty.bounds = mesh.dirty.bvh = true;
+  const shift = (point: Vec3) => subVec3(point, origin);
+  return {
+    origin,
+    operation: {
+      ...operation,
+      points: operation.points.map(shift),
+      handlesIn: operation.handlesIn.map(shift),
+      handlesOut: operation.handlesOut.map(shift),
+    },
+  };
+}
+
 export function curveOperationLabel(operation: CurveOperation): string {
   if (operation.solidMode === 'lathe') return `${operation.latheAngle < 360 ? 'Partial ' : ''}Lathe`;
   if (operation.style === 'tube') {
@@ -716,7 +757,7 @@ function copyHandles(values: Vec3[] | undefined, fallback: Vec3[]): Vec3[] {
   return values.map((point) => ({ ...point }));
 }
 
-function cubicBezier(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: number): Vec3 {
+export function cubicBezier(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: number): Vec3 {
   const oneMinus = 1 - t;
   return addVec3(
     addVec3(

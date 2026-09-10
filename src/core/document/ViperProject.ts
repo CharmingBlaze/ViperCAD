@@ -1,14 +1,18 @@
 import { createId } from '@/core/ids/IdService';
 import { defaultTransform } from '@/core/math/Transform';
 import {
-  createDefaultCheckerAssets,
+  createDefaultPlaceholderAssets,
+  DEFAULT_MATERIAL_COLOUR,
+  retuneDefaultPlaceholderMaterial,
 } from '@/core/document/ModelDocument';
+import { DEFAULT_PLACEHOLDER_IMAGE_NAME } from '@/core/image/DefaultPlaceholderImage';
 import type {
   DocumentId,
   DocumentKind,
   DocumentSettings,
   ModelDocument,
   ObjectId,
+  TextureId,
   ViperDocument,
   ViperProject,
 } from '@/core/document/types';
@@ -39,7 +43,7 @@ export function createViperDocument(name: string, kind: DocumentKind): ViperDocu
 }
 
 export function createEmptyProject(projectName = 'Untitled Project'): ViperProject {
-  const { material, texture, image } = createDefaultCheckerAssets();
+  const { material, texture, image } = createDefaultPlaceholderAssets();
   const model = createViperDocument('Untitled Model', 'model');
   const level = createViperDocument('Main Level', 'level');
   const rig = createViperDocument('Character Rig', 'rig');
@@ -70,6 +74,76 @@ export function createEmptyProject(projectName = 'Untitled Project'): ViperProje
     },
     dirty: false,
   };
+}
+
+/**
+ * Early builds seeded every new project with a saturated checker texture. It
+ * was intended for UV diagnostics but made the primary modelling view noisy.
+ * Remove only that exact generated default; user-created textures are never
+ * touched.
+ */
+export function removeGeneratedDefaultChecker(project: ViperProject): boolean {
+  let changed = false;
+  for (const material of project.materials.values()) {
+    const textureId = material.baseColourTextureId;
+    const texture = textureId ? project.textures.get(textureId) : null;
+    const image = texture ? project.images.get(texture.imageAssetId) : null;
+    const isOurPlaceholder =
+      (material.presetId === 'default-low-poly-terrain' || material.presetId === 'default-pixel-clay') &&
+      (material.name === 'Default' || material.name === 'Low-poly Terrain Placeholder') &&
+      (!texture || texture.name === 'Low-poly Terrain Placeholder');
+    if (isOurPlaceholder) {
+      if (retuneDefaultPlaceholderMaterial(material)) changed = true;
+      if (material.roughness !== 0.82) {
+        material.roughness = 0.82;
+        changed = true;
+      }
+      if (material.flatShaded) {
+        material.flatShaded = false;
+        changed = true;
+      }
+      if (material.textureFiltering !== 'linear') {
+        material.textureFiltering = 'linear';
+        changed = true;
+      }
+      if (!material.baseColourTextureId) {
+        material.baseColourTextureId = ensureProjectPlaceholderTexture(project);
+        changed = true;
+      }
+      continue;
+    }
+    const isGeneratedChecker =
+      material.name === 'Default' &&
+      material.presetId === 'default' &&
+      texture?.name === 'Checker' &&
+      image?.name === 'Checker' &&
+      image.width === 8 &&
+      image.height === 8;
+    if (!isGeneratedChecker) continue;
+    material.presetId = 'default-low-poly-terrain';
+    material.baseColour = { ...DEFAULT_MATERIAL_COLOUR };
+    material.baseColourTextureId = ensureProjectPlaceholderTexture(project);
+    material.roughness = 0.82;
+    material.flatShaded = false;
+    material.textureFiltering = 'linear';
+    material.unlit = true;
+    material.shadingModel = 'unlit';
+    material.doubleSided = true;
+    changed = true;
+  }
+  if (changed) project.dirty = true;
+  return changed;
+}
+
+function ensureProjectPlaceholderTexture(project: ViperProject): TextureId {
+  for (const texture of project.textures.values()) {
+    const image = project.images.get(texture.imageAssetId);
+    if (image?.name === DEFAULT_PLACEHOLDER_IMAGE_NAME) return texture.id;
+  }
+  const assets = createDefaultPlaceholderAssets();
+  project.textures.set(assets.texture.id, assets.texture);
+  project.images.set(assets.image.id, assets.image);
+  return assets.texture.id;
 }
 
 type DocumentViewBinding = { project: ViperProject; documentId: DocumentId };

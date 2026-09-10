@@ -154,8 +154,9 @@ export function validateMeshFull(mesh: EditableMesh): ValidationReport {
   for (const edge of mesh.edges.values()) {
     const verts = getEdgeVertices(mesh, edge.id);
     if (!verts) continue;
-    const a = mesh.vertices.get(verts[0])!;
-    const b = mesh.vertices.get(verts[1])!;
+    const a = mesh.vertices.get(verts[0]);
+    const b = mesh.vertices.get(verts[1]);
+    if (!a || !b) continue;
     if (lengthSqVec3(subVec3(a.position, b.position)) < 1e-20) {
       issues.push(issue('ZERO_LENGTH_EDGE', `Edge has zero length`, 'warning', [edge.id]));
     }
@@ -201,8 +202,9 @@ export function validateMeshFull(mesh: EditableMesh): ValidationReport {
     let ny = 0;
     let nz = 0;
     for (let i = 0; i < ids.length; i++) {
-      const cur = mesh.vertices.get(ids[i]!)!.position;
-      const next = mesh.vertices.get(ids[(i + 1) % ids.length]!)!.position;
+      const cur = mesh.vertices.get(ids[i]!)?.position;
+      const next = mesh.vertices.get(ids[(i + 1) % ids.length]!)?.position;
+      if (!cur || !next) continue;
       nx += (cur.y - next.y) * (cur.z + next.z);
       ny += (cur.z - next.z) * (cur.x + next.x);
       nz += (cur.x - next.x) * (cur.y + next.y);
@@ -236,7 +238,9 @@ export function validateMeshFull(mesh: EditableMesh): ValidationReport {
       const ids = faceVertexIds(mesh, face.id); const a = mesh.vertices.get(ids[0]!)?.position;
       if (!a) continue;
       for (let i = 1; i < ids.length - 1; i++) {
-        const b = mesh.vertices.get(ids[i]!)!.position; const c = mesh.vertices.get(ids[i + 1]!)!.position;
+        const b = mesh.vertices.get(ids[i]!)?.position;
+        const c = mesh.vertices.get(ids[i + 1]!)?.position;
+        if (!b || !c) continue;
         volume6 += a.x * (b.y * c.z - b.z * c.y) + a.y * (b.z * c.x - b.x * c.z) + a.z * (b.x * c.y - b.y * c.x);
       }
     }

@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_PLACEHOLDER_IMAGE_NAME } from '@/core/image/DefaultPlaceholderImage';
 import {
   assignMaterialToObject,
   commitMeshObject,
   countMaterialUsers,
+  createDefaultMaterial,
   createEmptyDocument,
   createMaterial,
+  DEFAULT_MATERIAL_COLOUR,
+  ensureDefaultPlaceholderMaterial,
   getObjectMaterialId,
 } from '@/core/document/ModelDocument';
 import { buildBox } from '@/core/mesh/builders/BoxBuilder';
@@ -14,6 +18,34 @@ function box(name = 'Box') {
 }
 
 describe('per-object materials', () => {
+  it('uses a blue tint and the default texture on new documents', () => {
+    const doc = createEmptyDocument();
+    const material = [...doc.materials.values()][0]!;
+    expect(material.baseColour).toEqual(DEFAULT_MATERIAL_COLOUR);
+    expect(material.baseColour.z).toBeGreaterThan(material.baseColour.y);
+    expect(material.baseColour.y).toBeGreaterThan(material.baseColour.x);
+    expect(material.baseColourTextureId).toBeTruthy();
+    const texture = doc.textures.get(material.baseColourTextureId!)!;
+    expect(doc.images.get(texture.imageAssetId)?.name).toBe(DEFAULT_PLACEHOLDER_IMAGE_NAME);
+    expect(createDefaultMaterial().baseColour).toEqual(DEFAULT_MATERIAL_COLOUR);
+    expect(material.unlit).toBe(true);
+    expect(material.doubleSided).toBe(true);
+    expect(material.shadingModel).toBe('unlit');
+  });
+
+  it('retunes a leftover lit placeholder so new objects stay visible', () => {
+    const doc = createEmptyDocument();
+    const material = [...doc.materials.values()][0]!;
+    material.unlit = false;
+    material.shadingModel = 'lit';
+    material.doubleSided = false;
+    const materialId = ensureDefaultPlaceholderMaterial(doc);
+    const tuned = doc.materials.get(materialId)!;
+    expect(tuned.unlit).toBe(true);
+    expect(tuned.shadingModel).toBe('unlit');
+    expect(tuned.doubleSided).toBe(true);
+  });
+
   it('assigns an existing material to an object slot', () => {
     const doc = createEmptyDocument();
     const { objectId } = commitMeshObject(doc, box());
@@ -39,6 +71,20 @@ describe('per-object materials', () => {
     expect(getObjectMaterialId(doc.objects.get(b.objectId)!)).toBe(defaultId);
     expect(countMaterialUsers(doc, unique.id)).toBe(1);
     expect(countMaterialUsers(doc, defaultId)).toBe(1);
+  });
+
+  it('reattaches the default image when the first material lost its texture', () => {
+    const doc = createEmptyDocument();
+    const first = [...doc.materials.values()][0]!;
+    first.baseColourTextureId = null;
+    const materialId = ensureDefaultPlaceholderMaterial(doc);
+    const material = doc.materials.get(materialId)!;
+    expect(material.baseColourTextureId).toBeTruthy();
+    const texture = doc.textures.get(material.baseColourTextureId!)!;
+    expect(doc.images.get(texture.imageAssetId)?.name).toBe(DEFAULT_PLACEHOLDER_IMAGE_NAME);
+
+    const { objectId } = commitMeshObject(doc, box());
+    expect(getObjectMaterialId(doc.objects.get(objectId)!)).toBe(materialId);
   });
 
   it('lets two objects share one library material', () => {

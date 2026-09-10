@@ -4,75 +4,99 @@ import {
   type MeshBasicMaterial,
   type MeshPhysicalMaterial,
   type MeshStandardMaterial,
+  type Texture,
 } from 'three';
 import { normalizeShadingMode, type ShadingMode } from '@/workspace/types';
 import type { ObjectRenderHandle } from '@/renderer/MeshRenderAdapter';
 
-type StandardLike = MeshStandardMaterial | MeshPhysicalMaterial | MeshBasicMaterial;
+export type StandardLikeMaterial = (MeshStandardMaterial | MeshPhysicalMaterial | MeshBasicMaterial) & {
+  wireframe: boolean;
+  color: Color;
+  map: Texture | null;
+};
 
 type MaterialBaseline = {
   wireframe: boolean;
   flatShading: boolean;
   color: number;
-  map: Material['map'];
-  normalMap: StandardLike['normalMap'];
-  roughnessMap: StandardLike['roughnessMap'];
-  metalnessMap: StandardLike['metalnessMap'];
-  emissiveMap: StandardLike['emissiveMap'];
+  map: Texture | null;
+  normalMap: Texture | null;
+  roughnessMap: Texture | null;
+  metalnessMap: Texture | null;
+  emissiveMap: Texture | null;
 };
 
-function asStandardLike(material: Material): StandardLike | null {
-  if ('roughness' in material || 'normalMap' in material || material.type === 'MeshBasicMaterial') {
-    return material as StandardLike;
+function asStandardLike(material: Material): StandardLikeMaterial | null {
+  if ('wireframe' in material || 'color' in material) {
+    return material as StandardLikeMaterial;
   }
   return null;
 }
 
 function ensureBaseline(material: Material): MaterialBaseline {
   const existing = material.userData.viperRenderBaseline as MaterialBaseline | undefined;
-  if (existing) return existing;
+  const std = asStandardLike(material);
+  if (existing) {
+    if (std?.map) existing.map = std.map;
+    return existing;
+  }
 
-  const standard = asStandardLike(material);
   const baseline: MaterialBaseline = {
-    wireframe: material.wireframe,
-    flatShading: standard && 'flatShading' in standard ? standard.flatShading : false,
-    color: material.color.getHex(),
-    map: material.map,
-    normalMap: standard?.normalMap ?? null,
-    roughnessMap: standard?.roughnessMap ?? null,
-    metalnessMap: standard?.metalnessMap ?? null,
-    emissiveMap: standard?.emissiveMap ?? null,
+    wireframe: std?.wireframe ?? false,
+    flatShading: std && 'flatShading' in std ? Boolean((std as unknown as { flatShading: boolean }).flatShading) : false,
+    color: std?.color ? std.color.getHex() : 0xffffff,
+    map: std?.map ?? null,
+    normalMap: std && 'normalMap' in std ? (std as unknown as { normalMap: Texture | null }).normalMap : null,
+    roughnessMap: std && 'roughnessMap' in std ? (std as unknown as { roughnessMap: Texture | null }).roughnessMap : null,
+    metalnessMap: std && 'metalnessMap' in std ? (std as unknown as { metalnessMap: Texture | null }).metalnessMap : null,
+    emissiveMap: std && 'emissiveMap' in std ? (std as unknown as { emissiveMap: Texture | null }).emissiveMap : null,
   };
   material.userData.viperRenderBaseline = baseline;
   return baseline;
 }
 
 function restoreMaps(material: Material, baseline: MaterialBaseline): void {
-  material.map = baseline.map;
-  const standard = asStandardLike(material);
-  if (!standard) return;
-  standard.normalMap = baseline.normalMap;
-  standard.roughnessMap = baseline.roughnessMap;
-  standard.metalnessMap = baseline.metalnessMap;
-  standard.emissiveMap = baseline.emissiveMap;
+  const std = asStandardLike(material);
+  if (!std) return;
+
+  std.map = baseline.map;
+  if ('normalMap' in std) (std as unknown as { normalMap: Texture | null }).normalMap = baseline.normalMap;
+  if ('roughnessMap' in std) (std as unknown as { roughnessMap: Texture | null }).roughnessMap = baseline.roughnessMap;
+  if ('metalnessMap' in std) (std as unknown as { metalnessMap: Texture | null }).metalnessMap = baseline.metalnessMap;
+  if ('emissiveMap' in std) (std as unknown as { emissiveMap: Texture | null }).emissiveMap = baseline.emissiveMap;
 }
 
 export function applyViewportRenderStyle(
   handle: ObjectRenderHandle,
   modeInput: ShadingMode | unknown,
+  options: { displayTextures?: boolean } = {},
 ): void {
   const mode = normalizeShadingMode(modeInput);
+  const displayTextures = options.displayTextures !== false;
 
   for (const material of handle.materials) {
     const baseline = ensureBaseline(material);
-    const standard = asStandardLike(material);
+    const std = asStandardLike(material);
 
-    material.wireframe = mode === 'wireframe';
-    material.color.setHex(baseline.color);
-    restoreMaps(material, baseline);
+    if (std) {
+      std.wireframe = mode === 'wireframe';
+      if (mode === 'silhouette') {
+        if (std.color) std.color.setHex(0x1a1a1a);
+      } else {
+        if (std.color) std.color.setHex(baseline.color);
+      }
+    }
+    if (mode === 'silhouette' || !displayTextures) {
+      if (std) std.map = null;
+    } else {
+      restoreMaps(material, baseline);
+    }
 
-    if (standard && 'flatShading' in standard) {
-      standard.flatShading = mode === 'game' ? true : baseline.flatShading;
+    // Studio preview is a lit asset view, not a topology-debug view. Preserve
+    // the material/face shading authored by the user so curved assets read
+    // smoothly while modelling.
+    if (std && 'flatShading' in std) {
+      (std as unknown as { flatShading: boolean }).flatShading = baseline.flatShading;
     }
 
     material.needsUpdate = true;
@@ -81,11 +105,12 @@ export function applyViewportRenderStyle(
 
 export function renderStyleShowsAllEdges(modeInput: ShadingMode | unknown): boolean {
   const mode = normalizeShadingMode(modeInput);
-  return mode === 'outlines' || mode === 'game';
+  return mode === 'outlines';
 }
 
 export function renderStyleHidesEdgeOverlay(modeInput: ShadingMode | unknown): boolean {
-  return normalizeShadingMode(modeInput) === 'wireframe';
+  const mode = normalizeShadingMode(modeInput);
+  return mode === 'wireframe' || mode === 'game' || mode === 'silhouette';
 }
 
 export function edgeOverlayStyleForRenderMode(modeInput: ShadingMode | unknown): {

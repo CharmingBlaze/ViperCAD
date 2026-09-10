@@ -17,6 +17,7 @@ import { validateMeshFull } from '@/core/mesh/Validation';
 import { flipFaces } from '@/core/mesh/ops/basic';
 import {
   buildCurveRope,
+  buildCurveRibbon,
   buildCurveSweep,
   type CurveSweepCapStyle,
   type CurveSweepProfile,
@@ -88,6 +89,11 @@ type CardFrame = {
 
 export function buildPathOutput(options: PathOutputOptions): EditableMesh {
   const radius = Math.max(0.001, options.radius);
+  // A deleted/empty source must still leave the array usable. Treat it like
+  // the built-in box rather than silently producing an invisible path.
+  const sourceMesh = options.sourceMesh && options.sourceMesh.vertices.size > 0 && options.sourceMesh.faces.size > 0
+    ? options.sourceMesh
+    : null;
   const common = {
     points: options.points,
     radius,
@@ -106,7 +112,7 @@ export function buildPathOutput(options: PathOutputOptions): EditableMesh {
     name: options.name,
   } as const;
   if (options.output === 'tube') return ensureOutward(buildCurveSweep({ ...common, profile: 'round' }));
-  if (options.output === 'ribbon') return ensureOutward(buildCurveSweep({ ...common, profile: 'ribbon' }));
+  if (options.output === 'ribbon') return ensureOutward(buildCurveRibbon({ ...common, profile: 'ribbon' }));
   if (options.output === 'vine') {
     return ensureOutward(buildCurveSweep({
       ...common,
@@ -124,7 +130,14 @@ export function buildPathOutput(options: PathOutputOptions): EditableMesh {
     }));
   }
 
-  const samples = samplePath(options);
+  // A chain is not a loose object array: adjacent links need to overlap enough
+  // to read as one continuous, interlocked chain. Keep an explicit Count mode
+  // literal, but clamp spacing/fit mode to the link's usable pitch.
+  const samples = samplePath(
+    options.output === 'chain' && options.distributionMode !== 'count'
+      ? { ...options, spacing: Math.min(options.spacing, chainLinkPitch(radius)) }
+      : options,
+  );
   const builder = new MeshBuilder(options.name ?? pathOutputLabel(options.output), false);
   const random = seededRandom(options.seed);
   samples.forEach((sample, index) => {
@@ -142,8 +155,8 @@ export function buildPathOutput(options: PathOutputOptions): EditableMesh {
       appendChainLink(
         builder,
         sample,
-        radius * 1.35 * scale,
-        radius * 0.34 * scale,
+        radius * 1.45 * scale,
+        radius * 0.3 * scale,
         options.radialSegments,
         options.chainAlternating && index % 2 === 1 ? Math.PI / 2 : 0,
       );
@@ -171,13 +184,18 @@ export function buildPathOutput(options: PathOutputOptions): EditableMesh {
           verticalSegments,
         );
       }
-    } else if (options.sourceMesh) {
-      appendSourceMesh(builder, options.sourceMesh, sample, scale, roll, mirror);
+    } else if (sourceMesh) {
+      appendSourceMesh(builder, sourceMesh, sample, scale, roll, mirror);
     } else {
       appendBox(builder, sample, radius * 1.3 * scale, roll, mirror);
     }
   });
   return ensureOutward(builder.build());
+}
+
+/** Centre-to-centre pitch that keeps alternating links visibly interlocked. */
+function chainLinkPitch(radius: number): number {
+  return Math.max(0.01, radius * 2.35);
 }
 
 function samplePath(options: PathOutputOptions): PathSample[] {
@@ -305,12 +323,19 @@ function appendCard(
 ): void {
   const frame = computeVerticalCardFrame(sample, roll, mirror);
   const { up, side } = frame;
+  // Give cards a tiny physical thickness. This removes backface drop-outs,
+  // lets them receive lighting from both sides, and avoids coplanar z-fighting
+  // in crossed-card foliage while remaining visually 2D.
+  let depth = normalizeVec3(crossVec3(side, up));
+  if (lengthVec3(depth) < 1e-6) depth = sample.tangent;
+  const halfThickness = Math.max(0.0005, Math.min(width, height) * 0.0125);
   const base = addVec3(sample.position, scaleVec3(up, -height * 0.08));
   const leanAxis = normalizeVec3(addVec3(
     scaleVec3(sample.normal, 0.65),
     scaleVec3(sample.binormal, 0.35),
   ));
-  const rows: VertexId[][] = [];
+  const frontRows: VertexId[][] = [];
+  const backRows: VertexId[][] = [];
 
   for (let row = 0; row <= verticalSegments; row++) {
     const t = row / verticalSegments;
@@ -322,20 +347,31 @@ function appendCard(
       base,
       addVec3(scaleVec3(up, height * t), scaleVec3(leanAxis, ease * width * 0.12)),
     );
-    rows.push([
-      builder.vertex(addVec3(centre, scaleVec3(side, -halfW))),
-      builder.vertex(addVec3(centre, scaleVec3(side, halfW))),
+    const left = addVec3(centre, scaleVec3(side, -halfW));
+    const right = addVec3(centre, scaleVec3(side, halfW));
+    frontRows.push([
+      builder.vertex(addVec3(left, scaleVec3(depth, halfThickness))),
+      builder.vertex(addVec3(right, scaleVec3(depth, halfThickness))),
+    ]);
+    backRows.push([
+      builder.vertex(addVec3(left, scaleVec3(depth, -halfThickness))),
+      builder.vertex(addVec3(right, scaleVec3(depth, -halfThickness))),
     ]);
   }
 
   for (let row = 0; row < verticalSegments; row++) {
     const v0 = row / verticalSegments;
     const v1 = (row + 1) / verticalSegments;
-    const bl = rows[row]![0]!;
-    const br = rows[row]![1]!;
-    const tl = rows[row + 1]![0]!;
-    const tr = rows[row + 1]![1]!;
+    const bl = frontRows[row]![0]!;
+    const br = frontRows[row]![1]!;
+    const tl = frontRows[row + 1]![0]!;
+    const tr = frontRows[row + 1]![1]!;
     builder.quad(bl, br, tr, tl, [v2(0, v0), v2(1, v0), v2(1, v1), v2(0, v1)]);
+    const backBl = backRows[row]![0]!;
+    const backBr = backRows[row]![1]!;
+    const backTl = backRows[row + 1]![0]!;
+    const backTr = backRows[row + 1]![1]!;
+    builder.quad(backBr, backBl, backTl, backTr, [v2(0, v0), v2(1, v0), v2(1, v1), v2(0, v1)]);
   }
 }
 
@@ -464,10 +500,17 @@ function appendSourceMesh(
     )));
   }
   for (const face of source.faces.values()) {
-    const vertexIds = faceVertexIds(source, face.id).map((id) => ids.get(id)!);
-    const uvs = faceCornerIds(source, face.id).map((cornerId) =>
+    let vertexIds = faceVertexIds(source, face.id).map((id) => ids.get(id)!);
+    let uvs = faceCornerIds(source, face.id).map((cornerId) =>
       source.faceCorners.get(cornerId)?.uvs.get(source.defaultUvLayerId ?? '') ?? v2(),
     );
+    // Mirroring changes the handedness of the local frame. Reverse every
+    // copied polygon (and its matching UV corners) so alternating pieces keep
+    // outward normals instead of rendering dark or disappearing from one side.
+    if (mirror) {
+      vertexIds = [...vertexIds].reverse();
+      uvs = [...uvs].reverse();
+    }
     builder.ngon(vertexIds, uvs.length === vertexIds.length ? uvs : undefined, face.materialSlot);
   }
 }

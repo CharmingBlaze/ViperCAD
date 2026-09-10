@@ -74,4 +74,14 @@ describe('LoopCutTool', () => {
     expect(mesh.faces.size).toBe(beforeFaces);
     expect(session.history.canUndo()).toBe(false);
   });
+
+  it('centres and confirms the cut on right-click while sliding', () => {
+    const { session, mesh, tool } = setup();
+    const beforeFaces = mesh.faces.size;
+    tool.begin(pointer, session.context());
+    tool.update({ ...pointer, screenX: 170, screenY: 110 }, session.context());
+    tool.begin({ ...pointer, button: 'right' }, session.context());
+    expect(tool.state.phase).toBe('hover');
+    expect(mesh.faces.size).toBeGreaterThan(beforeFaces);
+  });
 });

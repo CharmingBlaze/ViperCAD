@@ -68,6 +68,60 @@ export function buildCurveSweep(options: CurveSweepOptions): EditableMesh {
 }
 
 /**
+ * A purpose-built ribbon: a thin, two-sided strip rather than a flattened
+ * tube. It stays readable from either side and keeps a stable width on bends.
+ */
+export function buildCurveRibbon(options: CurveSweepOptions): EditableMesh {
+  const radius = Math.max(1e-4, options.radius);
+  const path = resampleStrokePoints(options.points, radius * 0.25);
+  if (path.length < 2) path.push(addVec3(path[0] ?? v3(), v3(radius * 2, 0, 0)));
+  const cyclic = options.cyclic === true && path.length > 2;
+  if (cyclic) path.push({ ...path[0]! });
+  const frames = buildFrames(path);
+  const builder = new MeshBuilder(options.name ?? 'Curve Ribbon', false);
+  const front: VertexId[][] = [];
+  const back: VertexId[][] = [];
+  const twist = (options.twistDegrees ?? 0) * Math.PI / 180;
+  const width = Math.max(0.05, options.profileWidth ?? 1);
+  const thickness = radius * Math.max(0.012, (options.profileHeight ?? 1) * 0.025);
+
+  for (let index = 0; index < path.length; index++) {
+    const t = index / Math.max(1, path.length - 1);
+    const scale = clampScale((options.startScale ?? 1) + ((options.endScale ?? 1) - (options.startScale ?? 1)) * t);
+    const angle = twist * t;
+    const side = normalizeVec3(addVec3(
+      scaleVec3(frames.normals[index]!, Math.cos(angle)),
+      scaleVec3(frames.binormals[index]!, Math.sin(angle)),
+    ));
+    let depth = normalizeVec3(crossVec3(frames.tangents[index]!, side));
+    if (lengthVec3(depth) < 1e-8) depth = frames.binormals[index]!;
+    const centre = addVec3(path[index]!, scaleVec3(frames.normals[index]!, options.pathOffset ?? 0));
+    const halfWidth = radius * width * scale;
+    const left = addVec3(centre, scaleVec3(side, -halfWidth));
+    const right = addVec3(centre, scaleVec3(side, halfWidth));
+    front.push([
+      builder.vertex(addVec3(left, scaleVec3(depth, thickness))),
+      builder.vertex(addVec3(right, scaleVec3(depth, thickness))),
+    ]);
+    back.push([
+      builder.vertex(addVec3(left, scaleVec3(depth, -thickness))),
+      builder.vertex(addVec3(right, scaleVec3(depth, -thickness))),
+    ]);
+  }
+
+  const arc = ringArcFractions(path);
+  for (let index = 0; index < front.length - 1; index++) {
+    const [fl, fr] = front[index]!;
+    const [fnl, fnr] = front[index + 1]!;
+    const [bl, br] = back[index]!;
+    const [bnl, bnr] = back[index + 1]!;
+    builder.quad(fl, fr, fnr, fnl, [v2(0, arc[index]!), v2(1, arc[index]!), v2(1, arc[index + 1]!), v2(0, arc[index + 1]!)]);
+    builder.quad(br, bl, bnl, bnr, [v2(0, arc[index]!), v2(1, arc[index]!), v2(1, arc[index + 1]!), v2(0, arc[index + 1]!)]);
+  }
+  return builder.build();
+}
+
+/**
  * Rounded capsule sweep with true hemispherical start and finish ends.
  * Closed paths become a seamless round tube without overlapping end caps.
  */
@@ -141,14 +195,22 @@ export function buildCurveCapsule(options: CurveSweepOptions): EditableMesh {
 /** Three true swept strands orbiting one guide path. */
 export function buildCurveRope(options: CurveSweepOptions): EditableMesh {
   const radius = Math.max(1e-4, options.radius);
-  const path = resampleStrokePoints(options.points, radius * 0.3);
+  const twists = (options.twistDegrees ?? 360) * Math.PI / 180;
+  // A rope needs enough rings per turn to keep the braid smooth. The old fixed
+  // spacing could make high-twist ropes read as three disconnected tubes.
+  const turns = Math.max(1, Math.abs(twists) / (Math.PI * 2));
+  const sourceLength = Math.max(1e-6, pathLength(options.points));
+  const braidSpacing = Math.min(radius * 0.22, sourceLength / (turns * 16));
+  const path = densifyPath(
+    resampleStrokePoints(options.points, Math.max(1e-5, braidSpacing)),
+    Math.max(1e-5, braidSpacing),
+  );
   if (path.length < 2) path.push(addVec3(path[0] ?? v3(), v3(radius * 2, 0, 0)));
   const cyclic = options.cyclic === true && path.length > 2;
   if (cyclic) path.push({ ...path[0]! });
   const guide = buildFrames(path);
   const builder = new MeshBuilder(options.name ?? 'Curve Rope', false);
   const total = pathLength(path);
-  const twists = (options.twistDegrees ?? 360) * Math.PI / 180;
   for (let strand = 0; strand < 3; strand++) {
     let travelled = 0;
     const strandPath = path.map((point, index) => {
@@ -158,8 +220,8 @@ export function buildCurveRope(options: CurveSweepOptions): EditableMesh {
       return addVec3(
         point,
         addVec3(
-          scaleVec3(guide.normals[index]!, Math.cos(phase) * radius * 0.55),
-          scaleVec3(guide.binormals[index]!, Math.sin(phase) * radius * 0.55),
+          scaleVec3(guide.normals[index]!, Math.cos(phase) * radius * 0.49),
+          scaleVec3(guide.binormals[index]!, Math.sin(phase) * radius * 0.49),
         ),
       );
     });
@@ -167,7 +229,7 @@ export function buildCurveRope(options: CurveSweepOptions): EditableMesh {
       builder,
       buildFrames(strandPath),
       profilePoints('round', Math.max(5, options.radialSegments - 2)),
-      { ...options, points: strandPath, radius: radius * 0.42, profile: 'round', twistDegrees: 0 },
+      { ...options, points: strandPath, radius: radius * 0.43, profile: 'round', twistDegrees: 0 },
     );
   }
   return builder.build();
@@ -341,6 +403,21 @@ function pathLength(points: Vec3[]): number {
     total += lengthVec3(subVec3(points[index]!, points[index - 1]!));
   }
   return total;
+}
+
+/** Add evenly spaced samples instead of merely dropping close stroke points. */
+function densifyPath(points: Vec3[], maxSpacing: number): Vec3[] {
+  if (points.length < 2) return points.map((point) => ({ ...point }));
+  const out: Vec3[] = [{ ...points[0]! }];
+  for (let index = 1; index < points.length; index++) {
+    const start = points[index - 1]!;
+    const end = points[index]!;
+    const steps = Math.max(1, Math.ceil(lengthVec3(subVec3(end, start)) / maxSpacing));
+    for (let step = 1; step <= steps; step++) {
+      out.push(addVec3(start, scaleVec3(subVec3(end, start), step / steps)));
+    }
+  }
+  return out;
 }
 
 function clampScale(value: number): number {

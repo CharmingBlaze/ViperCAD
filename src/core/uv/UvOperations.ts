@@ -17,6 +17,7 @@ export type UvIsland = { id: string; faceIds: FaceId[]; cornerIds: string[] };
 /** Blockbench-style unwrap modes. */
 export type UvUnwrapMode =
   | 'auto'
+  | 'angle'
   | 'box'
   | 'cubic'
   | 'cylinder'
@@ -163,6 +164,28 @@ export function unwrapUvAuto(
     const chart = projectFaceToChart(mesh, faceId);
     if (chart) charts.push(chart);
   }
+  shelfPackCharts(charts, padding);
+  applyCharts(mesh, charts, layerId);
+  mesh.geometryVersion += 1;
+  mesh.dirty.uvs = true;
+}
+
+/**
+ * Angle-based unwrap for organic and hard-surface meshes. Faces stay together
+ * while their shared edge is smooth enough; sharp turns (and marked seams)
+ * split an island. Each resulting island is projected as one chart and packed.
+ */
+export function unwrapUvAngleBased(
+  mesh: EditableMesh,
+  faceIds: FaceId[],
+  layerId = mesh.defaultUvLayerId,
+  angleDegrees = 66,
+  padding = 0.01,
+): void {
+  if (!layerId || !mesh.uvLayers.has(layerId)) throw new Error('Invalid UV layer');
+  const selected = new Set(faceIds.length ? faceIds : mesh.faces.keys());
+  const islands = angleBasedIslands(mesh, selected, angleDegrees);
+  const charts = islands.map((island) => projectIslandToChart(mesh, island)).filter((chart): chart is FaceChart => !!chart);
   shelfPackCharts(charts, padding);
   applyCharts(mesh, charts, layerId);
   mesh.geometryVersion += 1;
@@ -413,6 +436,9 @@ export function unwrapUvs(
     case 'auto':
       unwrapUvAuto(mesh, faces, layerId, options.padding ?? 0.01);
       break;
+    case 'angle':
+      unwrapUvAngleBased(mesh, faces, layerId, 66, options.padding ?? 0.01);
+      break;
     case 'box':
       unwrapUvBox(mesh, faces, layerId);
       break;
@@ -496,6 +522,64 @@ type FaceChart = {
   oy: number;
   scale: number;
 };
+
+function angleBasedIslands(mesh: EditableMesh, selected: Set<FaceId>, angleDegrees: number): FaceId[][] {
+  const remaining = new Set(selected);
+  const cosineThreshold = Math.cos((Math.max(0, Math.min(180, angleDegrees)) * Math.PI) / 180);
+  const normals = new Map<FaceId, Vec3>();
+  for (const id of selected) normals.set(id, computeFaceNormal(mesh, id));
+  const islands: FaceId[][] = [];
+
+  while (remaining.size) {
+    const seed = remaining.values().next().value as FaceId;
+    const island: FaceId[] = [];
+    const queue = [seed];
+    remaining.delete(seed);
+    while (queue.length) {
+      const faceId = queue.shift()!;
+      island.push(faceId);
+      for (const halfEdgeId of faceHalfEdgeIds(mesh, faceId)) {
+        const halfEdge = mesh.halfEdges.get(halfEdgeId)!;
+        const edge = mesh.edges.get(halfEdge.edgeId)!;
+        const neighbour = halfEdge.twinHalfEdgeId
+          ? mesh.halfEdges.get(halfEdge.twinHalfEdgeId)?.faceId ?? null
+          : null;
+        if (!neighbour || edge.seam || !remaining.has(neighbour)) continue;
+        const dot = dotVec3(normals.get(faceId)!, normals.get(neighbour)!);
+        if (dot < cosineThreshold) continue;
+        remaining.delete(neighbour);
+        queue.push(neighbour);
+      }
+    }
+    islands.push(island);
+  }
+  return islands;
+}
+
+function projectIslandToChart(mesh: EditableMesh, faceIds: FaceId[]): FaceChart | null {
+  const cornerIds = faceIds.flatMap((faceId) => faceCornerIds(mesh, faceId));
+  if (cornerIds.length < 3) return null;
+  const points = cornerIds.map((id) => mesh.vertices.get(mesh.faceCorners.get(id)!.vertexId)!.position);
+  let normal = v3(0, 0, 0);
+  for (const faceId of faceIds) {
+    const n = computeFaceNormal(mesh, faceId);
+    normal = v3(normal.x + n.x, normal.y + n.y, normal.z + n.z);
+  }
+  normal = normalizeVec3(normal);
+  if (lengthVec3(normal) < 1e-8) normal = computeFaceNormal(mesh, faceIds[0]!);
+  const origin = points[0]!;
+  let tangent = normalizeVec3(subVec3(points[1]!, origin));
+  if (lengthVec3(tangent) < 1e-8) {
+    tangent = normalizeVec3(crossVec3(Math.abs(normal.y) < 0.9 ? v3(0, 1, 0) : v3(1, 0, 0), normal));
+  }
+  const bitangent = normalizeVec3(crossVec3(normal, tangent));
+  const uvs = points.map((point) => {
+    const delta = subVec3(point, origin);
+    return { x: dotVec3(delta, tangent), y: dotVec3(delta, bitangent) };
+  });
+  // FaceChart requires an id only for deterministic ordering; an island can use its first face.
+  return normalizeChart(faceIds[0]!, cornerIds, uvs);
+}
 
 function projectFaceToChart(mesh: EditableMesh, faceId: FaceId): FaceChart | null {
   const cornerIds = faceCornerIds(mesh, faceId);
@@ -693,4 +777,3 @@ function dominantCubeSide(n: Vec3): 'up' | 'down' | 'east' | 'west' | 'north' | 
   if (ax >= az) return n.x >= 0 ? 'east' : 'west';
   return n.z >= 0 ? 'south' : 'north';
 }
-

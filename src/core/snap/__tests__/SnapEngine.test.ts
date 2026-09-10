@@ -6,6 +6,7 @@ import {
   snapToPlaneGrid,
   stabilizeSnap,
   WORLD_XZ_PLANE,
+  constructionPlaneFromNormal,
   type SnapResult,
 } from '@/core/snap/SnapEngine';
 
@@ -48,6 +49,13 @@ describe('SnapEngine', () => {
   it('keeps plane-grid snapping on the construction plane', () => {
     const result = snapToPlaneGrid({ x: 0.62, y: 4, z: 1.38 }, WORLD_XZ_PLANE, 0.5);
     expect(result).toEqual({ x: 0.5, y: 0, z: 1.5 });
+  });
+
+  it('builds a draw plane through an origin from a view normal', () => {
+    const plane = constructionPlaneFromNormal({ x: 1, y: 2, z: 3 }, { x: 0, y: 0, z: 1 });
+    expect(plane.origin).toEqual({ x: 1, y: 2, z: 3 });
+    expect(plane.normal.z).toBeCloseTo(1);
+    expect(Math.abs(plane.xAxis.x * plane.yAxis.x + plane.xAxis.y * plane.yAxis.y + plane.xAxis.z * plane.yAxis.z)).toBeLessThan(1e-6);
   });
 });
 

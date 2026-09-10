@@ -1,20 +1,26 @@
 import {
-  ACESFilmicToneMapping,
   AmbientLight,
+  ACESFilmicToneMapping,
   BufferGeometry,
   Color,
   DirectionalLight,
   DoubleSide,
+  Fog,
   HemisphereLight,
   MOUSE,
   LineBasicMaterial,
   LineLoop,
+  Mesh,
   OrthographicCamera,
+  PlaneGeometry,
   PerspectiveCamera,
   Raycaster,
   Scene,
+  ShadowMaterial,
   Vector2,
   Vector3,
+  PCFShadowMap,
+  PMREMGenerator,
   SRGBColorSpace,
   WebGLRenderer,
   type Camera,
@@ -22,9 +28,11 @@ import {
   type Texture,
 } from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { ensureDefaultPlaceholderMaterial } from '@/core/document/ModelDocument';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { enterGroupFocusFromPick, isObjectInFocusScope } from '@/core/editor/GroupFocus';
-import { expandGroupsToDescendants } from '@/core/editor/Hierarchy';
+import { expandGroupsToDescendants, getObjectWorldTransform } from '@/core/editor/Hierarchy';
 import {
   pickLogicalFace,
   type ObjectRenderHandle,
@@ -32,6 +40,7 @@ import {
 import { SelectionOverlaySystem } from '@/renderer/SelectionOverlays';
 import { applyViewportRenderStyle } from '@/renderer/ViewportRenderStyle';
 import { TransformGizmo } from '@/renderer/TransformGizmo';
+import { OriginOverlay } from '@/renderer/OriginOverlay';
 import {
   ORBIT_MAX_DISTANCE,
   ORBIT_MIN_DISTANCE,
@@ -43,12 +52,14 @@ import {
 } from '@/renderer/ViewportClip';
 import { createViewportGrid, syncViewportGrid } from '@/renderer/ViewportGrid';
 import type { ViewportGrid } from '@/renderer/ViewportGrid';
+import { createViewportWorld, VIEWPORT_CLEAR, VIEWPORT_FOG, VIEWPORT_SUN_DIR, VIEWPORT_ZENITH } from '@/renderer/ViewportWorld';
+import type { ViewportWorld } from '@/renderer/ViewportWorld';
 import { faceVertexIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
 import type { ObjectId } from '@/core/document/types';
 import type { EditableMesh, EdgeId, FaceId, VertexId } from '@/core/mesh/types';
 import { addVec3, dotVec3, scaleVec3, subVec3, v3, type Vec3 } from '@/core/math/Vec3';
 import { computePivot } from '@/core/transform/Pivot';
-import { buildOrientationBasis, type CameraAxes } from '@/core/transform/Orientation';
+import { orientedBasisForSelection, type CameraAxes } from '@/core/transform/Orientation';
 import { selectionHasTransformTarget } from '@/core/transform/Targets';
 import type { PointerSample } from '@/core/transform/TransformSystem';
 import type { ViewportRect } from '@/workspace/SplitLayoutManager';
@@ -71,14 +82,25 @@ import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
 import { raycastSculptTarget } from '@/core/sculpt/MeshSculptTarget';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
+import { resolveTerrainAsset } from '@/core/terrain/Terrain';
+import { BlockoutVectorTool } from '@/core/tools/BlockoutVectorTool';
+import { BlockoutSolidTool } from '@/core/tools/BlockoutSolidTool';
+import { BlockoutRoundTool } from '@/core/tools/BlockoutRoundTool';
+import {
+  isBlockoutReferenceObject,
+  overlayStateWithoutObjects,
+  shouldPickSceneObject,
+} from '@/core/blockout/BlockoutReferenceObject';
+import { ReferenceImageOverlayHandle } from '@/renderer/ReferenceImageOverlay';
 import type { ToolPointerInput } from '@/core/tools/Tool';
-import { WORLD_XY_PLANE, WORLD_XZ_PLANE, WORLD_YZ_PLANE, rayPlaneIntersection } from '@/core/snap/SnapEngine';
+import { WORLD_XY_PLANE, WORLD_XZ_PLANE, WORLD_YZ_PLANE, constructionPlaneFromNormal, constructionPlaneThrough, rayPlaneIntersection } from '@/core/snap/SnapEngine';
 import { commitPlaceModelInLevel } from '@/core/editor/ModelInstances';
 import type { DocumentId } from '@/core/document/types';
 import { inverseTransformPointApprox, cloneTransform } from '@/core/math/Transform';
 import { PrimitivePreviewHandle } from '@/renderer/PrimitivePreviewAdapter';
 import { TileDrawOverlay } from '@/renderer/TileDrawOverlay';
 import { floodFill, getPixel } from '@/core/image/PixelEditor';
+import { applyPaintTarget, clonePaintTarget } from '@/core/image/PaintLayers';
 import { PixelStrokeRecorder } from '@/core/image/PixelStroke';
 import {
   brushColourForTool,
@@ -100,6 +122,7 @@ import {
   type MarqueeMode,
   type ScreenRect,
 } from '@/core/selection/MarqueeSelect';
+import type { SelectionOp } from '@/core/selection/SelectionManager';
 import {
   boundsForView,
   documentViewPoints,
@@ -110,6 +133,18 @@ import { markUvSeams } from '@/core/uv/UvOperations';
 import { ViewportInteractionOverlay } from '@/app/viewport/ViewportInteractionOverlay';
 import { ViewportSceneSynchronizer } from '@/app/viewport/ViewportSceneSynchronizer';
 import { RigPreviewSynchronizer } from '@/app/viewport/RigPreviewSynchronizer';
+import { AnimationBonesOverlay } from '@/app/animation/AnimationBonesOverlay';
+import { AnimationSceneHelpers } from '@/app/animation/AnimationSceneHelpers';
+import type { AnimationSession } from '@/app/animation/AnimationSession';
+import {
+  classifyPointerButton,
+  classifyWheel,
+  isStylusButtonEvent,
+  modifierNavKind,
+  navCursor,
+  ViewportInputEngine,
+  wheelZoomPixels,
+} from '@/app/viewport/ViewportInputEngine';
 import { ModifierPreviewOverlay, type ModifierPreview } from '@/renderer/ModifierPreviewOverlay';
 import {
   CurveControlOverlay,
@@ -121,8 +156,17 @@ import {
   serializeCurveOperation,
   type CurveOperation,
 } from '@/core/curves/CurveOperation';
+import {
+  applyVertexBezierControl,
+  restoreVertexPositions,
+  serializeVertexBezierState,
+  snapshotVertexPositions,
+  VERTEX_BEZIER_META,
+  vertexBezierControlPoint,
+} from '@/core/curves/BezierFromVertices';
 
-const PICK_TOLERANCE_PX = 12;
+const PICK_TOLERANCE_PX = 16;
+const DRAW_VERTEX_PICK_PX = 18;
 
 type MarqueeState = {
   paneId: ViewId;
@@ -131,6 +175,10 @@ type MarqueeState = {
   currentX: number;
   currentY: number;
   shiftKey: boolean;
+  altKey: boolean;
+  pointerId?: number;
+  pointerType?: string;
+  button?: number;
 };
 
 type Pane = {
@@ -150,6 +198,9 @@ type Pane = {
 export class ViewportEngine {
   private renderer: WebGLRenderer | null = null;
   private scene: Scene | null = null;
+  private world: ViewportWorld | null = null;
+  private shadowReceiver: Mesh<PlaneGeometry, ShadowMaterial> | null = null;
+  private sceneFog: Fog | null = null;
   private panes = new Map<ViewId, Pane>();
   private host: HTMLElement | null = null;
   private session: EditorSession | null = null;
@@ -165,6 +216,17 @@ export class ViewportEngine {
     },
   });
   private rigPreviewSynchronizer = new RigPreviewSynchronizer();
+  private bonesOverlay = new AnimationBonesOverlay();
+  private sceneHelpers = new AnimationSceneHelpers();
+  private animation: AnimationSession | null = null;
+
+  get animationSession(): AnimationSession | null {
+    return this.animation;
+  }
+  private animationPoseDrag: { lastX: number; lastY: number } | null = null;
+  private animationBoneEditDrag: { lastX: number; lastY: number; paneId: ViewId; handle: 'head' | 'tail' } | null = null;
+  private animationWeightPaint = false;
+  private animationWeightPaintSavedAdd: boolean | null = null;
   private frame = 0;
   private resizeObserver: ResizeObserver | null = null;
   private unsubRedraw: (() => void) | null = null;
@@ -179,8 +241,10 @@ export class ViewportEngine {
   private lastPixelRatio = 0;
   private primitivePreview = new PrimitivePreviewHandle();
   private tileDrawOverlay = new TileDrawOverlay();
+  readonly referenceImageOverlay = new ReferenceImageOverlayHandle();
   private overlays = new SelectionOverlaySystem();
   private gizmo = new TransformGizmo();
+  private originOverlay = new OriginOverlay();
   private terrainBrushPreview = createTerrainBrushPreview();
   private modifierPreview = new ModifierPreviewOverlay();
   private curveControls = new CurveControlOverlay();
@@ -193,7 +257,12 @@ export class ViewportEngine {
     planeNormal: Vec3;
     beforeMesh: EditableMesh;
     beforeMetadata: string;
-    operation: CurveOperation;
+    operation: CurveOperation | null;
+    vertexBezier?: {
+      beforePositions: Map<VertexId, Vec3>;
+      beforeMeta: string | undefined;
+      affectedIds: VertexId[];
+    };
   } | null = null;
   private draftCurvePointDrag: {
     paneId: ViewId;
@@ -206,6 +275,8 @@ export class ViewportEngine {
   private modifierSpecs: ModifierPreview[] = [];
   private modifierMesh: EditableMesh | null = null;
   private lastHoverKey = '';
+  private lastDrawSyncKey = '';
+  private drawSyncCounter = 0;
   private gizmoDragging = false;
   /** Latest cursor ray per pane, used to anchor keyboard G/R/S immediately. */
   private lastPointerSamples = new Map<ViewId, PointerSample>();
@@ -232,6 +303,7 @@ export class ViewportEngine {
     lastX: number;
     lastY: number;
   } | null = null;
+  private readonly nav = new ViewportInputEngine();
   /** Double-click a grouped mesh to select its parent group. */
   private lastObjectPick: { objectId: ObjectId; time: number } | null = null;
   private modelPlacement: {
@@ -285,6 +357,11 @@ export class ViewportEngine {
     this.invalidate();
   }
 
+  setAnimationSession(animation: AnimationSession | null): void {
+    this.animation = animation;
+    this.invalidate();
+  }
+
   detach(): void {
     this.attached = false;
     this.stopLoop();
@@ -297,6 +374,13 @@ export class ViewportEngine {
     this.unbindPointer();
     this.sceneSynchronizer.reset();
     this.rigPreviewSynchronizer.reset();
+    this.bonesOverlay.reset();
+    this.sceneHelpers.reset();
+    this.animation = null;
+    this.animationPoseDrag = null;
+    this.animationBoneEditDrag = null;
+    this.animationWeightPaint = false;
+    this.animationWeightPaintSavedAdd = null;
     this.clearMarquee(false);
     this.seamStroke = null;
     this.painting3D = false;
@@ -308,6 +392,7 @@ export class ViewportEngine {
     this.pendingPaintMove = null;
     this.curvePointDrag = null;
     this.draftCurvePointDrag = null;
+    this.nav.cancel();
     this.interactionOverlay.detach();
     for (const pane of this.panes.values()) {
       pane.controls?.dispose();
@@ -320,6 +405,9 @@ export class ViewportEngine {
     this.host = null;
     this.session = null;
     this.workspace = null;
+    this.world = null;
+    this.shadowReceiver = null;
+    this.sceneFog = null;
     this.onLayoutChange = null;
     this.onCameraChange = null;
   }
@@ -368,8 +456,7 @@ export class ViewportEngine {
   private createRenderer(host: HTMLElement, workspace: WorkspaceController): boolean {
     host.replaceChildren();
     const scene = new Scene();
-    // Viper CAD's deep navy modelling surface.
-    scene.background = new Color(0x090d12);
+    scene.background = new Color(VIEWPORT_ZENITH);
 
     let renderer: WebGLRenderer;
     try {
@@ -384,13 +471,18 @@ export class ViewportEngine {
 
     // Pixel ratio is for sharpness only. Layout/viewport/scissor stay in CSS pixels.
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    // A compact neutral studio environment gives PBR materials readable
+    // highlights and metallic reflections without requiring an external HDRI.
     renderer.toneMapping = ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    renderer.toneMappingExposure = 0.84;
     renderer.outputColorSpace = SRGBColorSpace;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = PCFShadowMap;
     host.appendChild(renderer.domElement);
     renderer.domElement.style.display = 'block';
     renderer.domElement.style.width = '100%';
     renderer.domElement.style.height = '100%';
+    renderer.domElement.style.touchAction = 'none';
 
     renderer.domElement.addEventListener(
       'webglcontextlost',
@@ -410,17 +502,55 @@ export class ViewportEngine {
       false,
     );
 
-    scene.add(new HemisphereLight(0xd8e4f8, 0x282830, 0.42));
-    scene.add(new AmbientLight(0xffffff, 0.28));
-    const key = new DirectionalLight(0xffffff, 0.95);
-    key.position.set(6, 10, 4);
+    const environment = new RoomEnvironment();
+    const pmrem = new PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(environment, 0.04).texture;
+    scene.environmentIntensity = 0.55;
+    pmrem.dispose();
+    environment.dispose();
+
+    scene.add(new HemisphereLight(0x9ebee5, 0x303844, 0.72));
+    scene.add(new AmbientLight(0xffffff, 0.1));
+    const key = new DirectionalLight(0xfff1d0, 1.6);
+    key.position.copy(VIEWPORT_SUN_DIR).multiplyScalar(24);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    key.shadow.bias = -0.00015;
+    key.shadow.normalBias = 0.025;
+    key.shadow.camera.near = 0.1;
+    key.shadow.camera.far = 80;
+    key.shadow.camera.left = -24;
+    key.shadow.camera.right = 24;
+    key.shadow.camera.top = 24;
+    key.shadow.camera.bottom = -24;
     scene.add(key);
-    const fill = new DirectionalLight(0xc8d4ff, 0.42);
-    fill.position.set(-5, 4, -7);
+    const fill = new DirectionalLight(0x9ec4ff, 0.32);
+    fill.position.set(-6, 3, -5);
     scene.add(fill);
-    const rim = new DirectionalLight(0xffe8cc, 0.28);
-    rim.position.set(-2, 3, 8);
-    scene.add(rim);
+
+    this.sceneFog = new Fog(VIEWPORT_FOG, 28, 150);
+
+    const world = createViewportWorld();
+    // The modeler uses a neutral studio canvas rather than a game-style sky.
+    world.visible = false;
+    scene.add(world);
+    this.world = world;
+
+    // The grid is a shader overlay, so it cannot receive Three.js shadows.
+    // This nearly invisible plane provides a proper real-time shadow catcher
+    // underneath models while the grid remains readable above it.
+    const shadowReceiver = new Mesh(
+      new PlaneGeometry(96, 96),
+      new ShadowMaterial({ color: 0x05080c, transparent: true, opacity: 0.3 }),
+    );
+    shadowReceiver.name = 'Viewport shadow receiver';
+    shadowReceiver.rotation.x = -Math.PI / 2;
+    shadowReceiver.position.y = -0.002;
+    shadowReceiver.receiveShadow = true;
+    shadowReceiver.renderOrder = -1;
+    shadowReceiver.raycast = () => undefined;
+    scene.add(shadowReceiver);
+    this.shadowReceiver = shadowReceiver;
 
     const ids: ViewId[] = ['persp', 'top', 'front', 'right'];
     for (const id of ids) {
@@ -478,8 +608,13 @@ export class ViewportEngine {
     this.scene = scene;
     scene.add(this.primitivePreview.group);
     scene.add(this.tileDrawOverlay.group);
+    scene.add(this.referenceImageOverlay.group);
+    this.referenceImageOverlay.setOnInvalidate(() => this.invalidate());
     scene.add(this.overlays.root);
     scene.add(this.gizmo.root);
+    scene.add(this.originOverlay.root);
+    scene.add(this.bonesOverlay.group);
+    scene.add(this.sceneHelpers.group);
     scene.add(this.terrainBrushPreview);
     scene.add(this.modifierPreview.root);
     this.renderer = renderer;
@@ -557,12 +692,19 @@ export class ViewportEngine {
   frameSelection(viewId?: ViewId): boolean {
     if (!this.session) return false;
     const points = documentViewPoints(this.session.document, this.session.selection.state);
+    if (this.isAnimateShell() && this.animation) {
+      points.push(...this.animation.getArmatureWorldPoints());
+    }
     return this.framePoints(points, viewId);
   }
 
   frameAll(viewId?: ViewId): boolean {
     if (!this.session) return false;
-    return this.framePoints(documentViewPoints(this.session.document), viewId);
+    const points = documentViewPoints(this.session.document);
+    if (this.isAnimateShell() && this.animation) {
+      points.push(...this.animation.getArmatureWorldPoints());
+    }
+    return this.framePoints(points, viewId);
   }
 
   resetView(viewId?: ViewId): void {
@@ -687,6 +829,31 @@ export class ViewportEngine {
     else this.zoomViewportByPixels(deltaY, viewId);
   }
 
+  private applyNavGesture(
+    kind: 'pan' | 'orbit' | 'zoom',
+    deltaX: number,
+    deltaY: number,
+    viewId: ViewId,
+  ): void {
+    if (!this.workspace) return;
+    if (this.workspace.input.owner === 'none') this.workspace.input.begin('nav');
+    this.interacting = true;
+    this.applyViewportNavDrag(kind, deltaX, deltaY, viewId);
+    if (this.renderer) this.renderer.domElement.style.cursor = navCursor(kind);
+  }
+
+  private endNavCamera(): void {
+    this.workspace?.input.end('nav');
+    this.interacting = false;
+    this.persistCameras();
+    if (this.renderer) this.renderer.domElement.style.cursor = '';
+    this.invalidate();
+  }
+
+  private zoomViewportFromWheel(deltaY: number, deltaMode: number, viewId: ViewId): void {
+    this.zoomViewportByPixels(wheelZoomPixels(deltaY, deltaMode) * 0.45, viewId);
+  }
+
   private applyViewportOrbit(deltaX: number, deltaY: number, viewId: ViewId): void {
     const pane = this.panes.get(viewId);
     if (!pane || !(pane.camera instanceof PerspectiveCamera) || !this.workspace) return;
@@ -715,7 +882,15 @@ export class ViewportEngine {
   private tryBeginViewportNav(e: PointerEvent, paneId: ViewId): boolean {
     if (!this.workspace || e.button !== 0) return false;
     const { viewportNavMode, viewportNavViewId } = this.workspace;
-    if (viewportNavMode === 'none' || viewportNavViewId !== paneId) return false;
+    if (viewportNavMode === 'none') return false;
+    if (viewportNavMode === 'select') {
+      if (viewportNavViewId && viewportNavViewId !== paneId) {
+        this.workspace.setViewportNav('select', paneId);
+      }
+      this.beginMarquee(e, paneId);
+      return true;
+    }
+    if (viewportNavViewId !== paneId) return false;
     if (viewportNavMode === 'orbit' && !(this.panes.get(paneId)?.camera instanceof PerspectiveCamera)) {
       return false;
     }
@@ -729,6 +904,59 @@ export class ViewportEngine {
     };
     this.rebindActiveControls();
     return true;
+  }
+
+  /**
+   * Mouse MMB and laptop Alt+LMB camera chords, shared by every workspace.
+   * Alt+LMB only steals when a brush/tool owns LMB (sculpt, paint, pose, …)
+   * so modelling still uses Alt for from-centre primitives and flatten sample.
+   */
+  private tryBeginModifierNav(
+    e: PointerEvent,
+    paneId: ViewId,
+    isPerspective: boolean,
+  ): boolean {
+    const stealPrimary = !this.session?.transform.active && this.primaryBlocksCameraNav();
+    const kind = modifierNavKind(
+      classifyPointerButton(e.button),
+      {
+        altKey: e.altKey,
+        shiftKey: e.shiftKey,
+        ctrlKey: e.ctrlKey || e.metaKey,
+      },
+      { altEmulatesMiddle: stealPrimary, isPerspective },
+    );
+    if (!kind) return false;
+    e.preventDefault();
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    this.nav.beginImmediate(kind, e.pointerId, paneId, e.clientX, e.clientY, isPerspective);
+    this.applyNavGesture(kind, 0, 0, paneId);
+    return true;
+  }
+
+  /** True when leftover LMB would start a brush/tool instead of orbit/select. */
+  private primaryBlocksCameraNav(): boolean {
+    if (this.session?.transform.prefs.gizmoMode === 'select') return true;
+    if (this.workspace?.shellMode === 'texture') return true;
+    if (this.canPaint3D()) return true;
+    if (this.workspace?.texture.seamPaintMode !== 'off') return true;
+    if (this.isAnimateShell()) return true;
+    const tool = this.session?.tools.getActive();
+    if (tool instanceof MeshSculptTool) return tool.mode !== 'flatten';
+    if (tool instanceof TerrainSculptTool) return true;
+    if (tool instanceof TerrainObjectTool) return true;
+    if (tool instanceof TerrainFeatureTool) return true;
+    if (tool instanceof TileDrawTool) return true;
+    if (tool instanceof BlockoutVectorTool) return true;
+    if (tool instanceof KnifeTool) return true;
+    if (tool instanceof LoopCutTool) return true;
+    if (tool instanceof CreateDoodleTool) {
+      return (
+        tool.state.stage === 'drawing' &&
+        (tool.inputMode === 'pen' || !tool.isSketchStrokeLocked())
+      );
+    }
+    return false;
   }
 
   private framePoints(points: ReturnType<typeof documentViewPoints>, viewId?: ViewId): boolean {
@@ -792,6 +1020,8 @@ export class ViewportEngine {
       this.painting3D ||
       !!doodleDrawing ||
       modalMeshTool ||
+      this.nav.navigating ||
+      this.workspace.input.owner === 'nav' ||
       this.workspace.input.isTransformOwned();
 
     const activeId =
@@ -855,12 +1085,13 @@ export class ViewportEngine {
     }
 
     if (pane.controls) {
-      // Reapply navigation whenever a pane becomes active. This also updates
-      // controls that survived a hot reload or workspace rebind.
+      // Camera buttons are owned by ViewportInputEngine (LMB orbit, RMB pan, wheel zoom).
       pane.controls.mouseButtons.LEFT = -1 as unknown as typeof MOUSE.PAN;
-      pane.controls.mouseButtons.MIDDLE = MOUSE.ROTATE;
-      // RMB drags/pans the camera in every viewport; MMB remains perspective orbit.
-      pane.controls.mouseButtons.RIGHT = MOUSE.PAN;
+      pane.controls.mouseButtons.MIDDLE = -1 as unknown as typeof MOUSE.PAN;
+      pane.controls.mouseButtons.RIGHT = -1 as unknown as typeof MOUSE.PAN;
+      pane.controls.touches.ONE = null;
+      pane.controls.touches.TWO = null;
+      pane.controls.enableZoom = false;
       pane.controls.enableRotate = pane.camera instanceof PerspectiveCamera;
       pane.controls.enablePan = true;
     }
@@ -1000,6 +1231,15 @@ export class ViewportEngine {
       this.invalidate();
       return;
     }
+    if (this.nav.pending || this.nav.navigating) {
+      const navMove = this.nav.onMove(e.pointerId, e.clientX, e.clientY);
+      if (navMove?.phase === 'nav') {
+        e.preventDefault();
+        this.applyNavGesture(navMove.kind, navMove.dx, navMove.dy, navMove.paneId);
+        return;
+      }
+      if (navMove?.phase === 'pending') return;
+    }
     if (!this.session?.transform.active) this.interactionOverlay.updateSnap(null, 'none');
 
     if (this.curvePointDrag && (e.buttons & 1)) {
@@ -1015,6 +1255,7 @@ export class ViewportEngine {
       this.marquee.currentX = x;
       this.marquee.currentY = y;
       this.marquee.shiftKey = e.shiftKey;
+      this.marquee.altKey = e.altKey;
       this.interactionOverlay.updateMarquee(this.marquee);
       return;
     }
@@ -1032,6 +1273,57 @@ export class ViewportEngine {
 
     if (this.painting3D && id && (e.buttons & 1)) {
       this.pendingPaintMove = { event: e, paneId: id };
+      this.invalidate();
+      return;
+    }
+    if (this.animationWeightPaint && id && (e.buttons & 1)) {
+      const hit = this.intersectAnimationMesh(e, id);
+      if (hit) this.animation?.paintWeightsAt(hit);
+      this.invalidate();
+      return;
+    }
+    if (this.animationPoseDrag && (e.buttons & 1)) {
+      const dx = (e.clientX - this.animationPoseDrag.lastX) * 0.015;
+      const dy = (e.clientY - this.animationPoseDrag.lastY) * 0.015;
+      this.animationPoseDrag.lastX = e.clientX;
+      this.animationPoseDrag.lastY = e.clientY;
+      if (dx !== 0 || dy !== 0) this.animation?.applyPosePointerDelta(dx, dy);
+      this.invalidate();
+      return;
+    }
+    if (this.animationBoneEditDrag && (e.buttons & 1)) {
+      const delta = this.cameraPlaneWorldDelta(
+        this.animationBoneEditDrag.paneId,
+        e.clientX - this.animationBoneEditDrag.lastX,
+        e.clientY - this.animationBoneEditDrag.lastY,
+      );
+      this.animationBoneEditDrag.lastX = e.clientX;
+      this.animationBoneEditDrag.lastY = e.clientY;
+      if (delta) {
+        if (this.animationBoneEditDrag.handle === 'head') {
+          const head = this.animation?.selectedBoneId
+            ? this.bonesOverlay.getHandleWorld(this.animation.selectedBoneId, 'head')
+            : null;
+          if (head) {
+            this.animation?.setSelectedBoneHeadFromWorld({
+              x: head.x + delta.x,
+              y: head.y + delta.y,
+              z: head.z + delta.z,
+            });
+          }
+        } else {
+          const tail = this.animation?.selectedBoneId
+            ? this.bonesOverlay.getHandleWorld(this.animation.selectedBoneId, 'tail')
+            : null;
+          if (tail) {
+            this.animation?.setSelectedBoneTailFromWorld({
+              x: tail.x + delta.x,
+              y: tail.y + delta.y,
+              z: tail.z + delta.z,
+            });
+          }
+        }
+      }
       this.invalidate();
       return;
     }
@@ -1062,10 +1354,18 @@ export class ViewportEngine {
     ) {
       this.terrainBrushPreview.visible = false;
     }
-    if (id && tool instanceof CreatePrimitiveTool && tool.state.stage !== 'idle') {
-      this.pendingPrimitiveMove = { event: e, paneId: id };
-      this.invalidate();
-      return;
+    if (id && tool instanceof CreatePrimitiveTool) {
+      if (tool.state.stage !== 'idle') {
+        this.pendingPrimitiveMove = { event: e, paneId: id };
+        this.invalidate();
+        return;
+      }
+      if (tool.kindChosen) {
+        tool.previewHover(this.pointerInput(e, id), this.session!.context());
+        if (this.renderer) this.renderer.domElement.style.cursor = 'crosshair';
+        this.invalidate();
+        return;
+      }
     }
     if (id && tool instanceof CreateDoodleTool && tool.state.stage === 'drawing') {
       tool.update(this.pointerInput(e, id), this.session!.context());
@@ -1073,21 +1373,16 @@ export class ViewportEngine {
       return;
     }
     if (id && tool instanceof DrawPolyTool) {
-      if (tool.state.chain.length === 0 && this.session) {
-        const gizmoHit = this.isTextureFaceEditing() ? null : this.pickGizmo(e, id);
-        if (gizmoHit) {
-          if (this.renderer) this.renderer.domElement.style.cursor = 'grab';
-          this.gizmo.setHovered(gizmoHit.handleId);
-          this.session.selection.clearHover();
-          this.syncGizmo();
-          this.invalidate();
-          return;
-        }
-        if (this.renderer) this.renderer.domElement.style.cursor = '';
-        this.gizmo.setHovered(null);
+      if (this.renderer) {
+        const pick = this.pickDrawVertex(e, id);
+        tool.setViewportVertexPick(pick);
+        this.renderer.domElement.style.cursor = pick ? 'pointer' : '';
+      } else {
+        tool.setViewportVertexPick(this.pickDrawVertex(e, id));
       }
+      this.gizmo.setHovered(null);
       tool.update(this.pointerInput(e, id), this.session!.context());
-      this.interactionOverlay.updateSnap(e, tool.state.snapLabel);
+      this.interactionOverlay.updateSnap(e, tool.state.snapLabel === 'none' ? tool.state.hoverKind : tool.state.snapLabel);
       this.invalidate();
       return;
     }
@@ -1155,6 +1450,12 @@ export class ViewportEngine {
       return;
     }
 
+    if (id && tool instanceof BlockoutVectorTool) {
+      tool.onPointerMove(this.pointerInput(e, id), this.session!.context());
+      this.invalidate();
+      return;
+    }
+
     const doodleTool = tool instanceof CreateDoodleTool ? tool : null;
     const doodleBlocksHover =
       doodleTool &&
@@ -1169,6 +1470,7 @@ export class ViewportEngine {
       !(tool instanceof CreatePrimitiveTool) &&
       !doodleBlocksHover &&
       !(tool instanceof DrawPolyTool)
+      && !(tool instanceof BlockoutVectorTool)
       && !(tool instanceof TileDrawTool)
       && !(tool instanceof KnifeTool)
       && !(tool instanceof LoopCutTool)
@@ -1186,7 +1488,14 @@ export class ViewportEngine {
         this.invalidate();
         return;
       }
-      if (this.renderer) this.renderer.domElement.style.cursor = '';
+      if (this.renderer) {
+        this.renderer.domElement.style.cursor =
+          this.workspace?.viewportNavMode &&
+          this.workspace.viewportNavMode !== 'none' &&
+          (this.workspace.viewportNavViewId === id || this.workspace.viewportNavMode === 'select')
+            ? navCursor(this.workspace.viewportNavMode)
+            : '';
+      }
       this.gizmo.setHovered(null);
       this.updateHover(e, id);
       this.syncGizmo();
@@ -1200,9 +1509,16 @@ export class ViewportEngine {
     this.activateNavigationPane(e.clientX, e.clientY);
 
     const transform = this.session?.transform;
+    const rect = this.host.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const id = this.workspace.hitTestViewport(x, y, rect.width, rect.height);
+    if (!id) return;
 
-    // RMB cancels active modal / gizmo transform
-    if (e.button === 2 && transform?.active) {
+    const button = classifyPointerButton(e.button);
+    const isPerspective = this.panes.get(id)?.camera instanceof PerspectiveCamera;
+
+    if (button === 'secondary' && transform?.active) {
       e.preventDefault();
       transform.cancel();
       this.workspace.input.end('transform');
@@ -1212,35 +1528,52 @@ export class ViewportEngine {
       return;
     }
 
-    const modalTool = this.session?.tools.getActive();
-    if (e.button === 2 && modalTool instanceof LoopCutTool && this.session) {
+    const isStylusButton = isStylusButtonEvent(e);
+    if (isStylusButton) {
       e.preventDefault();
-      const completed = modalTool.centreAndConfirm(this.session.context());
-      if (completed) {
-        this.workspace.input.end('tool');
-        this.session.tools.setActive('select', this.session.context());
-        this.interactionOverlay.updateTransform(null, '');
-        this.syncInputControls();
-      }
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      this.beginMarquee(e, id);
       return;
     }
 
-    if (e.button !== 0) return;
+    if (button === 'secondary') {
+      e.preventDefault();
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      this.nav.beginSecondary(e.pointerId, id, e.clientX, e.clientY, isPerspective);
+      return;
+    }
 
-    const rect = this.host.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const id = this.workspace.hitTestViewport(x, y, rect.width, rect.height);
-    if (!id) return;
+    if (this.tryBeginModifierNav(e, id, isPerspective)) return;
+
+    if (button !== 'primary') return;
 
     this.workspace.setActiveViewport(id);
 
+    // G/R/S are modal. Confirm before testing gizmo handles so a click on the
+    // gizmo (or any of the four view panes) cannot cancel and immediately start
+    // a second transform instead of finishing the current one.
+    if (transform?.active) {
+      e.preventDefault();
+      transform.confirm();
+      this.workspace.input.end('transform');
+      this.gizmoDragging = false;
+      this.gizmo.setActiveHandle(null);
+      this.syncTransformInteractionState();
+      return;
+    }
+
     if (this.modelPlacement && this.tryPlaceModelAtPointer(e, id)) return;
 
-    if (this.tryBeginViewportNav(e, id)) return;
+    if (!(this.session?.tools.getActive() instanceof BlockoutVectorTool) && this.tryBeginViewportNav(e, id)) return;
+
+    if (this.tryHandleAnimationPointerDown(e, id)) return;
 
     const tool = this.session?.tools.getActive();
-    if (!this.workspace.curveNodeEditMode && this.tryStartGizmoTransform(e, id)) {
+    if (
+      !this.workspace.curveNodeEditMode &&
+      !(this.session?.tools.getActive() instanceof BlockoutVectorTool) &&
+      this.tryStartGizmoTransform(e, id)
+    ) {
       this.invalidate();
       return;
     }
@@ -1257,9 +1590,11 @@ export class ViewportEngine {
       return;
     }
 
-    // Ctrl/Cmd+LMB = screen marquee (anywhere, including over paint / gizmo).
+    const isSelectBoxActive = this.session?.transform.prefs.gizmoMode === 'select';
+
+    // Ctrl/Cmd+LMB or Left Toolbar Select Box button active = screen marquee (anywhere, including over paint / gizmo).
     if (
-      (e.ctrlKey || e.metaKey) &&
+      (e.ctrlKey || e.metaKey || isSelectBoxActive) &&
       !(tool instanceof CreatePrimitiveTool) &&
       !(tool instanceof CreateDoodleTool) &&
       !(tool instanceof DrawPolyTool) &&
@@ -1270,6 +1605,7 @@ export class ViewportEngine {
       !(tool instanceof MeshSculptTool) &&
       !(tool instanceof TerrainObjectTool) &&
       !(tool instanceof TerrainFeatureTool) &&
+      !(tool instanceof BlockoutVectorTool) &&
       !transform?.active
     ) {
       this.beginMarquee(e, id);
@@ -1287,23 +1623,10 @@ export class ViewportEngine {
       return;
     }
 
-    if (transform?.active) {
-      e.preventDefault();
-      transform.confirm();
-      this.workspace.input.end('transform');
-      this.gizmo.setActiveHandle(null);
-      this.syncTransformInteractionState();
-      return;
-    }
-
     if (tool instanceof CreatePrimitiveTool) {
       this.rebindActiveControls();
       if (tool.state.stage === 'idle') {
-        const facePlane = this.faceConstructionPlane(e, id);
-        this.session!.constructionPlane =
-          facePlane?.plane ??
-          (id === 'front' ? WORLD_XY_PLANE : id === 'right' ? WORLD_YZ_PLANE : WORLD_XZ_PLANE);
-        this.session!.constructionPlaneId = facePlane?.id ?? id;
+        this.applyDrawConstructionPlane(e, id);
       }
       tool.begin(this.pointerInput(e, id), this.session!.context());
       this.invalidate();
@@ -1344,20 +1667,6 @@ export class ViewportEngine {
         this.invalidate();
         return;
       } else if (tool.state.stage === 'idle') {
-        if (this.tryStartGizmoTransform(e, id)) {
-          this.invalidate();
-          return;
-        }
-        const hit = this.resolvePointerHit(e, id);
-        if (hit) {
-          this.pickSelection(e, id);
-          if (this.workspace.curveNodeEditMode) {
-            this.workspace.setCurveNodeEditMode(false);
-          }
-          this.syncGizmo();
-          this.invalidate();
-          return;
-        }
         e.preventDefault();
         if (tool.inputMode === 'sketch') {
           (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -1368,6 +1677,7 @@ export class ViewportEngine {
           const depth = pane.camera.position.distanceTo(pane.controls.target);
           tool.setDepthHint(depth);
         }
+        this.applyDrawConstructionPlane(e, id);
         this.workspace.input.begin('tool');
         this.syncOrbitEnabled();
         tool.begin(this.pointerInput(e, id), this.session!.context());
@@ -1378,24 +1688,29 @@ export class ViewportEngine {
     }
 
     if (tool instanceof DrawPolyTool) {
-      if (this.tryStartGizmoTransform(e, id)) {
-        this.invalidate();
-        return;
-      }
       e.preventDefault();
       this.rebindActiveControls();
-      if (tool.state.createdInChain.length === 0) {
-        const facePlane = this.faceConstructionPlane(e, id);
-        this.session!.constructionPlane =
-          facePlane?.plane ??
-          (id === 'front' ? WORLD_XY_PLANE : id === 'right' ? WORLD_YZ_PLANE : WORLD_XZ_PLANE);
-        this.session!.constructionPlaneId = facePlane?.id ?? id;
-      }
+      tool.setViewportVertexPick(this.pickDrawVertex(e, id));
+      this.applyDrawPolyConstructionPlane(e, id, tool);
       this.workspace.input.begin('tool');
       this.syncOrbitEnabled();
       tool.begin(this.pointerInput(e, id), this.session!.context());
       this.workspace.input.end('tool');
       this.syncOrbitEnabled();
+      this.invalidate();
+      return;
+    }
+
+    if (tool instanceof BlockoutVectorTool) {
+      e.preventDefault();
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      this.rebindActiveControls();
+      this.workspace.input.begin('tool');
+      this.syncOrbitEnabled();
+      if (tool.state.points.length === 0 || tool.state.closed) {
+        this.applyDrawConstructionPlane(e, id);
+      }
+      tool.onPointerDown(this.pointerInput(e, id), this.session!.context());
       this.invalidate();
       return;
     }
@@ -1502,14 +1817,12 @@ export class ViewportEngine {
       return;
     }
 
-    // UV Edit owns LMB in the 3D pane: always pick a face immediately.
-    // Do this before gizmo and tweak-move handling so the previous face cannot trap input.
+    // UV Edit: click picks a face, drag orbits — same as the modelling viewport.
     if (this.isTextureFaceEditing()) {
-      e.preventDefault();
       this.rebindActiveControls();
-      this.pickSelection(e, id);
-      this.syncGizmo();
-      this.invalidate();
+      e.preventDefault();
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      this.nav.beginPrimary(e.pointerId, id, e.clientX, e.clientY, isPerspective);
       return;
     }
 
@@ -1518,14 +1831,13 @@ export class ViewportEngine {
       return;
     }
 
-    // Move tool: drag only via gizmo handles (axis = constrained, centre = view plane).
-    // Select tool: press on *already-selected* component then drag to tweak-move.
+    // Select and Move: press on *already-selected* component then drag to tweak-move.
     // Clicks on other faces/edges/verts must pick immediately (not get trapped by tweak).
     const gizmoMode = this.session?.transform.prefs.gizmoMode;
     const hit = this.resolvePointerHit(e, id);
     if (
       this.session &&
-      gizmoMode === 'select' &&
+      (gizmoMode === 'move' || gizmoMode === 'combined') &&
       this.hitAllowsFreeMove(hit, e, id)
     ) {
       e.preventDefault();
@@ -1541,13 +1853,51 @@ export class ViewportEngine {
     }
 
     this.rebindActiveControls();
-    this.pickSelection(e, id);
-    this.syncGizmo();
-    this.invalidate();
+    e.preventDefault();
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    this.nav.beginPrimary(
+      e.pointerId,
+      id,
+      e.clientX,
+      e.clientY,
+      this.panes.get(id)?.camera instanceof PerspectiveCamera,
+    );
   };
 
   private onPointerUp = (e: PointerEvent): void => {
     if (!this.session || !this.workspace) return;
+    if (this.nav.pending || this.nav.navigating) {
+      const ended = this.nav.onUp(e.pointerId, classifyPointerButton(e.button));
+      if (ended?.phase === 'click' && ended.button === 'primary') {
+        if (this.isAnimateShell()) {
+          this.tryPickAnimationBone(e, ended.paneId);
+          this.invalidate();
+          return;
+        }
+        this.rebindActiveControls();
+        this.pickSelection(e, ended.paneId);
+        this.syncGizmo();
+        this.invalidate();
+        return;
+      }
+      if (ended?.phase === 'click' && ended.button === 'secondary') {
+        const modalTool = this.session.tools.getActive();
+        if (modalTool instanceof LoopCutTool) {
+          const completed = modalTool.centreAndConfirm(this.session.context());
+          if (completed) {
+            this.workspace.input.end('tool');
+            this.session.tools.setActive('select', this.session.context());
+            this.interactionOverlay.updateTransform(null, '');
+            this.syncInputControls();
+          }
+        }
+        return;
+      }
+      if (ended?.phase === 'ended') {
+        this.endNavCamera();
+        return;
+      }
+    }
     if (this.viewportNavDrag && e.button === 0) {
       this.viewportNavDrag = null;
       if (this.renderer) this.renderer.domElement.style.cursor = '';
@@ -1575,7 +1925,13 @@ export class ViewportEngine {
       this.invalidate();
       return;
     }
-    if (this.marquee && e.button === 0) {
+    if (
+      this.marquee &&
+      (e.pointerId === this.marquee.pointerId ||
+        e.button === this.marquee.button ||
+        e.button === 0 ||
+        e.pointerType === 'pen')
+    ) {
       this.finishMarquee(e);
       return;
     }
@@ -1588,6 +1944,10 @@ export class ViewportEngine {
       e.button === 0
     ) {
       doodle.lockSketchStroke(this.session.context());
+      if (doodle.isSketchStrokeLocked()) {
+        doodle.confirm(this.session.context());
+        this.workspace.setCurveNodeEditMode(false);
+      }
       this.workspace.input.end('tool');
       this.syncOrbitEnabled();
       this.invalidate();
@@ -1631,9 +1991,35 @@ export class ViewportEngine {
       this.invalidate();
       return;
     }
+    if (doodle instanceof BlockoutVectorTool && e.button === 0) {
+      const host = this.host?.getBoundingClientRect();
+      const pane = host
+        ? this.workspace?.hitTestViewport(e.clientX - host.left, e.clientY - host.top, host.width, host.height)
+          ?? this.workspace?.activeViewportId
+          ?? 'persp'
+        : this.workspace?.activeViewportId || 'persp';
+      doodle.onPointerUp(this.pointerInput(e, pane), this.session.context());
+      this.workspace.input.end('tool');
+      this.syncOrbitEnabled();
+      this.invalidate();
+      return;
+    }
     if (this.painting3D && e.button === 0) {
       this.flushPendingPaintMove();
       this.endPaint3D();
+      return;
+    }
+    if ((this.animationPoseDrag || this.animationWeightPaint || this.animationBoneEditDrag) && e.button === 0) {
+      this.animationPoseDrag = null;
+      this.animationBoneEditDrag = null;
+      this.animationWeightPaint = false;
+      if (this.animationWeightPaintSavedAdd != null && this.animation) {
+        this.animation.weightBrushAdd = this.animationWeightPaintSavedAdd;
+        this.animationWeightPaintSavedAdd = null;
+      }
+      this.workspace.input.end('tool');
+      this.syncOrbitEnabled();
+      this.invalidate();
       return;
     }
     if (this.gizmoDragging && e.button === 0) {
@@ -1654,6 +2040,10 @@ export class ViewportEngine {
   };
 
   private onPointerCancel = (): void => {
+    if (this.nav.pending || this.nav.navigating) {
+      this.nav.cancel();
+      this.endNavCamera();
+    }
     if (this.viewportNavDrag) {
       this.viewportNavDrag = null;
       if (this.renderer) this.renderer.domElement.style.cursor = '';
@@ -1862,6 +2252,10 @@ export class ViewportEngine {
       currentX: x,
       currentY: y,
       shiftKey: e.shiftKey,
+      altKey: e.altKey,
+      pointerId: e.pointerId,
+      pointerType: e.pointerType,
+      button: e.button,
     };
     this.session?.selection.clearHover();
     this.workspace.input.begin('tool');
@@ -1883,7 +2277,7 @@ export class ViewportEngine {
 
     const drag = Math.hypot(state.currentX - state.startX, state.currentY - state.startY);
     if (drag < MARQUEE_MIN_DRAG_PX) {
-      // Tiny drag → single pick under cursor (Alt toggles).
+      // Tiny drag / single click / stylus tap → pick element under cursor (Alt toggles, Shift adds).
       this.pickSelection(e, state.paneId);
       this.syncGizmo();
       this.invalidate();
@@ -1892,7 +2286,7 @@ export class ViewportEngine {
 
     const rect = normalizeScreenRect(state.startX, state.startY, state.currentX, state.currentY);
     const mode = marqueeModeFromDrag(state.startX, state.currentX);
-    const op = state.shiftKey ? 'add' : 'replace';
+    const op: SelectionOp = state.shiftKey ? 'add' : state.altKey ? 'toggle' : 'replace';
     this.session.selectionSource = 'viewport';
     if (this.workspace.shellMode === 'texture' && this.session.selection.state.mode !== 'face') {
       this.session.selection.setMode('face');
@@ -1907,7 +2301,7 @@ export class ViewportEngine {
     paneId: ViewId,
     rect: ScreenRect,
     mode: MarqueeMode,
-    op: 'add' | 'replace',
+    op: SelectionOp,
   ): void {
     if (!this.session) return;
     const pane = this.panes.get(paneId);
@@ -1916,6 +2310,7 @@ export class ViewportEngine {
 
     const selMode =
       this.workspace?.shellMode === 'texture' ? 'face' : this.session.selection.state.mode;
+    const xRay = this.session.selection.state.xRay;
 
     if (selMode === 'object') {
       const ids: ObjectId[] = [];
@@ -1923,6 +2318,7 @@ export class ViewportEngine {
       for (const [, handle] of this.handles) {
         const objectId = handle.objectId;
         if (!isObjectInFocusScope(this.session.document, objectId, focusId)) continue;
+        if (!this.isPickableObject(objectId, paneId)) continue;
         const object = this.session.document.objects.get(objectId);
         const mesh = object?.meshId
           ? this.session.document.meshes.get(object.meshId)
@@ -1933,7 +2329,18 @@ export class ViewportEngine {
           const p = projectVertex(mesh, handle, pane.camera, viewport, vid);
           if (p) pts.push(p);
         }
-        if (pointsSatisfyMarquee(pts, rect, mode) && !ids.includes(objectId)) ids.push(objectId);
+        let hit =
+          pts.some((p) => pointInRect(p.x, p.y, rect)) ||
+          pointsSatisfyMarquee(pts, rect, mode);
+        if (!hit) {
+          const originQ = handle.group.position.clone().project(pane.camera);
+          if (originQ.z >= -1 && originQ.z <= 1) {
+            const ox = viewport.x + ((originQ.x + 1) * viewport.width) / 2;
+            const oy = viewport.y + ((1 - originQ.y) * viewport.height) / 2;
+            if (pointInRect(ox, oy, rect)) hit = true;
+          }
+        }
+        if (hit && !ids.includes(objectId)) ids.push(objectId);
       }
       this.session.selection.selectObjects(ids, op);
       return;
@@ -1960,6 +2367,7 @@ export class ViewportEngine {
         for (const vid of mesh.vertices.keys()) {
           const p = projectVertex(mesh, handle, pane.camera, viewport, vid);
           if (p && pointInRect(p.x, p.y, rect)) {
+            if (!xRay && this.isWorldPointOccluded(mesh, handle, pane, vid)) continue;
             vertIds.push(vid);
             targetObjectId = objectId;
           }
@@ -1972,13 +2380,14 @@ export class ViewportEngine {
           const pb = projectVertex(mesh, handle, pane.camera, viewport, pair[1]);
           if (!pa || !pb) continue;
           const hit =
-            mode === 'window'
-              ? pointInRect(pa.x, pa.y, rect) && pointInRect(pb.x, pb.y, rect)
-              : segmentHitsRect(pa.x, pa.y, pb.x, pb.y, rect);
-          if (hit) {
-            edgeIds.push(edge.id);
-            targetObjectId = objectId;
+            (pointInRect(pa.x, pa.y, rect) || pointInRect(pb.x, pb.y, rect)) ||
+            segmentHitsRect(pa.x, pa.y, pb.x, pb.y, rect);
+          if (!hit) continue;
+          if (!xRay && this.isEdgeOccluded(mesh, handle, pane, pair[0], pair[1], pa, pb, null)) {
+            continue;
           }
+          edgeIds.push(edge.id);
+          targetObjectId = objectId;
         }
       } else {
         for (const faceId of mesh.faces.keys()) {
@@ -1989,8 +2398,10 @@ export class ViewportEngine {
             if (p) pts.push(p);
           }
           if (!pts.length) continue;
-          let hit = pointsSatisfyMarquee(pts, rect, mode);
-          if (!hit && mode === 'crossing') {
+          let hit =
+            pts.some((p) => pointInRect(p.x, p.y, rect)) ||
+            pointsSatisfyMarquee(pts, rect, mode);
+          if (!hit) {
             for (let i = 0; i < pts.length; i++) {
               const a = pts[i]!;
               const b = pts[(i + 1) % pts.length]!;
@@ -2000,10 +2411,10 @@ export class ViewportEngine {
               }
             }
           }
-          if (hit) {
-            faceIds.push(faceId);
-            targetObjectId = objectId;
-          }
+          if (!hit) continue;
+          if (!xRay && this.isFaceCentroidOccluded(mesh, handle, pane, faceId)) continue;
+          faceIds.push(faceId);
+          targetObjectId = objectId;
         }
       }
     }
@@ -2050,24 +2461,25 @@ export class ViewportEngine {
 
     if (tool === 'fill') {
       const p = uvToPixel(hit.image, hit.uv);
-      const before = new Uint8ClampedArray(hit.image.pixels);
-      const count = floodFill(hit.image, p.x, p.y, colour);
+      const before = clonePaintTarget(hit.image);
+      const count = floodFill(hit.image, p.x, p.y, colour, {
+        tolerance: tex.fillTolerance,
+        contiguous: tex.fillContiguous,
+      });
       if (count) {
-        const after = new Uint8ClampedArray(hit.image.pixels);
+        const after = clonePaintTarget(hit.image);
         let applied = true;
         const image = hit.image;
         this.session.history.execute({
           name: 'Fill Pixels',
           execute: () => {
             if (applied) return;
-            image.pixels.set(after);
-            image.revision += 1;
+            applyPaintTarget(image, after);
             applied = true;
             this.session!.requestRedraw();
           },
           undo: () => {
-            image.pixels.set(before);
-            image.revision += 1;
+            applyPaintTarget(image, before);
             applied = false;
             this.session!.requestRedraw();
           },
@@ -2154,11 +2566,35 @@ export class ViewportEngine {
   }
 
   private pointerInput(e: PointerEvent, paneId: ViewId): ToolPointerInput {
-    const pane = this.panes.get(paneId)!;
-    const viewport = this.lastRects.find((r) => r.id === paneId)!;
-    const hostRect = this.host!.getBoundingClientRect();
-    const localX = e.clientX - hostRect.left - viewport.x;
-    const localY = e.clientY - hostRect.top - viewport.y;
+    const pane = this.panes.get(paneId);
+    const hostBounds = this.host!.getBoundingClientRect();
+    const viewport =
+      this.lastRects.find((r) => r.id === paneId) ??
+      this.workspace?.computeViewportRects(
+        Math.max(1, Math.floor(hostBounds.width)),
+        Math.max(1, Math.floor(hostBounds.height)),
+      ).find((r) => r.id === paneId);
+    if (!pane || !viewport) {
+      return {
+        button: (e.button === 0 ? 'left' : e.button === 1 ? 'middle' : 'right') as
+          | 'left'
+          | 'middle'
+          | 'right',
+        screenX: e.clientX,
+        screenY: e.clientY,
+        worldPosition: null,
+        rayOrigin: v3(0, 0, 10),
+        rayDirection: v3(0, 0, -1),
+        shiftKey: e.shiftKey,
+        ctrlKey: e.ctrlKey,
+        altKey: e.altKey,
+        pressure: typeof e.pressure === 'number' && e.pressure > 0 ? e.pressure : undefined,
+        worldUnitsPerPixel: 0.01,
+        viewportId: paneId,
+      };
+    }
+    const localX = e.clientX - hostBounds.left - viewport.x;
+    const localY = e.clientY - hostBounds.top - viewport.y;
     pane.camera.updateMatrixWorld(true);
     const raycaster = new Raycaster();
     raycaster.setFromCamera(
@@ -2196,7 +2632,9 @@ export class ViewportEngine {
       shiftKey: e.shiftKey,
       ctrlKey: e.ctrlKey,
       altKey: e.altKey,
+      pressure: typeof e.pressure === 'number' && e.pressure > 0 ? e.pressure : undefined,
       worldUnitsPerPixel,
+      viewportId: paneId,
     };
   }
 
@@ -2204,13 +2642,14 @@ export class ViewportEngine {
     const input = this.pointerInput(e, paneId);
     if (!this.session) return input;
     const activeTool = this.session.tools.getActive();
-    const objectId =
+    const preferredId =
       activeTool instanceof TerrainObjectTool && activeTool.terrainObjectId
         ? activeTool.terrainObjectId
         : activeTool instanceof TerrainFeatureTool && activeTool.terrainObjectId
           ? activeTool.terrainObjectId
-        : this.session.selection.state.activeObjectId;
-    const object = objectId ? this.session.document.objects.get(objectId) : null;
+          : this.session.selection.state.activeObjectId;
+    const terrain = resolveTerrainAsset(this.session, preferredId);
+    const object = terrain?.object ?? null;
     if (!object || object.metadata.terrain !== 'true') return input;
     const handle = this.handles.get(object.id);
     if (!handle) return input;
@@ -2259,13 +2698,21 @@ export class ViewportEngine {
     this.terrainBrushPreview.quaternion.setFromUnitVectors(up, normal.normalize());
     const material = this.terrainBrushPreview.material as LineBasicMaterial;
     material.color.setHex(
-      tool.mode === 'grab' ? 0x6eb5ff
+      tool.mode === 'draw' ? 0xff8c28
+        : tool.mode === 'clay' ? 0xd9753b
+        : tool.mode === 'grab' ? 0x6eb5ff
         : tool.mode === 'smooth' ? 0x74d68b
-          : tool.mode === 'flatten' ? 0xffc45c
-            : tool.mode === 'pinch' ? 0xff7eb6
-              : tool.mode === 'crease' ? 0xd9a066
-                : tool.mode === 'noise' ? 0xb18cff
-                  : 0xff8c28,
+        : tool.mode === 'flatten' ? 0xffc45c
+        : tool.mode === 'scrape' ? 0xfcc419
+        : tool.mode === 'pinch' ? 0xff7eb6
+        : tool.mode === 'crease' ? 0xd9a066
+        : tool.mode === 'snake_hook' ? 0x20c997
+        : tool.mode === 'twist' ? 0xbe4bdb
+        : tool.mode === 'nudge' ? 0x4dabf7
+        : tool.mode === 'mask' ? 0x495057
+        : tool.mode === 'unmask' ? 0xadb5bd
+        : tool.mode === 'noise' ? 0xb18cff
+        : 0xff8c28,
     );
   }
 
@@ -2338,6 +2785,92 @@ export class ViewportEngine {
     material.color.setHex(tool.kind === 'river' ? 0x55bde9 : 0xd39a5a);
   }
 
+  private applyViewConstructionPlane(paneId: ViewId): void {
+    if (!this.session) return;
+    if (paneId === 'front') {
+      this.session.constructionPlane = WORLD_XY_PLANE;
+      this.session.constructionPlaneId = 'front';
+      return;
+    }
+    if (paneId === 'right') {
+      this.session.constructionPlane = WORLD_YZ_PLANE;
+      this.session.constructionPlaneId = 'right';
+      return;
+    }
+    this.session.constructionPlane = WORLD_XZ_PLANE;
+    this.session.constructionPlaneId = paneId === 'top' ? 'top' : paneId;
+  }
+
+  private applyDrawPolyConstructionPlane(
+    e: PointerEvent,
+    paneId: ViewId,
+    tool: DrawPolyTool,
+  ): void {
+    if (!this.session) return;
+    if (this.workspace?.getDrawOnSurfaces()) {
+      const facePlane = this.faceConstructionPlane(e, paneId);
+      if (facePlane) {
+        this.session.constructionPlane = facePlane.plane;
+        this.session.constructionPlaneId = facePlane.id;
+        return;
+      }
+    }
+    const view = tool.planeLock === 'view' ? paneId : tool.planeLock;
+    const anchor =
+      tool.getAnchorWorldPosition(this.session.context()) ??
+      this.perspectiveDrawOrigin(paneId);
+    if (view === 'front') {
+      this.session.constructionPlane = constructionPlaneThrough(WORLD_XY_PLANE, anchor);
+      this.session.constructionPlaneId = 'front';
+      return;
+    }
+    if (view === 'right') {
+      this.session.constructionPlane = constructionPlaneThrough(WORLD_YZ_PLANE, anchor);
+      this.session.constructionPlaneId = 'right';
+      return;
+    }
+    if (view === 'top') {
+      this.session.constructionPlane = constructionPlaneThrough(WORLD_XZ_PLANE, anchor);
+      this.session.constructionPlaneId = 'top';
+      return;
+    }
+    this.session.constructionPlane = this.perspectiveDrawPlane(paneId, anchor);
+    this.session.constructionPlaneId = 'view';
+  }
+
+  private perspectiveDrawOrigin(paneId: ViewId): Vec3 {
+    const pane = this.panes.get(paneId) ?? this.panes.get('persp');
+    if (pane?.controls) {
+      const t = pane.controls.target;
+      return v3(t.x, t.y, t.z);
+    }
+    return v3(0, 0, 0);
+  }
+
+  private perspectiveDrawPlane(paneId: ViewId, origin: Vec3) {
+    const pane = this.panes.get(paneId) ?? this.panes.get('persp');
+    if (!pane) return constructionPlaneThrough(WORLD_XZ_PLANE, origin);
+    pane.camera.updateMatrixWorld(true);
+    const dir = new Vector3();
+    pane.camera.getWorldDirection(dir);
+    if (dir.lengthSq() < 1e-8) return constructionPlaneThrough(WORLD_XZ_PLANE, origin);
+    return constructionPlaneFromNormal(origin, v3(dir.x, dir.y, dir.z));
+  }
+
+  /** Sit click-drag create tools on a hit mesh when Draw on surfaces is on. */
+  private applyDrawConstructionPlane(e: PointerEvent, paneId: ViewId): void {
+    if (!this.session) return;
+    if (this.workspace?.getDrawOnSurfaces()) {
+      const facePlane = this.faceConstructionPlane(e, paneId);
+      if (facePlane) {
+        this.session.constructionPlane = facePlane.plane;
+        this.session.constructionPlaneId = facePlane.id;
+        return;
+      }
+    }
+    this.applyViewConstructionPlane(paneId);
+  }
+
   private faceConstructionPlane(e: PointerEvent, paneId: ViewId): { plane: { origin: { x:number;y:number;z:number }; normal: { x:number;y:number;z:number }; xAxis: { x:number;y:number;z:number }; yAxis: { x:number;y:number;z:number } }; id: string } | null {
     if (!this.host) return null;
     const pane = this.panes.get(paneId);
@@ -2355,10 +2888,7 @@ export class ViewportEngine {
       ),
       pane.camera,
     );
-    const hit = ray.intersectObjects(
-      [...this.handles.values()].map((h) => h.mesh),
-      false,
-    )[0];
+    const hit = ray.intersectObjects(this.pickableMeshes(paneId), false)[0];
     if (!hit?.face) return null;
     const objectId = hit.object.userData.objectId as string;
     const handle = this.handles.get(objectId);
@@ -2391,6 +2921,7 @@ export class ViewportEngine {
     }
     const mode = this.session.selection.state.mode;
     const xRay = this.session.selection.state.xRay;
+    const selectBackfaces = this.session.selection.state.selectBackfaces;
 
     if (mode === 'object' && !textureFacePick) {
       if (!hit) {
@@ -2441,7 +2972,17 @@ export class ViewportEngine {
     this.session.selection.selectObjects([target.objectId], 'replace');
 
     if (mode === 'face' || textureFacePick) {
-      if (target.faceId) this.session.selection.selectFaces([target.faceId], op);
+      const best = this.pickBestFace(
+        target.mesh,
+        target.handle,
+        target.pane,
+        target.viewport,
+        target.pointer,
+        target.faceId,
+        xRay,
+        selectBackfaces || textureFacePick,
+      );
+      if (best) this.session.selection.selectFaces([best], op);
       else if (op === 'replace') this.session.selection.selectFaces([], 'replace');
     } else if (mode === 'vertex') {
       const best = this.pickBestVertex(
@@ -2485,7 +3026,18 @@ export class ViewportEngine {
       if (!target) {
         selection.clearHover();
       } else if (mode === 'face') {
-        selection.setHoverFace(target.faceId);
+        selection.setHoverFace(
+          this.pickBestFace(
+            target.mesh,
+            target.handle,
+            target.pane,
+            target.viewport,
+            target.pointer,
+            target.faceId,
+            selection.state.xRay,
+            selection.state.selectBackfaces || textureFacePick,
+          ),
+        );
       } else if (mode === 'vertex') {
         selection.setHoverVertex(
           this.pickBestVertex(
@@ -2555,6 +3107,45 @@ export class ViewportEngine {
     };
   }
 
+  private isPickableObject(objectId: ObjectId, paneId: ViewId): boolean {
+    if (!this.session) return false;
+    const tool = this.session.tools.getActive();
+    return shouldPickSceneObject(this.session.document, objectId, {
+      paneId,
+      showInPersp: this.session.blockoutReference.showInPersp,
+      blockoutToolActive: tool instanceof BlockoutVectorTool,
+    });
+  }
+
+  private pickableMeshes(paneId: ViewId) {
+    return [...this.handles.entries()]
+      .filter(([objectId]) => this.isPickableObject(objectId, paneId))
+      .map(([, handle]) => handle.mesh);
+  }
+
+  private applyBlockoutReferenceVisibility(paneId: ViewId): void {
+    if (!this.session) return;
+    const showPersp = this.session.blockoutReference.showInPersp;
+    const blockout = this.workspace?.shellMode === 'blockout';
+    for (const [objectId, handle] of this.handles) {
+      const object = this.session.document.objects.get(objectId);
+      if (!object || !isBlockoutReferenceObject(object)) continue;
+      if (!object.visible) {
+        handle.group.visible = false;
+        continue;
+      }
+      if (!blockout) {
+        handle.group.visible = true;
+        continue;
+      }
+      const view = object.metadata.blockoutReference;
+      if (paneId === 'front') handle.group.visible = view === 'front';
+      else if (paneId === 'right') handle.group.visible = view === 'side';
+      else if (paneId === 'persp') handle.group.visible = showPersp;
+      else handle.group.visible = false;
+    }
+  }
+
   private resolvePointerHit(e: PointerEvent, paneId: ViewId): PointerHit | null {
     if (!this.session || !this.host) return null;
     const pane = this.panes.get(paneId);
@@ -2574,7 +3165,8 @@ export class ViewportEngine {
     raycaster.setFromCamera(ndc, pane.camera);
     const focusId = this.session.focusGroupId;
     const pickHandles = [...this.handles.entries()].filter(([objectId]) =>
-      isObjectInFocusScope(this.session!.document, objectId, focusId),
+      isObjectInFocusScope(this.session!.document, objectId, focusId)
+      && this.isPickableObject(objectId, paneId),
     );
     const meshes = pickHandles.map(([, h]) => h.mesh);
     const allowBackfaces =
@@ -2671,27 +3263,85 @@ export class ViewportEngine {
     faceId: FaceId | null,
     xRay: boolean,
   ): VertexId | null {
-    // Prefer verts on the hit face in visible-only mode; X-ray searches all logical verts.
-    const candidates =
-      !xRay && faceId
-        ? new Set(
-            handle.renderData.triangleMap
-              .filter((t) => t.faceId === faceId)
-              .flatMap((t) => t.vertexIds),
-          )
-        : new Set(mesh.vertices.keys());
+    const hitFaceVerts = faceId
+      ? new Set(
+          handle.renderData.triangleMap
+            .filter((t) => t.faceId === faceId)
+            .flatMap((t) => t.vertexIds),
+        )
+      : null;
     let best: VertexId | null = null;
-    let distance = PICK_TOLERANCE_PX;
-    for (const id of candidates) {
+    let bestScore = Number.POSITIVE_INFINITY;
+    let bestDepth = Number.POSITIVE_INFINITY;
+    for (const id of mesh.vertices.keys()) {
       const p = projectVertex(mesh, handle, pane.camera, viewport, id);
       if (!p) continue;
       const d = Math.hypot(pointer.x - p.x, pointer.y - p.y);
-      if (d >= distance && !(Math.abs(d - distance) < 0.25 && best && id < best)) continue;
+      if (d > PICK_TOLERANCE_PX) continue;
       if (!xRay && this.isWorldPointOccluded(mesh, handle, pane, id)) continue;
-      distance = d;
+      const score = d + (hitFaceVerts?.has(id) ? 0 : 2.5);
+      if (!isBetterPick(score, p.depth, id, bestScore, bestDepth, best)) continue;
+      bestScore = score;
+      bestDepth = p.depth;
       best = id;
     }
     return best;
+  }
+
+  /** Screen-space vertex pick for Draw: any visible mesh, no face hit required. */
+  private pickDrawVertex(
+    e: PointerEvent,
+    paneId: ViewId,
+  ): { objectId: ObjectId; vertexId: VertexId; position: Vec3 } | null {
+    if (!this.session || !this.host) return null;
+    const pane = this.panes.get(paneId);
+    const viewport = this.lastRects.find((r) => r.id === paneId);
+    if (!pane || !viewport) return null;
+    const hostRect = this.host.getBoundingClientRect();
+    const pointer = { x: e.clientX - hostRect.left, y: e.clientY - hostRect.top };
+    pane.camera.updateMatrixWorld(true);
+    const drawTool = this.session.tools.getActive();
+    const preferObjectId = drawTool instanceof DrawPolyTool ? drawTool.state.meshObjectId : null;
+    let best: {
+      objectId: ObjectId;
+      vertexId: VertexId;
+      position: Vec3;
+      score: number;
+      depth: number;
+    } | null = null;
+
+    for (const [objectId, handle] of this.handles) {
+      if (!this.isPickableObject(objectId, paneId)) continue;
+      const object = this.session.document.objects.get(objectId);
+      const mesh = object?.meshId ? this.session.document.meshes.get(object.meshId) : null;
+      if (!object || !mesh) continue;
+      for (const [vertexId, vertex] of mesh.vertices) {
+        const projected = projectVertex(mesh, handle, pane.camera, viewport, vertexId);
+        if (!projected) continue;
+        const dist = Math.hypot(pointer.x - projected.x, pointer.y - projected.y);
+        if (dist > DRAW_VERTEX_PICK_PX) continue;
+        const score = dist + (preferObjectId && objectId === preferObjectId ? 0 : 1.5);
+        if (
+          !best ||
+          score < best.score - 0.35 ||
+          (Math.abs(score - best.score) <= 0.35 && projected.depth < best.depth)
+        ) {
+          const world = handle.group.localToWorld(
+            new Vector3(vertex.position.x, vertex.position.y, vertex.position.z),
+          );
+          best = {
+            objectId,
+            vertexId,
+            position: v3(world.x, world.y, world.z),
+            score,
+            depth: projected.depth,
+          };
+        }
+      }
+    }
+    return best
+      ? { objectId: best.objectId, vertexId: best.vertexId, position: best.position }
+      : null;
   }
 
   private pickBestEdge(
@@ -2703,35 +3353,157 @@ export class ViewportEngine {
     faceId: FaceId | null,
     xRay: boolean,
   ): EdgeId | null {
-    const candidateVertices =
-      !xRay && faceId
-        ? new Set(
-            handle.renderData.triangleMap
-              .filter((t) => t.faceId === faceId)
-              .flatMap((t) => t.vertexIds),
-          )
-        : null;
+    const hitFaceVerts = faceId
+      ? new Set(
+          handle.renderData.triangleMap
+            .filter((t) => t.faceId === faceId)
+            .flatMap((t) => t.vertexIds),
+        )
+      : null;
     let best: EdgeId | null = null;
-    let distance = PICK_TOLERANCE_PX;
+    let bestScore = Number.POSITIVE_INFINITY;
+    let bestDepth = Number.POSITIVE_INFINITY;
     for (const edge of mesh.edges.values()) {
       const pair = getEdgeVertices(mesh, edge.id);
       if (!pair) continue;
-      if (candidateVertices && !pair.some((id) => candidateVertices.has(id))) continue;
       const a = projectVertex(mesh, handle, pane.camera, viewport, pair[0]!);
       const b = projectVertex(mesh, handle, pane.camera, viewport, pair[1]!);
       if (!a || !b) continue;
       const d = pointSegmentDistance(pointer, a, b);
-      if (d >= distance && !(Math.abs(d - distance) < 0.25 && best && edge.id < best)) continue;
-      if (!xRay) {
-        const midOccluded =
-          this.isWorldPointOccluded(mesh, handle, pane, pair[0]!) &&
-          this.isWorldPointOccluded(mesh, handle, pane, pair[1]!);
-        if (midOccluded) continue;
+      if (d > PICK_TOLERANCE_PX) continue;
+      if (!xRay && this.isEdgeOccluded(mesh, handle, pane, pair[0]!, pair[1]!, a, b, pointer)) {
+        continue;
       }
-      distance = d;
+      const onHitFace = !!hitFaceVerts && pair.every((id) => hitFaceVerts.has(id));
+      const score = d + (onHitFace ? 0 : 2.5);
+      const depth = (a.depth + b.depth) * 0.5;
+      if (!isBetterPick(score, depth, edge.id, bestScore, bestDepth, best)) continue;
+      bestScore = score;
+      bestDepth = depth;
       best = edge.id;
     }
     return best;
+  }
+
+  /** Screen-space face pick when the ray misses, plus trust the ray hit when it lands. */
+  private pickBestFace(
+    mesh: EditableMesh,
+    handle: ObjectRenderHandle,
+    pane: Pane,
+    viewport: ViewportRect,
+    pointer: { x: number; y: number },
+    rayFaceId: FaceId | null,
+    xRay: boolean,
+    selectBackfaces: boolean,
+  ): FaceId | null {
+    if (rayFaceId && mesh.faces.has(rayFaceId)) return rayFaceId;
+
+    let best: FaceId | null = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    let bestDepth = Number.POSITIVE_INFINITY;
+    for (const face of mesh.faces.values()) {
+      const vids = faceVertexIds(mesh, face.id);
+      if (vids.length < 3) continue;
+      const pts: { x: number; y: number; depth: number }[] = [];
+      for (const vid of vids) {
+        const p = projectVertex(mesh, handle, pane.camera, viewport, vid);
+        if (p) pts.push(p);
+      }
+      if (pts.length < 3) continue;
+      let d = 0;
+      if (pointInPolygon(pointer.x, pointer.y, pts)) {
+        d = 0;
+      } else {
+        d = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < pts.length; i++) {
+          const a = pts[i]!;
+          const b = pts[(i + 1) % pts.length]!;
+          d = Math.min(d, pointSegmentDistance(pointer, a, b));
+        }
+      }
+      if (d > PICK_TOLERANCE_PX) continue;
+      if (!xRay && this.isFaceCentroidOccluded(mesh, handle, pane, face.id)) continue;
+      if (!selectBackfaces && this.isFaceBackfacing(mesh, handle, pane, face.id)) continue;
+      const depth = pts.reduce((sum, p) => sum + p.depth, 0) / pts.length;
+      if (!isBetterPick(d, depth, face.id, bestScore, bestDepth, best)) continue;
+      bestScore = d;
+      bestDepth = depth;
+      best = face.id;
+    }
+    return best;
+  }
+
+  private isFaceBackfacing(
+    mesh: EditableMesh,
+    handle: ObjectRenderHandle,
+    pane: Pane,
+    faceId: FaceId,
+  ): boolean {
+    const vids = faceVertexIds(mesh, faceId);
+    if (vids.length < 3) return true;
+    const a = mesh.vertices.get(vids[0]!)?.position;
+    const b = mesh.vertices.get(vids[1]!)?.position;
+    const c = mesh.vertices.get(vids[2]!)?.position;
+    if (!a || !b || !c) return true;
+    const wa = handle.group.localToWorld(new Vector3(a.x, a.y, a.z));
+    const wb = handle.group.localToWorld(new Vector3(b.x, b.y, b.z));
+    const wc = handle.group.localToWorld(new Vector3(c.x, c.y, c.z));
+    const ab = wb.clone().sub(wa);
+    const ac = wc.clone().sub(wa);
+    const normal = ab.cross(ac);
+    pane.camera.updateMatrixWorld(true);
+    const cam = new Vector3();
+    pane.camera.getWorldPosition(cam);
+    return normal.dot(wa.clone().sub(cam)) > 0;
+  }
+
+  private isEdgeOccluded(
+    mesh: EditableMesh,
+    handle: ObjectRenderHandle,
+    pane: Pane,
+    aId: VertexId,
+    bId: VertexId,
+    pa: { x: number; y: number },
+    pb: { x: number; y: number },
+    pointer: { x: number; y: number } | null,
+  ): boolean {
+    const a = mesh.vertices.get(aId)?.position;
+    const b = mesh.vertices.get(bId)?.position;
+    if (!a || !b) return true;
+    let t = 0.5;
+    if (pointer) {
+      const dx = pb.x - pa.x;
+      const dy = pb.y - pa.y;
+      const l2 = dx * dx + dy * dy;
+      t = l2 ? Math.max(0, Math.min(1, ((pointer.x - pa.x) * dx + (pointer.y - pa.y) * dy) / l2)) : 0;
+    }
+    const world = handle.group.localToWorld(
+      new Vector3(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t),
+    );
+    return this.isWorldPosOccluded(handle, pane, world, 0.04);
+  }
+
+  private isFaceCentroidOccluded(
+    mesh: EditableMesh,
+    handle: ObjectRenderHandle,
+    pane: Pane,
+    faceId: FaceId,
+  ): boolean {
+    const vids = faceVertexIds(mesh, faceId);
+    if (!vids.length) return true;
+    let x = 0;
+    let y = 0;
+    let z = 0;
+    for (const id of vids) {
+      const p = mesh.vertices.get(id)?.position;
+      if (!p) return true;
+      x += p.x;
+      y += p.y;
+      z += p.z;
+    }
+    const n = vids.length;
+    const world = handle.group.localToWorld(new Vector3(x / n, y / n, z / n));
+    return this.isWorldPosOccluded(handle, pane, world, 0.05);
   }
 
   /** Visible-only occlusion: reject points clearly behind the front surface. */
@@ -2744,6 +3516,15 @@ export class ViewportEngine {
     const pos = mesh.vertices.get(vertexId)?.position;
     if (!pos) return true;
     const world = handle.group.localToWorld(new Vector3(pos.x, pos.y, pos.z));
+    return this.isWorldPosOccluded(handle, pane, world, 0.02);
+  }
+
+  private isWorldPosOccluded(
+    handle: ObjectRenderHandle,
+    pane: Pane,
+    world: Vector3,
+    bias: number,
+  ): boolean {
     const projected = world.clone().project(pane.camera);
     pane.camera.updateMatrixWorld(true);
     const raycaster = new Raycaster();
@@ -2751,7 +3532,7 @@ export class ViewportEngine {
     const hits = raycaster.intersectObject(handle.mesh, false);
     if (!hits.length) return false;
     const pointDist = raycaster.ray.origin.distanceTo(world);
-    return hits[0]!.distance + 0.02 < pointDist;
+    return hits[0]!.distance + bias < pointDist;
   }
 
   private onPointerLeave = (): void => {
@@ -2769,6 +3550,14 @@ export class ViewportEngine {
       this.terrainBrushPreview.visible = false;
     }
     if (!this.session || this.interacting) return;
+    const drawTool = this.session.tools.getActive();
+    if (drawTool instanceof DrawPolyTool) {
+      drawTool.setViewportVertexPick(null);
+      drawTool.state.hoverVertexId = null;
+      drawTool.state.hoverKind = 'none';
+      drawTool.state.previewPoint = null;
+      drawTool.state.revision += 1;
+    }
     this.session.selection.clearHover();
     if (this.lastHoverKey !== '') {
       this.lastHoverKey = '';
@@ -2808,9 +3597,11 @@ export class ViewportEngine {
     const pointEditMode = this.workspace.curveNodeEditMode;
     const activeId = this.session.selection.state.activeObjectId;
     const object = activeId ? doc.objects.get(activeId) ?? null : null;
+    const vertexBezier = this.workspace.vertexBezierEdit;
     const hasCommittedCurve = !!object && !!readCurveOperation(object.metadata.curveOperation);
     const editNodes =
-      penDrawing || (pointEditMode && (sketchLocked || hasCommittedCurve));
+      penDrawing ||
+      (pointEditMode && (sketchLocked || hasCommittedCurve || !!vertexBezier));
     const showDraftPath = sketchDrawing || penDrawing || (pointEditMode && sketchLocked);
     const curveOptions = {
       editNodes,
@@ -2826,6 +3617,16 @@ export class ViewportEngine {
       );
       return;
     }
+    if (vertexBezier && object && activeId === vertexBezier.objectId) {
+      const mesh = object.meshId ? doc.meshes.get(object.meshId) ?? null : null;
+      this.curveControls.syncMeshBezier(
+        this.handles.get(activeId) ?? null,
+        mesh,
+        vertexBezier,
+        { editNodes: true, selectedIndex: this.workspace.selectedCurvePointIndex },
+      );
+      return;
+    }
     const operation = readCurveOperation(object?.metadata.curveOperation);
     this.curveControls.sync(
       activeId ? this.handles.get(activeId) ?? null : null,
@@ -2838,6 +3639,8 @@ export class ViewportEngine {
     this.unbindPointer();
     const el = this.renderer?.domElement;
     if (!el) return;
+    el.setAttribute('role', 'application');
+    el.setAttribute('aria-label', '3D viewport');
     el.addEventListener('pointermove', this.onPointerMove);
     el.addEventListener('pointerdown', this.onPointerDown, true);
     el.addEventListener('pointerup', this.onPointerUp);
@@ -2863,37 +3666,68 @@ export class ViewportEngine {
     e.preventDefault();
   };
 
+  private applyCameraWheel(e: WheelEvent): void {
+    this.activateNavigationPane(e.clientX, e.clientY);
+    e.preventDefault();
+    const viewId = this.workspace?.activeViewportId;
+    if (!viewId) return;
+    const gesture = classifyWheel(
+      e.deltaX,
+      e.deltaY,
+      e.ctrlKey || e.metaKey,
+      e.shiftKey,
+    );
+    if (gesture.type === 'pan') {
+      this.panViewportByPixels(gesture.dx, gesture.dy, viewId);
+      return;
+    }
+    this.zoomViewportFromWheel(gesture.delta, e.deltaMode, viewId);
+  }
+
   private onWheel = (e: WheelEvent): void => {
+    const cameraChord = e.shiftKey || e.ctrlKey || e.metaKey;
     const tool = this.session?.tools.getActive();
-    if (tool instanceof LoopCutTool && this.session) {
+    if (
+      !cameraChord &&
+      tool instanceof BlockoutVectorTool &&
+      this.session &&
+      (tool instanceof BlockoutSolidTool || tool instanceof BlockoutRoundTool || tool.state.stage === 'width')
+    ) {
+      e.preventDefault();
+      const next = tool.thickness * (e.deltaY < 0 ? 1.12 : 0.89);
+      tool.setThickness(next, this.session.context());
+      this.invalidate();
+      return;
+    }
+    if (!cameraChord && tool instanceof LoopCutTool && this.session) {
       e.preventDefault();
       tool.adjustCutCount(e.deltaY < 0 ? 1 : -1, this.session.context());
       this.interactionOverlay.updateTransform(e, tool.getStatusLine());
       this.invalidate();
       return;
     }
-    if (tool instanceof TerrainSculptTool && this.session) {
+    if (!cameraChord && tool instanceof TerrainSculptTool && this.session) {
       e.preventDefault();
       tool.setRadius(tool.radius * (e.deltaY < 0 ? 1.12 : 0.89), this.session.context());
       this.interactionOverlay.updateTransform(e, tool.statusLine());
       this.invalidate();
       return;
     }
-    if (tool instanceof MeshSculptTool && this.session) {
+    if (!cameraChord && tool instanceof MeshSculptTool && this.session) {
       e.preventDefault();
       tool.setRadius(tool.radius * (e.deltaY < 0 ? 1.12 : 0.89), this.session.context());
       this.interactionOverlay.updateTransform(e, tool.statusLine());
       this.invalidate();
       return;
     }
-    if (tool instanceof TerrainObjectTool && this.session && tool.mode !== 'place') {
+    if (!cameraChord && tool instanceof TerrainObjectTool && this.session) {
       e.preventDefault();
       tool.setRadius(tool.radius * (e.deltaY < 0 ? 1.12 : 0.89), this.session.context());
       this.interactionOverlay.updateTransform(e, tool.statusLine());
       this.invalidate();
       return;
     }
-    if (tool instanceof TerrainFeatureTool && this.session) {
+    if (!cameraChord && tool instanceof TerrainFeatureTool && this.session) {
       e.preventDefault();
       tool.width = Math.max(0.1, Math.min(100, tool.width * (e.deltaY < 0 ? 1.12 : 0.89)));
       tool.revision += 1;
@@ -2901,7 +3735,13 @@ export class ViewportEngine {
       this.invalidate();
       return;
     }
-    this.activateNavigationPane(e.clientX, e.clientY);
+    if (!cameraChord && this.isAnimateShell() && this.animation?.editMode === 'weight') {
+      e.preventDefault();
+      this.animation.adjustWeightBrushRadius(e.deltaY < 0 ? 1.12 : 0.89);
+      this.invalidate();
+      return;
+    }
+    this.applyCameraWheel(e);
   };
 
   private activateNavigationPane(clientX: number, clientY: number): void {
@@ -2948,7 +3788,11 @@ export class ViewportEngine {
       this.workspace.curveNodeEditMode &&
       this.session.selection.state.mode === 'object' &&
       hasCommittedCurve;
-    if (!canEditDraft && !canEditCommitted) return null;
+    const canEditVertexBezier =
+      !!this.workspace.vertexBezierEdit &&
+      this.workspace.curveNodeEditMode &&
+      this.workspace.vertexBezierEdit.objectId === object?.id;
+    if (!canEditDraft && !canEditCommitted && !canEditVertexBezier) return null;
     const pane = this.panes.get(paneId);
     const viewport = this.lastRects.find((rect) => rect.id === paneId);
     if (!pane || !viewport) return null;
@@ -3004,19 +3848,25 @@ export class ViewportEngine {
     const objectId = this.session.selection.state.activeObjectId;
     const object = objectId ? this.session.document.objects.get(objectId) : null;
     const mesh = object?.meshId ? this.session.document.meshes.get(object.meshId) : null;
+    const vertexBezier = this.workspace.vertexBezierEdit;
+    const vertexLocal =
+      vertexBezier && object && mesh && vertexBezier.objectId === object.id
+        ? vertexBezierControlPoint(mesh, vertexBezier, target)
+        : null;
     const operation = readCurveOperation(object?.metadata.curveOperation);
-    const handle = objectId ? this.handles.get(objectId) : null;
-    if (!object || !mesh || !operation || !handle) return false;
     const localPoint =
-      target.kind === 'anchor'
-        ? operation.points[target.index]
+      vertexLocal ??
+      (target.kind === 'anchor'
+        ? operation?.points[target.index]
         : target.kind === 'handle-in'
-          ? operation.handlesIn[target.index]
-          : operation.handlesOut[target.index];
+          ? operation?.handlesIn[target.index]
+          : operation?.handlesOut[target.index]);
+    const handle = objectId ? this.handles.get(objectId) : null;
+    if (!object || !mesh || !localPoint || !handle) return false;
     const axes = this.getCameraAxes(paneId);
-    if (!localPoint || !axes) return false;
+    if (!axes) return false;
     const world = handle.group.localToWorld(new Vector3(localPoint.x, localPoint.y, localPoint.z));
-    this.workspace.setSelectedCurvePointIndex(target.index);
+    if (target.kind === 'anchor') this.workspace.setSelectedCurvePointIndex(target.index);
     this.curvePointDrag = {
       paneId,
       pointerId: e.pointerId,
@@ -3025,8 +3875,15 @@ export class ViewportEngine {
       planeOrigin: v3(world.x, world.y, world.z),
       planeNormal: { ...axes.forward },
       beforeMesh: mesh,
-      beforeMetadata: object.metadata.curveOperation!,
+      beforeMetadata: object.metadata.curveOperation ?? '',
       operation,
+      vertexBezier: vertexLocal && vertexBezier
+        ? {
+            beforePositions: snapshotVertexPositions(mesh, [...mesh.vertices.keys()]),
+            beforeMeta: object.metadata[VERTEX_BEZIER_META],
+            affectedIds: [...mesh.vertices.keys()],
+          }
+        : undefined,
     };
     e.preventDefault();
     (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -3076,6 +3933,23 @@ export class ViewportEngine {
     const local = handle.group.worldToLocal(new Vector3(world.x, world.y, world.z));
     const next = v3(local.x, local.y, local.z);
     const target = drag.target;
+    if (drag.vertexBezier && this.workspace?.vertexBezierEdit) {
+      const mesh = object.meshId ? this.session.document.meshes.get(object.meshId) : null;
+      if (!mesh) return;
+      const nextState = applyVertexBezierControl(
+        mesh,
+        this.workspace.vertexBezierEdit,
+        target,
+        next,
+        { alignOpposite: !e.altKey },
+      );
+      object.metadata[VERTEX_BEZIER_META] = serializeVertexBezierState(nextState);
+      this.workspace.setVertexBezierEdit(nextState);
+      this.session.document.dirty = true;
+      this.session.requestRedraw();
+      return;
+    }
+    if (!drag.operation) return;
     if (target.kind === 'anchor') {
       const previous = drag.operation.points[target.index]!;
       const delta = subVec3(next, previous);
@@ -3113,11 +3987,42 @@ export class ViewportEngine {
     const object = this.session.document.objects.get(drag.objectId);
     const afterMesh = object?.meshId ? this.session.document.meshes.get(object.meshId) : null;
     const afterMetadata = object?.metadata.curveOperation;
+    const vertexDrag = drag.vertexBezier;
+    const afterBezier = object?.metadata[VERTEX_BEZIER_META];
+    const afterPositions = vertexDrag && afterMesh
+      ? snapshotVertexPositions(afterMesh, vertexDrag.affectedIds)
+      : null;
     this.curvePointDrag = null;
     this.workspace.input.end('tool');
     this.syncOrbitEnabled();
     if (this.renderer) this.renderer.domElement.style.cursor = '';
-    if (!object || !afterMesh || !afterMetadata) return;
+    if (!object) return;
+    if (vertexDrag && afterMesh && afterPositions) {
+      let applied = true;
+      this.session.history.execute({
+        name: drag.target.kind === 'anchor' ? 'Move Vertex Anchor' : 'Move Vertex Bézier Handle',
+        execute: () => {
+          if (applied) return;
+          const mesh = object.meshId ? this.session!.document.meshes.get(object.meshId) : null;
+          if (mesh) restoreVertexPositions(mesh, afterPositions);
+          if (afterBezier) object.metadata[VERTEX_BEZIER_META] = afterBezier;
+          else delete object.metadata[VERTEX_BEZIER_META];
+          this.session!.document.dirty = true;
+          applied = true;
+        },
+        undo: () => {
+          const mesh = object.meshId ? this.session!.document.meshes.get(object.meshId) : null;
+          if (mesh) restoreVertexPositions(mesh, vertexDrag.beforePositions);
+          if (vertexDrag.beforeMeta) object.metadata[VERTEX_BEZIER_META] = vertexDrag.beforeMeta;
+          else delete object.metadata[VERTEX_BEZIER_META];
+          this.session!.document.dirty = true;
+          applied = false;
+        },
+      });
+      this.session.requestRedraw();
+      return;
+    }
+    if (!afterMesh || !afterMetadata) return;
     let applied = true;
     this.session.history.execute({
       name: drag.target.kind === 'anchor' ? 'Move Curve Point' : 'Move Bézier Handle',
@@ -3139,7 +4044,7 @@ export class ViewportEngine {
   }
 
   private tryStartGizmoTransform(e: PointerEvent, paneId: ViewId): boolean {
-    if (!this.host || !this.session || !this.workspace || this.isTextureFaceEditing()) return false;
+    if (!this.host || !this.session || !this.workspace || this.isTextureFaceEditing() || this.isAnimateShell()) return false;
     const gizmoHit = this.pickGizmo(e, paneId);
     if (!gizmoHit) return false;
     e.preventDefault();
@@ -3170,6 +4075,125 @@ export class ViewportEngine {
     return true;
   }
 
+  private isAnimateShell(): boolean {
+    const mode = this.workspace?.shellMode;
+    return (mode === 'animate' || mode === 'rig') && !!this.animation;
+  }
+
+  private cameraPlaneWorldDelta(paneId: ViewId, dx: number, dy: number): { x: number; y: number; z: number } | null {
+    const pane = this.panes.get(paneId);
+    if (!pane || (dx === 0 && dy === 0)) return null;
+    const right = new Vector3();
+    const up = new Vector3();
+    pane.camera.updateMatrixWorld(true);
+    pane.camera.matrixWorld.extractBasis(right, up, new Vector3());
+    const factor = 0.012;
+    right.multiplyScalar(dx * factor);
+    up.multiplyScalar(-dy * factor);
+    return { x: right.x + up.x, y: right.y + up.y, z: right.z + up.z };
+  }
+
+  private paneRaycaster(e: PointerEvent, paneId: ViewId): Raycaster | null {
+    if (!this.host) return null;
+    const pane = this.panes.get(paneId);
+    const viewport = this.lastRects.find((r) => r.id === paneId);
+    if (!pane || !viewport) return null;
+    const hostRect = this.host.getBoundingClientRect();
+    const localX = e.clientX - hostRect.left - viewport.x;
+    const localY = e.clientY - hostRect.top - viewport.y;
+    const ndc = new Vector2(
+      (localX / Math.max(1, viewport.width)) * 2 - 1,
+      -(localY / Math.max(1, viewport.height)) * 2 + 1,
+    );
+    pane.camera.updateMatrixWorld(true);
+    const raycaster = new Raycaster();
+    raycaster.setFromCamera(ndc, pane.camera);
+    return raycaster;
+  }
+
+  private tryPickAnimationBone(e: PointerEvent, paneId: ViewId): boolean {
+    return this.tryPickAnimationTarget(e, paneId) !== null;
+  }
+
+  private tryPickAnimationTarget(e: PointerEvent, paneId: ViewId): 'object' | 'bone' | 'head' | 'tail' | null {
+    const raycaster = this.paneRaycaster(e, paneId);
+    if (!raycaster || !this.animation) return null;
+    const objectId = this.sceneHelpers.pick(raycaster);
+    if (objectId) {
+      this.animation.selectObject(objectId);
+      return 'object';
+    }
+    const picked = this.bonesOverlay.pickEdit(raycaster);
+    if (!picked) return null;
+    this.animation.selectBone(picked.boneId);
+    return picked.handle === 'shaft' ? 'bone' : picked.handle;
+  }
+
+  private intersectAnimationMesh(e: PointerEvent, paneId: ViewId): { x: number; y: number; z: number } | null {
+    const raycaster = this.paneRaycaster(e, paneId);
+    if (!raycaster) return null;
+    const preview = this.rigPreviewSynchronizer.pickMeshes();
+    const meshes = preview.length > 0
+      ? preview
+      : [...this.handles.values()].map((handle) => handle.mesh);
+    const hit = raycaster.intersectObjects(meshes, false)[0];
+    return hit ? { x: hit.point.x, y: hit.point.y, z: hit.point.z } : null;
+  }
+
+  private tryHandleAnimationPointerDown(e: PointerEvent, paneId: ViewId): boolean {
+    if (!this.isAnimateShell() || !this.animation || !this.workspace) return false;
+
+    if (this.animation.editMode === 'weight') {
+      const hit = this.animation.selectedBoneId ? this.intersectAnimationMesh(e, paneId) : null;
+      if (hit) {
+        e.preventDefault();
+        (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+        this.animationWeightPaint = true;
+        if (e.ctrlKey || e.altKey) {
+          this.animationWeightPaintSavedAdd = this.animation.weightBrushAdd;
+          this.animation.weightBrushAdd = false;
+        }
+        this.workspace.input.begin('tool');
+        this.syncOrbitEnabled();
+        this.animation.paintWeightsAt(hit);
+        this.invalidate();
+        return true;
+      }
+      const picked = this.tryPickAnimationTarget(e, paneId);
+      if (!picked || picked === 'object') return false;
+      e.preventDefault();
+      this.invalidate();
+      return true;
+    }
+
+    if (this.animation.editMode === 'pose' || this.animation.editMode === 'edit') {
+      const picked = this.tryPickAnimationTarget(e, paneId);
+      if (!picked) return false;
+      e.preventDefault();
+      if (picked === 'bone' && this.animation.editMode === 'pose') {
+        (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+        this.animationPoseDrag = { lastX: e.clientX, lastY: e.clientY };
+        this.workspace.input.begin('tool');
+        this.syncOrbitEnabled();
+      }
+      if ((picked === 'head' || picked === 'tail') && this.animation.editMode === 'edit') {
+        (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+        this.animationBoneEditDrag = {
+          lastX: e.clientX,
+          lastY: e.clientY,
+          paneId,
+          handle: picked,
+        };
+        this.workspace.input.begin('tool');
+        this.syncOrbitEnabled();
+      }
+      this.invalidate();
+      return true;
+    }
+
+    return false;
+  }
+
   private pickGizmo(e: PointerEvent, paneId: ViewId) {
     if (!this.host || !this.session) return null;
     if (this.session.transform.prefs.gizmoMode === 'select') return null;
@@ -3177,6 +4201,10 @@ export class ViewportEngine {
     const pane = this.panes.get(paneId);
     const viewport = this.lastRects.find((r) => r.id === paneId);
     if (!pane || !viewport) return null;
+
+    // Always synchronize the gizmo with THIS pane's camera, orientation, and viewport size before picking
+    this.syncGizmoForCamera(pane.camera, paneId, viewport.height);
+
     const hostRect = this.host.getBoundingClientRect();
     const localX = e.clientX - hostRect.left - viewport.x;
     const localY = e.clientY - hostRect.top - viewport.y;
@@ -3191,7 +4219,7 @@ export class ViewportEngine {
       y: localY,
       width: viewport.width,
       height: viewport.height,
-      thresholdPx: 16,
+      thresholdPx: 24,
     });
   }
 
@@ -3208,7 +4236,7 @@ export class ViewportEngine {
     if (this.session.selection.state.mode === 'object') {
       this.sceneSynchronizer.syncTransforms();
     } else {
-      if (this.scene) this.sceneSynchronizer.sync(this.scene);
+      this.sceneSynchronizer.syncLivePositions();
       this.syncOverlays();
     }
     this.syncGizmo();
@@ -3272,10 +4300,11 @@ export class ViewportEngine {
     if (!this.workspace) return;
     const viewId = this.workspace.hoveredViewportId ?? this.workspace.activeViewportId;
     const pane = this.panes.get(viewId);
-    if (pane) this.syncGizmoForCamera(pane.camera, viewId);
+    const viewport = this.lastRects.find((r) => r.id === viewId);
+    if (pane) this.syncGizmoForCamera(pane.camera, viewId, viewport?.height);
   }
 
-  private syncGizmoForCamera(camera: Camera, viewId: ViewId): void {
+  private syncGizmoForCamera(camera: Camera, viewId: ViewId, viewportHeight?: number): void {
     if (!this.session) return;
     const sel = this.session.selection.state;
     const activeTool = this.session.tools.getActive();
@@ -3284,13 +4313,24 @@ export class ViewportEngine {
       activeTool instanceof MeshSculptTool ||
       activeTool instanceof TerrainObjectTool ||
       activeTool instanceof TerrainFeatureTool;
+    const lockedSelection =
+      sel.mode === 'object' &&
+      [...sel.selectedObjectIds].some((id) => this.session!.document.objects.get(id)?.locked);
     const show =
       !terrainEditing &&
       !this.isTextureFaceEditing() &&
+      !this.isAnimateShell() &&
+      !lockedSelection &&
+      !this.workspace?.vertexBezierEdit &&
       selectionHasTransformTarget(sel);
 
     // Translation follows the selection; rotation and scale keep a stable pivot.
     const live = this.session.transform.session;
+    const isOriginMode = this.session.transform.prefs.gizmoMode === 'origin' && sel.mode === 'object';
+    const originObjectId = sel.activeObjectId ?? [...sel.selectedObjectIds][0] ?? null;
+    const originPivot = originObjectId
+      ? getObjectWorldTransform(this.session.document, originObjectId).position
+      : null;
     const pivot = live?.status === 'active'
       ? live.type === 'translate'
         ? {
@@ -3299,18 +4339,21 @@ export class ViewportEngine {
             z: live.pivotPosition.z + live.currentDelta.translation.z,
           }
         : live.pivotPosition
-      : show
+      : isOriginMode && originPivot
+        ? originPivot
+        : show
         ? computePivot(this.session.document, sel, this.session.transform.prefs.pivotMode)
         : { x: 0, y: 0, z: 0 };
     const session = this.session.transform.session;
     const basis = session
       ? session.orientationBasis
-      : buildOrientationBasis(
+      : orientedBasisForSelection(
           this.session.document,
           sel,
           this.session.transform.prefs.orientation,
           this.getCameraAxes(viewId),
           false,
+          pivot,
         );
 
     this.gizmo.sync(
@@ -3319,7 +4362,11 @@ export class ViewportEngine {
       camera,
       this.session.transform.prefs.gizmoMode,
       show,
+      viewportHeight,
     );
+
+    const showOrigin = show && isOriginMode;
+    this.originOverlay.sync(pivot, camera, viewportHeight, showOrigin);
 
     if (session) {
       this.gizmo.setConstraintHighlight(session.axisConstraint, session.type);
@@ -3332,35 +4379,106 @@ export class ViewportEngine {
     if (!this.attached || !this.session || !this.scene) return;
     const session = this.session;
     this.sceneSynchronizer.sync(this.scene);
+    if (this.animation) {
+      this.rigPreviewSynchronizer.setPreviewTime(this.animation.playbackTime, this.animation.poseScratch);
+      this.rigPreviewSynchronizer.setDisplay(
+        this.animation.viewportDisplayMode,
+        this.isAnimateShell() && this.animation.editMode === 'weight'
+          ? this.animation.selectedBoneId
+          : null,
+        this.isAnimateShell()
+          && this.animation.editMode === 'weight'
+          && this.animation.weightXray,
+      );
+    }
     this.rigPreviewSynchronizer.sync(this.scene, session);
+    if (this.isAnimateShell() && this.animation) {
+      this.bonesOverlay.sync(this.animation);
+      this.sceneHelpers.sync(this.animation);
+    } else {
+      this.bonesOverlay.clear();
+      this.sceneHelpers.clear();
+    }
+    if (this.workspace?.shellMode === 'blockout' && session.blockoutReference) {
+      this.referenceImageOverlay.update(overlayStateWithoutObjects(session.blockoutReference));
+    } else {
+      this.referenceImageOverlay.update(null);
+    }
     const shadingMode = this.workspace?.getShadingMode() ?? 'material';
+    const displayTextures = this.workspace?.getDisplayTextures() ?? true;
     for (const handle of this.handles.values()) {
-      applyViewportRenderStyle(handle, shadingMode);
+      applyViewportRenderStyle(handle, shadingMode, { displayTextures });
     }
     const tool = session.tools.getActive();
     if (!(tool instanceof TileDrawTool) && this.tileDrawOverlay.group.visible) {
       this.tileDrawOverlay.update(null, this.primitivePreview.revision);
     }
+    if (!(tool instanceof DrawPolyTool)) {
+      this.lastDrawSyncKey = '';
+    }
     if (tool instanceof CreatePrimitiveTool) {
       if (this.primitivePreview.revision !== tool.state.revision) {
-        this.primitivePreview.update(tool.getPreviewMesh(), tool.getCage(true), tool.state.revision);
+        const idle = tool.state.stage === 'idle';
+        this.primitivePreview.update(
+          tool.getPreviewMesh(),
+          idle ? tool.getIdleCage() : tool.getCage(true),
+          tool.state.revision,
+          idle ? undefined : this.primitivePreviewAppearance(session),
+        );
       }
     } else if (tool instanceof CreateDoodleTool) {
       if (this.primitivePreview.revision !== tool.state.revision) {
         this.primitivePreview.update(tool.getPreviewMesh(), null, tool.state.revision);
       }
     } else if (tool instanceof DrawPolyTool) {
-      if (this.primitivePreview.revision !== tool.state.revision) {
+      const targetObjId =
+        tool.state.meshObjectId ??
+        session.context().selection.state.activeObjectId ??
+        [...session.context().selection.state.selectedObjectIds][0] ??
+        null;
+      const targetObj = targetObjId ? session.context().document.objects.get(targetObjId) : null;
+      const t = targetObj?.transform;
+      const tKey = t
+        ? `${t.position.x.toFixed(4)},${t.position.y.toFixed(4)},${t.position.z.toFixed(4)}|${t.rotation.x.toFixed(4)},${t.rotation.y.toFixed(4)},${t.rotation.z.toFixed(4)}|${t.scale.x.toFixed(4)},${t.scale.y.toFixed(4)},${t.scale.z.toFixed(4)}`
+        : 'no-obj';
+      const meshKey = targetObj?.meshId
+        ? (session.context().document.meshes.get(targetObj.meshId)?.vertices.size ?? 0)
+        : 0;
+      const syncKey = `${tool.state.revision}:${tKey}:${meshKey}`;
+      if (this.lastDrawSyncKey !== syncKey) {
+        this.lastDrawSyncKey = syncKey;
+        this.drawSyncCounter += 1;
         const info = tool.getPreviewInfo(session.context());
-        this.primitivePreview.updatePolyline(info.points, tool.state.revision, {
+        this.primitivePreview.updatePolyline(info.points, this.drawSyncCounter, {
           chainCount: info.chainCount,
           canClose: info.canClose,
           allVertexPoints: info.allVertexPoints,
           allEdgeSegments: info.allEdgeSegments,
           chainPoints: info.chainPoints,
           createdPoints: info.createdPoints,
+          hoverPoint: info.hoverPoint,
+          hoverKind: info.hoverKind,
           showFaceGhost: info.showFaceGhost,
         });
+      }
+    } else if (tool instanceof BlockoutVectorTool) {
+      if (this.primitivePreview.revision !== tool.state.revision) {
+        const solid = tool.getPreviewMesh();
+        if (solid) {
+          this.primitivePreview.update(
+            solid,
+            null,
+            tool.state.revision,
+            this.primitivePreviewAppearance(session),
+          );
+        } else {
+          const info = tool.getPreviewInfo();
+          this.primitivePreview.updatePolyline(info.chainPoints, tool.state.revision, {
+            chainCount: info.chainPoints.length,
+            canClose: info.canClose,
+            showFaceGhost: false,
+          });
+        }
       }
     } else if (tool instanceof KnifeTool) {
       if (this.primitivePreview.revision !== tool.state.revision) {
@@ -3382,6 +4500,19 @@ export class ViewportEngine {
     this.syncOverlays();
     this.syncGizmo();
     this.syncOrbitEnabled();
+  }
+
+  private primitivePreviewAppearance(session: EditorSession) {
+    const materialId = ensureDefaultPlaceholderMaterial(session.document);
+    const material = session.document.materials.get(materialId);
+    if (!material) return undefined;
+    return {
+      material,
+      assets: {
+        textures: session.document.textures,
+        images: session.document.images,
+      },
+    };
   }
 
   private resize(): void {
@@ -3479,7 +4610,7 @@ export class ViewportEngine {
       }
 
       this.renderer.setScissorTest(true);
-      this.renderer.setClearColor(0x0e1116, 1);
+      this.renderer.setClearColor(VIEWPORT_CLEAR, 1);
       this.renderer.clear(true, true, true);
 
       const visibleIds = new Set(this.lastRects.map((r) => r.id));
@@ -3492,9 +4623,7 @@ export class ViewportEngine {
         this.renderer.setViewport(rect.x, rect.webglY, rect.width, rect.height);
         this.renderer.setScissor(rect.x, rect.webglY, rect.width, rect.height);
 
-        const hovered = this.workspace.hoveredViewportId === rect.id;
-        const active = this.workspace.activeViewportId === rect.id;
-        this.renderer.setClearColor(hovered || active ? 0x121820 : 0x0e1116, 1);
+        this.renderer.setClearColor(VIEWPORT_CLEAR, 1);
         this.renderer.clear(true, true, true);
 
         for (const p of this.panes.values()) {
@@ -3504,8 +4633,17 @@ export class ViewportEngine {
             this.workspace.preferences.viewports[p.id].gridVisible;
         }
         this.syncPaneGrid(pane);
+        this.world?.sync(pane.camera);
+        if (this.shadowReceiver) {
+          this.shadowReceiver.visible = pane.camera instanceof PerspectiveCamera;
+        }
+        if (this.scene) {
+          this.scene.fog = pane.camera instanceof PerspectiveCamera ? this.sceneFog : null;
+        }
 
-        this.syncGizmoForCamera(pane.camera, rect.id);
+        this.syncGizmoForCamera(pane.camera, rect.id, rect.height);
+        this.referenceImageOverlay.applyVisibilityForPane(rect.id);
+        this.applyBlockoutReferenceVisibility(rect.id);
         this.renderer.render(this.scene, pane.camera);
       }
 
@@ -3600,11 +4738,15 @@ export class ViewportEngine {
     if (!this.modelPlacement || !this.session || this.session.document.kind !== 'level') return false;
     if (e.button !== 0 || e.ctrlKey || e.metaKey || e.altKey) return false;
 
-    const point = this.groundRayHit(e, paneId);
+    const surface =
+      this.workspace?.getDrawOnSurfaces() ? this.faceConstructionPlane(e, paneId) : null;
+    const point = surface
+      ? { ...surface.plane.origin }
+      : this.groundRayHit(e, paneId);
     if (!point) return false;
 
     const snap = this.session.document.settings.snapIncrement ?? 0.25;
-    if (snap > 0) {
+    if (snap > 0 && !surface) {
       point.x = Math.round(point.x / snap) * snap;
       point.y = Math.round(point.y / snap) * snap;
       point.z = Math.round(point.z / snap) * snap;
@@ -3670,7 +4812,7 @@ function projectVertex(
   camera: Camera,
   viewport: ViewportRect,
   vertexId: VertexId,
-): { x: number; y: number } | null {
+): { x: number; y: number; depth: number } | null {
   const p = mesh.vertices.get(vertexId)?.position;
   if (!p) return null;
   const q = handle.group.localToWorld(new Vector3(p.x, p.y, p.z)).project(camera);
@@ -3678,7 +4820,44 @@ function projectVertex(
   return {
     x: viewport.x + ((q.x + 1) * viewport.width) / 2,
     y: viewport.y + ((1 - q.y) * viewport.height) / 2,
+    depth: q.z,
   };
+}
+
+function isBetterPick(
+  score: number,
+  depth: number,
+  id: string,
+  bestScore: number,
+  bestDepth: number,
+  bestId: string | null,
+): boolean {
+  if (score < bestScore - 0.5) return true;
+  if (score > bestScore + 0.5) return false;
+  if (depth < bestDepth - 1e-4) return true;
+  if (depth > bestDepth + 1e-4) return false;
+  return !bestId || id < bestId;
+}
+
+function pointInPolygon(
+  x: number,
+  y: number,
+  pts: { x: number; y: number }[],
+): boolean {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; i++) {
+    const pi = pts[i]!;
+    const pj = pts[j]!;
+    if (pi.y === pj.y) {
+      j = i;
+      continue;
+    }
+    if ((pi.y > y) !== (pj.y > y) && x < ((pj.x - pi.x) * (y - pi.y)) / (pj.y - pi.y) + pi.x) {
+      inside = !inside;
+    }
+    j = i;
+  }
+  return inside;
 }
 
 function pointSegmentDistance(

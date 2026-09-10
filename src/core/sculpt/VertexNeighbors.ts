@@ -2,6 +2,23 @@ import { addVec3, scaleVec3, type Vec3 } from '@/core/math/Vec3';
 import { faceVertexIds } from '@/core/mesh/EditableMesh';
 import type { EditableMesh, VertexId } from '@/core/mesh/types';
 
+type NeighborCacheEntry = {
+  topologyVersion: number;
+  map: Map<VertexId, VertexId[]>;
+};
+
+const neighborMapCache = new Map<string, NeighborCacheEntry>();
+
+export function getCachedVertexNeighborMap(mesh: EditableMesh): Map<VertexId, VertexId[]> {
+  const cached = neighborMapCache.get(mesh.id);
+  if (cached && cached.topologyVersion === mesh.topologyVersion) {
+    return cached.map;
+  }
+  const map = buildVertexNeighborMap(mesh);
+  neighborMapCache.set(mesh.id, { topologyVersion: mesh.topologyVersion, map });
+  return map;
+}
+
 export function buildVertexNeighborMap(mesh: EditableMesh): Map<VertexId, VertexId[]> {
   const neighbors = new Map<VertexId, Set<VertexId>>();
   for (const vertex of mesh.vertices.values()) {

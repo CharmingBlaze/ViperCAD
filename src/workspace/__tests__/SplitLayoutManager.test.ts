@@ -4,6 +4,7 @@ import { SplitLayoutManager } from '@/workspace/SplitLayoutManager';
 describe('SplitLayoutManager CSS rects', () => {
   it('keeps rectangles in CSS pixels and computes webglY from container height', () => {
     const layout = new SplitLayoutManager();
+    layout.restoreQuad();
     layout.setSplits({ horizontal: 0.5, upperVertical: 0.5, lowerVertical: 0.5 });
     const width = 1792;
     const height = 790;
@@ -24,6 +25,7 @@ describe('SplitLayoutManager CSS rects', () => {
 
   it('hitTest uses the same CSS rectangles', () => {
     const layout = new SplitLayoutManager();
+    layout.restoreQuad();
     expect(layout.hitTest(10, 10, 1000, 800)).toBe('top');
     expect(layout.hitTest(900, 10, 1000, 800)).toBe('persp');
     expect(layout.hitTest(10, 700, 1000, 800)).toBe('front');
@@ -54,10 +56,21 @@ describe('SplitLayoutManager CSS rects', () => {
 
   it('toggleMaximize restores quad rectangles', () => {
     const layout = new SplitLayoutManager();
+    layout.restoreQuad();
     layout.toggleMaximize('persp');
     expect(layout.computeRects(800, 600)).toHaveLength(1);
     layout.toggleMaximize();
     expect(layout.mode).toBe('quad');
     expect(layout.computeRects(800, 600)).toHaveLength(4);
+  });
+
+  it('defaults to a full-size perspective view', () => {
+    const layout = new SplitLayoutManager();
+    const rects = layout.computeRects(1200, 800);
+    expect(layout.mode).toBe('maximized');
+    expect(rects).toHaveLength(1);
+    expect(rects[0]!.id).toBe('persp');
+    expect(rects[0]!.width).toBe(1200);
+    expect(rects[0]!.height).toBe(800);
   });
 });

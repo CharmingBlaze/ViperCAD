@@ -6,7 +6,7 @@ import {
   v3,
 } from '@/core/math/Vec3';
 import { faceHalfEdgeIds, faceVertexIds } from './EditableMesh';
-import type { EditableMesh, FaceCornerId, FaceId, VertexId } from './types';
+import type { EditableMesh, EdgeId, FaceCornerId, FaceId, HalfEdgeId, VertexId } from './types';
 
 /** Newell's method — robust for n-gons. */
 export function computeFaceNormal(mesh: EditableMesh, faceId: FaceId): Vec3 {
@@ -32,6 +32,48 @@ export function computeAllFaceNormals(mesh: EditableMesh): Map<FaceId, Vec3> {
     map.set(face.id, computeFaceNormal(mesh, face.id));
   }
   return map;
+}
+
+/** Average of incident face normals for a single vertex (edit-mode Normal orientation). */
+export function computeVertexNormal(mesh: EditableMesh, vertexId: VertexId): Vec3 {
+  let nx = 0;
+  let ny = 0;
+  let nz = 0;
+  let count = 0;
+  for (const face of mesh.faces.values()) {
+    if (!faceVertexIds(mesh, face.id).includes(vertexId)) continue;
+    const n = computeFaceNormal(mesh, face.id);
+    nx += n.x;
+    ny += n.y;
+    nz += n.z;
+    count += 1;
+  }
+  if (!count) return v3(0, 1, 0);
+  return normalizeVec3(v3(nx, ny, nz));
+}
+
+/** Average of the one or two faces that share an edge. */
+export function computeEdgeNormal(mesh: EditableMesh, edgeId: EdgeId): Vec3 {
+  const edge = mesh.edges.get(edgeId);
+  if (!edge) return v3(0, 1, 0);
+  let nx = 0;
+  let ny = 0;
+  let nz = 0;
+  let count = 0;
+  const add = (heId: HalfEdgeId | null) => {
+    if (!heId) return;
+    const faceId = mesh.halfEdges.get(heId)?.faceId;
+    if (!faceId) return;
+    const n = computeFaceNormal(mesh, faceId);
+    nx += n.x;
+    ny += n.y;
+    nz += n.z;
+    count += 1;
+  };
+  add(edge.halfEdgeAId);
+  add(edge.halfEdgeBId);
+  if (!count) return v3(0, 1, 0);
+  return normalizeVec3(v3(nx, ny, nz));
 }
 
 /**

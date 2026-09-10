@@ -51,4 +51,47 @@ describe('MeshSculptTool', () => {
       .map((vertex) => vertex.position.y);
     expect(Math.max(...restoredTop)).toBeCloseTo(Math.max(...beforeTop), 4);
   });
+
+  it('switches to smooth when Shift is held during stroke', () => {
+    const session = new EditorSession();
+    const mesh = buildSphere({ radius: 1, widthSegments: 16, heightSegments: 12, name: 'Sphere' });
+    const { objectId } = commitMeshObject(session.document, mesh, { name: 'Sphere' });
+    session.selection.selectObjects([objectId], 'replace');
+    session.tools.setActive('mesh-sculpt', session.context());
+    const tool = session.tools.get('mesh-sculpt') as MeshSculptTool;
+    tool.mode = 'clay';
+
+    const p = pointer({ x: 0, y: 0.8, z: 0 });
+    p.shiftKey = true; // Hold shift
+
+    tool.begin(p, session.context());
+    tool.update(p, session.context());
+    tool.endStroke(session.context());
+
+    expect(validateMeshFull(mesh).issues.filter((issue) => issue.severity === 'error')).toEqual([]);
+  });
+
+  it('inverts operation when Ctrl is held', () => {
+    const session = new EditorSession();
+    const mesh = buildSphere({ radius: 1, widthSegments: 16, heightSegments: 12, name: 'Sphere' });
+    const { objectId } = commitMeshObject(session.document, mesh, { name: 'Sphere' });
+    session.selection.selectObjects([objectId], 'replace');
+    session.tools.setActive('mesh-sculpt', session.context());
+    const tool = session.tools.get('mesh-sculpt') as MeshSculptTool;
+    tool.mode = 'draw';
+    tool.radius = 0.8;
+    tool.strength = 0.2;
+
+    const beforeTop = Math.max(...[...mesh.vertices.values()].map((v) => v.position.y));
+
+    const p = pointer({ x: 0, y: 0.8, z: 0 });
+    p.ctrlKey = true; // Invert = Carve inward
+
+    tool.begin(p, session.context());
+    tool.update(p, session.context());
+    tool.endStroke(session.context());
+
+    const afterTop = Math.max(...[...mesh.vertices.values()].map((v) => v.position.y));
+    expect(afterTop).toBeLessThanOrEqual(beforeTop);
+  });
 });

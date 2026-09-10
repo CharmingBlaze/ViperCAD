@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { floodFill, getPixel } from '@/core/image/PixelEditor';
+import { applyPaintTarget, clonePaintTarget, getPaintPixel, getPaintTarget } from '@/core/image/PaintLayers';
 import { PixelStrokeRecorder } from '@/core/image/PixelStroke';
 import {
   brushColourForTool,
@@ -8,7 +9,8 @@ import {
   stampBrushLine,
 } from '@/core/image/paintBrush';
 import type { FaceCornerId, FaceId } from '@/core/mesh/types';
-import { faceCornerIds } from '@/core/mesh/EditableMesh';
+import { cloneMeshPreserveIds, faceCornerIds, restoreMeshFromSnapshot } from '@/core/mesh/EditableMesh';
+import { flipFaces } from '@/core/mesh/ops/basic';
 import { resolveActiveTexture } from '@/core/texture/resolveActiveTexture';
 import {
   boundsOfUvs,
@@ -52,6 +54,16 @@ import { v3 } from '@/core/math/Vec3';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';
 import { editorCamera } from '@/workspace/TextureWorkspace';
 import { UvEditorSidePanel } from '@/app/UvEditorSidePanel';
+import { UvInspectorPortal } from '@/app/UvInspectorHost';
+import { ViewportNavToolbar } from '@/app/ViewportNavToolbar';
+import type { ViewportNavMode } from '@/workspace/WorkspaceController';
+import {
+  canvasNavKind,
+  classifyPointerButton,
+  classifyWheel,
+  wheelZoomPixels,
+} from '@/app/viewport/ViewportInputEngine';
+import { BlenderIcon } from '@/components/BlenderIcon';
 import { pushToast } from '@/app/Toast';
 import { FloatingAtlasTilePanel } from '@/app/FloatingAtlasTilePanel';
 import { applyAtlasTileToFaces, buildAtlasTileGrid } from '@/core/uv/AtlasUv';
@@ -70,13 +82,20 @@ import {
 } from '@/app/uvEditor/atlasTileLive';
 import { drawUvPixelCanvas } from '@/app/uvEditor/drawUvPixelCanvas';
 import { analyseUvs } from '@/core/uv/UvDiagnostics';
+import { ensureEditableUvs } from '@/core/uv/EnsurePaintableUvs';
+import type { ImageAsset } from '@/core/document/types';
 import {
   hexToRgba,
-  nearestZoomIndex,
+  PIXEL_TOOL_HOTKEYS,
+  PIXEL_TOOL_LABELS,
+  PIXEL_TOOLS,
   resolveSelectedCorners,
   rgbaToHex,
+  shiftShadeColor,
   uniqueFacesForCorners,
-  UV_ZOOM_STEPS as ZOOM_STEPS,
+  UV_ZOOM_MAX,
+  UV_ZOOM_MIN,
+  zoomCameraAt,
 } from '@/app/uvEditor/uvEditorUtils';
 
 type Props = {
@@ -109,6 +128,24 @@ type MarqueeState = {
   shiftKey: boolean;
 };
 
+type PixelShapeDrag = {
+  start: { x: number; y: number };
+  current: { x: number; y: number };
+  useBackground: boolean;
+};
+
+// UV editing does not depend on a material image. This transparent guide gives
+// untextured meshes a stable 0–1 canvas without creating a material or asset.
+const UV_GUIDE_IMAGE: ImageAsset = {
+  id: '__uv-guide__',
+  name: 'UV guide (no texture assigned)',
+  width: 256,
+  height: 256,
+  colourMode: 'rgba',
+  pixels: new Uint8ClampedArray(256 * 256 * 4),
+  revision: 0,
+};
+
 /**
  * Shared UV + pixel image canvas.
  * UV / Combined (when armed): Blockbench-style select + move / scale / rotate.
@@ -120,7 +157,16 @@ export function UvPixelEditor({ session, workspace }: Props) {
   const painting = useRef(false);
   const lastPaintPixel = useRef<{ x: number; y: number } | null>(null);
   const hoverPixel = useRef<{ x: number; y: number } | null>(null);
-  const panning = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  const pixelShapeDrag = useRef<PixelShapeDrag | null>(null);
+  const panning = useRef<{
+    kind: 'pan' | 'zoom';
+    x: number;
+    y: number;
+    panX: number;
+    panY: number;
+    zoom: number;
+  } | null>(null);
+  const [canvasNavMode, setCanvasNavMode] = useState<ViewportNavMode>('none');
   const uvDrag = useRef<UvDragState | null>(null);
   const marquee = useRef<MarqueeState | null>(null);
   const lastAutoFramedImage = useRef<string | null>(null);
@@ -178,6 +224,24 @@ export function UvPixelEditor({ session, workspace }: Props) {
     if (!object || !mesh || !layerId) return null;
     return { objectId: object.id, mesh, layerId };
   }, [activeUvLayerId, session]);
+
+  // Make imported/procedural meshes UV-editable on first use. This only repairs
+  // absent or degenerate UVs; healthy mappings are left exactly as they are.
+  useEffect(() => {
+    if (!uvPointerActive) return;
+    const objectId = session.selection.state.activeObjectId;
+    const object = objectId ? session.document.objects.get(objectId) : null;
+    const mesh = object?.meshId ? session.document.meshes.get(object.meshId) : null;
+    if (!mesh) return;
+    const result = ensureEditableUvs(mesh);
+    if (!result.changed) return;
+    session.document.dirty = true;
+    session.requestRedraw();
+    refresh();
+  }, [uvPointerActive, session.selection.state.activeObjectId, activeUvLayerId]);
+
+  const active = activeMesh();
+  const canvasImage = image ?? (uvPointerActive && active ? UV_GUIDE_IMAGE : null);
 
   const selectedSnapshot = useCallback(() => {
     const ctx = activeMesh();
@@ -239,15 +303,18 @@ export function UvPixelEditor({ session, workspace }: Props) {
     drawUvPixelCanvas({
       canvas,
       host,
-      image,
+      image: canvasImage,
       session,
       workspace,
       uvPointerActive,
       activeMesh: active ? { mesh: active.mesh, layerId: active.layerId } : null,
       hoverPixel: hoverPixel.current,
       marquee: marquee.current,
+      pixelShapePreview: pixelShapeDrag.current
+        ? { tool: tex.pixelTool as 'line' | 'rectangle' | 'ellipse', ...pixelShapeDrag.current }
+        : null,
     });
-  }, [activeMesh, image, session, workspace, uvPointerActive]);
+  }, [activeMesh, canvasImage, session, tex.pixelTool, workspace, uvPointerActive]);
 
   useEffect(() => {
     draw();
@@ -270,14 +337,14 @@ export function UvPixelEditor({ session, workspace }: Props) {
 
   const screenToUv = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
-    if (!canvas || !image) return null;
+    if (!canvas || !canvasImage) return null;
     const rect = canvas.getBoundingClientRect();
     const cam = editorCamera(workspace.texture);
     const sx = clientX - rect.left;
     const sy = clientY - rect.top;
     const px = (sx - cam.panX) / cam.zoom;
     const py = (sy - cam.panY) / cam.zoom;
-    return { x: px / image.width, y: 1 - py / image.height };
+    return { x: px / canvasImage.width, y: 1 - py / canvasImage.height };
   };
 
   const screenToPixel = (clientX: number, clientY: number) => {
@@ -308,24 +375,94 @@ export function UvPixelEditor({ session, workspace }: Props) {
     const shape = workspace.texture.brushShape;
     if (!stroke.current.isActive) stroke.current.begin(image);
     const previous = lastPaintPixel.current;
+    const mirrored = (point: { x: number; y: number }) => {
+      const points = [point];
+      if (workspace.texture.paintMirrorX) points.push({ x: image.width - 1 - point.x, y: point.y });
+      if (workspace.texture.paintMirrorY) points.push({ x: point.x, y: image.height - 1 - point.y });
+      if (workspace.texture.paintMirrorX && workspace.texture.paintMirrorY) {
+        points.push({ x: image.width - 1 - point.x, y: image.height - 1 - point.y });
+      }
+      return [...new Map(points.map((item) => [`${item.x},${item.y}`, item])).values()];
+    };
+    const dither = workspace.texture.ditherMode;
+    const recolor = workspace.texture.recolorOnlyBg ? workspace.texture.background : null;
     if (!previous) {
-      stampBrush(image, p.x, p.y, size, colour, stroke.current, shape);
+      for (const target of mirrored(p)) stampBrush(image, target.x, target.y, size, colour, stroke.current, shape, dither, recolor);
     } else {
-      stampBrushLine(
-        image,
-        previous.x,
-        previous.y,
-        p.x,
-        p.y,
-        size,
-        colour,
-        stroke.current,
-        shape,
-      );
+      const previousMirrors = mirrored(previous);
+      const nextMirrors = mirrored(p);
+      for (let index = 0; index < Math.min(previousMirrors.length, nextMirrors.length); index++) {
+        const from = previousMirrors[index]!;
+        const to = nextMirrors[index]!;
+        stampBrushLine(image, from.x, from.y, to.x, to.y, size, colour, stroke.current, shape, dither, recolor);
+      }
     }
     lastPaintPixel.current = p;
     session.requestRedraw();
     draw();
+  };
+
+  const commitPixelShape = () => {
+    const drag = pixelShapeDrag.current;
+    if (!drag || !image) return;
+    const tex = workspace.texture;
+    const colour = brushColourForTool(tex.pixelTool, tex.foreground, tex.background, drag.useBackground);
+    const size = Math.max(1, tex.brushSize);
+    const mirrorPoint = (point: { x: number; y: number }) => ({
+      x: tex.paintMirrorX ? image.width - 1 - point.x : point.x,
+      y: tex.paintMirrorY ? image.height - 1 - point.y : point.y,
+    });
+    const drawLine = (from: { x: number; y: number }, to: { x: number; y: number }) => {
+      stampBrushLine(image, from.x, from.y, to.x, to.y, size, colour, stroke.current, tex.brushShape);
+      if (tex.paintMirrorX) {
+        const a = { x: image.width - 1 - from.x, y: from.y };
+        const b = { x: image.width - 1 - to.x, y: to.y };
+        stampBrushLine(image, a.x, a.y, b.x, b.y, size, colour, stroke.current, tex.brushShape);
+      }
+      if (tex.paintMirrorY) {
+        const a = { x: from.x, y: image.height - 1 - from.y };
+        const b = { x: to.x, y: image.height - 1 - to.y };
+        stampBrushLine(image, a.x, a.y, b.x, b.y, size, colour, stroke.current, tex.brushShape);
+      }
+      if (tex.paintMirrorX && tex.paintMirrorY) {
+        const a = mirrorPoint(from);
+        const b = mirrorPoint(to);
+        stampBrushLine(image, a.x, a.y, b.x, b.y, size, colour, stroke.current, tex.brushShape);
+      }
+    };
+    if (tex.pixelTool === 'line') {
+      drawLine(drag.start, drag.current);
+    } else if (tex.pixelTool === 'rectangle') {
+      const minX = Math.min(drag.start.x, drag.current.x);
+      const maxX = Math.max(drag.start.x, drag.current.x);
+      const minY = Math.min(drag.start.y, drag.current.y);
+      const maxY = Math.max(drag.start.y, drag.current.y);
+      drawLine({ x: minX, y: minY }, { x: maxX, y: minY });
+      drawLine({ x: minX, y: maxY }, { x: maxX, y: maxY });
+      drawLine({ x: minX, y: minY }, { x: minX, y: maxY });
+      drawLine({ x: maxX, y: minY }, { x: maxX, y: maxY });
+    } else {
+      const minX = Math.min(drag.start.x, drag.current.x);
+      const maxX = Math.max(drag.start.x, drag.current.x);
+      const minY = Math.min(drag.start.y, drag.current.y);
+      const maxY = Math.max(drag.start.y, drag.current.y);
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const rx = Math.max(0.5, (maxX - minX) / 2);
+      const ry = Math.max(0.5, (maxY - minY) / 2);
+      const steps = Math.max(12, Math.ceil(Math.PI * 2 * Math.max(rx, ry) * 1.5));
+      let previous: { x: number; y: number } | null = null;
+      for (let i = 0; i <= steps; i++) {
+        const angle = (i / steps) * Math.PI * 2;
+        const point = { x: Math.round(cx + Math.cos(angle) * rx), y: Math.round(cy + Math.sin(angle) * ry) };
+        if (previous) drawLine(previous, point);
+        previous = point;
+      }
+    }
+    pixelShapeDrag.current = null;
+    stroke.current.commit(session.history, () => session.requestRedraw());
+    session.requestRedraw();
+    refresh();
   };
 
   const syncFacesFromUv = (faceIds: FaceId[], objectId: string, op: 'replace' | 'add' | 'toggle') => {
@@ -385,7 +522,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
   ) => {
     const ctx = activeMesh();
     const uv = screenToUv(clientX, clientY);
-    if (!ctx || !uv || !image) return;
+    if (!ctx || !uv || !canvasImage) return;
 
     // Ctrl/Cmd+LMB always starts a bidirectional marquee (even over faces / gizmos).
     if (ctrlKey) {
@@ -397,9 +534,9 @@ export function UvPixelEditor({ session, workspace }: Props) {
     const pickRadiusPx = UV_GIZMO_PX.handleHit;
     const edgeRadiusPx = UV_GIZMO_PX.edgeHit;
     // Screen-stable UV radii (must include zoom — otherwise handles eat the whole island).
-    const radiusU = Math.max(edgeRadiusPx, pickRadiusPx) / Math.max(1e-6, cam.zoom * image.width);
-    const radiusV = Math.max(edgeRadiusPx, pickRadiusPx) / Math.max(1e-6, cam.zoom * image.height);
-    const rotateOffsetV = UV_GIZMO_PX.rotateStem / Math.max(1e-6, cam.zoom * image.height);
+    const radiusU = Math.max(edgeRadiusPx, pickRadiusPx) / Math.max(1e-6, cam.zoom * canvasImage.width);
+    const radiusV = Math.max(edgeRadiusPx, pickRadiusPx) / Math.max(1e-6, cam.zoom * canvasImage.height);
+    const rotateOffsetV = UV_GIZMO_PX.rotateStem / Math.max(1e-6, cam.zoom * canvasImage.height);
     const transformTool = workspace.texture.uvTransformTool;
     const editMode = workspace.texture.uvEditMode;
     const op = shiftKey ? 'add' : 'replace';
@@ -463,7 +600,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
       }
     }
 
-    const hit = pickUvElement(ctx.mesh, ctx.layerId, uv, pickRadiusPx, image.width, image.height);
+    const hit = pickUvElement(ctx.mesh, ctx.layerId, uv, pickRadiusPx, canvasImage.width, canvasImage.height);
     if (!hit) {
       beginUvMarquee(clientX, clientY, shiftKey, true);
       return;
@@ -540,12 +677,12 @@ export function UvPixelEditor({ session, workspace }: Props) {
   const finishMarquee = () => {
     const box = marquee.current;
     marquee.current = null;
-    if (!box || !image) return;
+    if (!box || !canvasImage) return;
     const ctx = activeMesh();
     if (!ctx) return;
     const dx = Math.abs(box.currentUv.x - box.startUv.x);
     const dy = Math.abs(box.currentUv.y - box.startUv.y);
-    if (dx < 1 / image.width && dy < 1 / image.height) {
+    if (dx < 1 / canvasImage.width && dy < 1 / canvasImage.height) {
       session.requestRedraw();
       refresh();
       return;
@@ -575,7 +712,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
 
   const updateUvDrag = (clientX: number, clientY: number, shiftKey: boolean) => {
     const drag = uvDrag.current;
-    if (!drag || !image) return;
+    if (!drag || !canvasImage) return;
     const mesh = session.document.meshes.get(drag.meshId);
     if (!mesh) return;
     const uv = screenToUv(clientX, clientY);
@@ -583,8 +720,8 @@ export function UvPixelEditor({ session, workspace }: Props) {
     const cam = editorCamera(workspace.texture);
     // Minimum axis length ≈ 2 screen pixels in UV — stops thin islands exploding.
     const minAxis = Math.max(
-      2 / Math.max(1e-6, cam.zoom * image.width),
-      2 / Math.max(1e-6, cam.zoom * image.height),
+      2 / Math.max(1e-6, cam.zoom * canvasImage.width),
+      2 / Math.max(1e-6, cam.zoom * canvasImage.height),
     );
 
     if (drag.mode === 'move') {
@@ -593,9 +730,9 @@ export function UvPixelEditor({ session, workspace }: Props) {
       if (drag.axis === 'u') dy = 0;
       if (drag.axis === 'v') dx = 0;
       // Pixel-snap only with Shift held — continuous drag is the default (accurate).
-      if (shiftKey || drag.snapAngle) {
-        const stepU = 1 / image.width;
-        const stepV = 1 / image.height;
+      if (shiftKey || drag.snapAngle || workspace.texture.uvSnapToPixels) {
+        const stepU = 1 / canvasImage.width;
+        const stepV = 1 / canvasImage.height;
         dx = Math.round(dx / stepU) * stepU;
         dy = Math.round(dy / stepV) * stepV;
       }
@@ -667,11 +804,11 @@ export function UvPixelEditor({ session, workspace }: Props) {
   };
 
   const resizeSelectionToPixels = (widthPx: number, heightPx: number) => {
-    if (!image) return;
+    if (!canvasImage) return;
     const w = Math.max(1, Math.round(widthPx));
     const h = Math.max(1, Math.round(heightPx));
     mutateSelection(`Resize UVs ${w}×${h}`, (mesh, layerId, before) => {
-      resizeUvsToSize(mesh, before, layerId, w / image.width, h / image.height);
+      resizeUvsToSize(mesh, before, layerId, w / canvasImage.width, h / canvasImage.height);
     });
   };
 
@@ -690,11 +827,11 @@ export function UvPixelEditor({ session, workspace }: Props) {
   };
 
   const nudgeSelection = (du: number, dv: number) => {
-    if (!image) return;
+    if (!canvasImage) return;
     mutateSelection('Nudge UVs', (mesh, layerId, before) => {
       translateUvsFromSnapshot(mesh, before, layerId, {
-        x: du / image.width,
-        y: dv / image.height,
+        x: du / canvasImage.width,
+        y: dv / canvasImage.height,
       });
     });
   };
@@ -717,7 +854,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
 
   const frameSelection = () => {
     const host = hostRef.current;
-    if (!host || !image) return;
+    if (!host || !canvasImage) return;
     const sel = selectedSnapshot();
     const bounds = sel
       ? boundsOfUvs(sel.snap)
@@ -725,8 +862,8 @@ export function UvPixelEditor({ session, workspace }: Props) {
     if (!bounds) return;
     const cam = cameraToFrameUvBounds(
       bounds,
-      image.width,
-      image.height,
+      canvasImage.width,
+      canvasImage.height,
       host.clientWidth,
       host.clientHeight,
     );
@@ -743,7 +880,6 @@ export function UvPixelEditor({ session, workspace }: Props) {
     workspace.patchTexture({ uvSelectionSync: 'face' });
     session.requestRedraw();
     refresh();
-    requestAnimationFrame(frameSelection);
   };
 
   useEffect(() => {
@@ -759,23 +895,25 @@ export function UvPixelEditor({ session, workspace }: Props) {
 
   const actualPixels = () => {
     const host = hostRef.current;
-    if (!host || !image) return;
+    if (!host || !canvasImage) return;
     const cam = {
       zoom: 1,
-      panX: (host.clientWidth - image.width) / 2,
-      panY: (host.clientHeight - image.height) / 2,
+      panX: (host.clientWidth - canvasImage.width) / 2,
+      panY: (host.clientHeight - canvasImage.height) / 2,
     };
     workspace.patchTexture({ uvCamera: cam, pixelCamera: cam });
   };
 
   useEffect(() => {
-    if (!image || lastAutoFramedImage.current === image.id) return;
-    lastAutoFramedImage.current = image.id;
+    if (!image) return;
+    const frameKey = `${image.id}:${image.width}x${image.height}`;
+    if (lastAutoFramedImage.current === frameKey) return;
+    lastAutoFramedImage.current = frameKey;
     const frame = requestAnimationFrame(frameSelection);
     return () => cancelAnimationFrame(frame);
-    // Frame once when the active image changes; later camera changes remain user-owned.
+    // Frame when the active image or its size changes (default texture hydrate).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [image?.id]);
+  }, [image?.id, image?.width, image?.height]);
 
   const runPack = async () => {
     const ctx = activeMesh();
@@ -818,6 +956,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
     const after = snapshotUvs(ctx.mesh, corners, ctx.layerId);
     const labels: Record<UvUnwrapMode, string> = {
       auto: 'Auto UV',
+      angle: 'Angle-based UV',
       box: 'Box UV',
       cubic: 'Cubic UV',
       cylinder: 'Cylinder UV',
@@ -1363,6 +1502,51 @@ export function UvPixelEditor({ session, workspace }: Props) {
     refresh();
   };
 
+  const flipSelectedFaces = () => {
+    const ctx = activeMesh();
+    if (!ctx) return;
+    const faceIds = [...session.selection.state.selectedFaceIds].filter((id) => ctx.mesh.faces.has(id));
+    if (!faceIds.length) {
+      pushToast('Select one or more faces to flip.', 'info');
+      return;
+    }
+
+    const before = cloneMeshPreserveIds(ctx.mesh);
+    const result = flipFaces(ctx.mesh, faceIds);
+    if (!result.ok) {
+      restoreMeshFromSnapshot(ctx.mesh, before);
+      pushToast(result.error?.message ?? 'Could not flip the selected faces.', 'error');
+      return;
+    }
+    const after = cloneMeshPreserveIds(ctx.mesh);
+    const selectedFaceIds = result.change.recommendedSelection.faceIds ?? faceIds;
+    let applied = true;
+    const applySelection = (ids: FaceId[]) => {
+      session.selection.setMode('face');
+      session.selection.selectFaces(ids, 'replace');
+    };
+
+    session.history.execute({
+      name: 'Flip Faces',
+      execute: () => {
+        if (applied) return;
+        restoreMeshFromSnapshot(ctx.mesh, after);
+        applySelection(selectedFaceIds);
+        applied = true;
+        session.requestRedraw();
+      },
+      undo: () => {
+        restoreMeshFromSnapshot(ctx.mesh, before);
+        applySelection(faceIds);
+        applied = false;
+        session.requestRedraw();
+      },
+    });
+    applySelection(selectedFaceIds);
+    session.requestRedraw();
+    refresh();
+  };
+
   const toggleSeams = (seam: boolean) => {
     const ctx = activeMesh();
     if (!ctx) return;
@@ -1397,19 +1581,62 @@ export function UvPixelEditor({ session, workspace }: Props) {
     refresh();
   };
 
-  const onPointerDown = (e: React.PointerEvent) => {
-    if (e.button === 1 || (e.button === 0 && e.altKey && !e.ctrlKey && !e.metaKey)) {
-      e.preventDefault();
-      const cam = editorCamera(workspace.texture);
-      panning.current = { x: e.clientX, y: e.clientY, panX: cam.panX, panY: cam.panY };
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  const applyUvCanvasNav = (kind: 'pan' | 'zoom', dx: number, dy: number, clientX: number, clientY: number) => {
+    const cam = editorCamera(workspace.texture);
+    const host = hostRef.current;
+    if (kind === 'pan') {
+      const next = { panX: cam.panX + dx, panY: cam.panY + dy, zoom: cam.zoom };
+      workspace.patchTexture({ uvCamera: next, pixelCamera: next });
       return;
     }
+    const rect = host?.getBoundingClientRect();
+    const mx = rect ? clientX - rect.left : (host?.clientWidth ?? 0) / 2;
+    const my = rect ? clientY - rect.top : (host?.clientHeight ?? 0) / 2;
+    const next = zoomCameraAt(cam, mx, my, Math.exp(-dy * 0.008), UV_ZOOM_MIN, UV_ZOOM_MAX);
+    workspace.patchTexture({ uvCamera: next, pixelCamera: next });
+  };
+
+  const beginCanvasNav = (kind: 'pan' | 'zoom', e: React.PointerEvent) => {
+    e.preventDefault();
+    const cam = editorCamera(workspace.texture);
+    panning.current = {
+      kind,
+      x: e.clientX,
+      y: e.clientY,
+      panX: cam.panX,
+      panY: cam.panY,
+      zoom: cam.zoom,
+    };
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  };
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    const chord = canvasNavKind(classifyPointerButton(e.button), {
+      altKey: e.altKey,
+      shiftKey: e.shiftKey,
+      ctrlKey: e.ctrlKey || e.metaKey,
+    });
+    if (chord) {
+      beginCanvasNav(chord, e);
+      return;
+    }
+
+    if (e.button === 0 && canvasNavMode === 'select' && canvasImage && activeMesh()) {
+      e.preventDefault();
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      beginUvMarquee(e.clientX, e.clientY, e.shiftKey, true);
+      return;
+    }
+    if (e.button === 0 && (canvasNavMode === 'pan' || canvasNavMode === 'zoom')) {
+      beginCanvasNav(canvasNavMode, e);
+      return;
+    }
+
     const useBackground = e.button === 2;
     if (e.button !== 0 && e.button !== 2) return;
 
-    // Ctrl/Cmd+LMB marquee works in paint and UV modes.
-    if (e.button === 0 && (e.ctrlKey || e.metaKey) && image && activeMesh()) {
+    // Ctrl/Cmd+LMB marquee works in paint and UV modes (not with Alt — that's zoom).
+    if (e.button === 0 && (e.ctrlKey || e.metaKey) && !e.altKey && canvasImage && activeMesh()) {
       e.preventDefault();
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
       beginUvMarquee(e.clientX, e.clientY, e.shiftKey, true);
@@ -1432,23 +1659,24 @@ export function UvPixelEditor({ session, workspace }: Props) {
         const fillColour = useBackground
           ? workspace.texture.background
           : workspace.texture.foreground;
-        const before = new Uint8ClampedArray(image.pixels);
-        const count = floodFill(image, p.x, p.y, fillColour);
+        const before = clonePaintTarget(image);
+        const count = floodFill(image, p.x, p.y, fillColour, {
+          tolerance: workspace.texture.fillTolerance,
+          contiguous: workspace.texture.fillContiguous,
+        });
         if (count) {
-          const after = new Uint8ClampedArray(image.pixels);
+          const after = clonePaintTarget(image);
           let applied = true;
           session.history.execute({
             name: 'Fill Pixels',
             execute: () => {
               if (applied) return;
-              image.pixels.set(after);
-              image.revision += 1;
+              applyPaintTarget(image, after);
               applied = true;
               session.requestRedraw();
             },
             undo: () => {
-              image.pixels.set(before);
-              image.revision += 1;
+              applyPaintTarget(image, before);
               applied = false;
               session.requestRedraw();
             },
@@ -1470,6 +1698,40 @@ export function UvPixelEditor({ session, workspace }: Props) {
       }
       return;
     }
+    if (workspace.texture.pixelTool === 'replace' && image) {
+      const p = screenToPixel(e.clientX, e.clientY);
+      const source = p ? getPaintPixel(image, p.x, p.y) : null;
+      if (!source) return;
+      const replacement = useBackground ? workspace.texture.background : workspace.texture.foreground;
+      const before = clonePaintTarget(image);
+      const buf = getPaintTarget(image);
+      let changed = 0;
+      for (let i = 0; i < buf.length; i += 4) {
+        if (buf[i] === source[0] && buf[i + 1] === source[1] && buf[i + 2] === source[2] && buf[i + 3] === source[3]) {
+          buf[i] = replacement[0]; buf[i + 1] = replacement[1]; buf[i + 2] = replacement[2]; buf[i + 3] = replacement[3]; changed++;
+        }
+      }
+      if (changed) {
+        applyPaintTarget(image, buf);
+        const after = clonePaintTarget(image);
+        let applied = true;
+        session.history.execute({
+          name: 'Replace Colour',
+          execute: () => { if (!applied) { applyPaintTarget(image, after); applied = true; session.requestRedraw(); } },
+          undo: () => { applyPaintTarget(image, before); applied = false; session.requestRedraw(); },
+        });
+      }
+      session.requestRedraw(); draw();
+      return;
+    }
+    if ((workspace.texture.pixelTool === 'line' || workspace.texture.pixelTool === 'rectangle' || workspace.texture.pixelTool === 'ellipse') && image) {
+      const p = screenToPixel(e.clientX, e.clientY);
+      if (!p) return;
+      stroke.current.begin(image);
+      pixelShapeDrag.current = { start: p, current: p, useBackground };
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      return;
+    }
     painting.current = true;
     lastPaintPixel.current = null;
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
@@ -1478,7 +1740,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
 
   const hoverGizmoCursor = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
-    if (!canvas || !image || !uvPointerActive) {
+    if (!canvas || !canvasImage || !uvPointerActive) {
       if (canvas) canvas.style.cursor = uvPointerActive ? 'crosshair' : 'cell';
       return;
     }
@@ -1505,9 +1767,9 @@ export function UvPixelEditor({ session, workspace }: Props) {
     }
     const cam = editorCamera(workspace.texture);
     const hitPx = Math.max(UV_GIZMO_PX.handleHit, UV_GIZMO_PX.edgeHit);
-    const radiusU = hitPx / Math.max(1e-6, cam.zoom * image.width);
-    const radiusV = hitPx / Math.max(1e-6, cam.zoom * image.height);
-    const rotateOffsetV = UV_GIZMO_PX.rotateStem / Math.max(1e-6, cam.zoom * image.height);
+    const radiusU = hitPx / Math.max(1e-6, cam.zoom * canvasImage.width);
+    const radiusV = hitPx / Math.max(1e-6, cam.zoom * canvasImage.height);
+    const rotateOffsetV = UV_GIZMO_PX.rotateStem / Math.max(1e-6, cam.zoom * canvasImage.height);
     const gizmo = pickUvGizmo(uv, bounds, radiusU, radiusV, rotateOffsetV);
     canvas.style.cursor = uvGizmoCursor(gizmo?.handle ?? null);
   };
@@ -1517,12 +1779,9 @@ export function UvPixelEditor({ session, workspace }: Props) {
     if (panning.current) {
       const dx = e.clientX - panning.current.x;
       const dy = e.clientY - panning.current.y;
-      const next = {
-        panX: panning.current.panX + dx,
-        panY: panning.current.panY + dy,
-        zoom: editorCamera(workspace.texture).zoom,
-      };
-      workspace.patchTexture({ uvCamera: next, pixelCamera: next });
+      panning.current.x = e.clientX;
+      panning.current.y = e.clientY;
+      applyUvCanvasNav(panning.current.kind, dx, dy, e.clientX, e.clientY);
       draw();
       return;
     }
@@ -1539,6 +1798,12 @@ export function UvPixelEditor({ session, workspace }: Props) {
     if (uvDrag.current) {
       updateUvDrag(e.clientX, e.clientY, e.shiftKey);
       hoverGizmoCursor(e.clientX, e.clientY);
+      return;
+    }
+    if (pixelShapeDrag.current) {
+      const p = screenToPixel(e.clientX, e.clientY);
+      if (p) pixelShapeDrag.current.current = p;
+      draw();
       return;
     }
     if (painting.current) {
@@ -1562,6 +1827,10 @@ export function UvPixelEditor({ session, workspace }: Props) {
       endUvDrag();
       return;
     }
+    if (pixelShapeDrag.current) {
+      commitPixelShape();
+      return;
+    }
     if (painting.current) {
       painting.current = false;
       stroke.current.commit(session.history, () => session.requestRedraw());
@@ -1575,45 +1844,36 @@ export function UvPixelEditor({ session, workspace }: Props) {
     e.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const gesture = classifyWheel(e.deltaX, e.deltaY, e.ctrlKey || e.metaKey, e.shiftKey);
+    if (gesture.type === 'pan') {
+      applyUvCanvasNav('pan', gesture.dx, gesture.dy, e.clientX, e.clientY);
+      draw();
+      return;
+    }
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
     const cam = editorCamera(workspace.texture);
-    const idx = nearestZoomIndex(cam.zoom);
-    const nextIdx = e.deltaY > 0 ? Math.max(0, idx - 1) : Math.min(ZOOM_STEPS.length - 1, idx + 1);
-    const nextZoom = ZOOM_STEPS[nextIdx]!;
-    const worldX = (mx - cam.panX) / cam.zoom;
-    const worldY = (my - cam.panY) / cam.zoom;
-    const next = {
-      zoom: nextZoom,
-      panX: mx - worldX * nextZoom,
-      panY: my - worldY * nextZoom,
-    };
+    const pixels = wheelZoomPixels(e.deltaY, e.nativeEvent.deltaMode);
+    const next = zoomCameraAt(cam, mx, my, Math.exp(-pixels * 0.0035), UV_ZOOM_MIN, UV_ZOOM_MAX);
     workspace.patchTexture({ uvCamera: next, pixelCamera: next });
     draw();
   };
 
-  const stepZoom = (direction: -1 | 1) => {
-    const host = hostRef.current;
-    if (!host) return;
-    const cam = editorCamera(workspace.texture);
-    const idx = nearestZoomIndex(cam.zoom);
-    const nextZoom = ZOOM_STEPS[Math.max(0, Math.min(ZOOM_STEPS.length - 1, idx + direction))]!;
-    const mx = host.clientWidth / 2;
-    const my = host.clientHeight / 2;
-    const next = {
-      zoom: nextZoom,
-      panX: mx - ((mx - cam.panX) / cam.zoom) * nextZoom,
-      panY: my - ((my - cam.panY) / cam.zoom) * nextZoom,
-    };
-    workspace.patchTexture({ uvCamera: next, pixelCamera: next });
-  };
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const blockBrowserZoom = (event: WheelEvent) => event.preventDefault();
+    canvas.addEventListener('wheel', blockBrowserZoom, { passive: false });
+    return () => canvas.removeEventListener('wheel', blockBrowserZoom);
+  }, []);
 
   const activatePaintTool = (pixelTool: typeof tex.pixelTool) => {
     workspace.patchTexture({
       pixelTool,
       uvPointerMode: false,
-      paintMode3D: true,
+      // Shape tools are texture-canvas tools; keep 3D painting on the direct brush tools.
+      paintMode3D: !['line', 'rectangle', 'ellipse', 'replace'].includes(pixelTool),
       activeRightEditor: tex.activeRightEditor === 'uv' ? 'combined' : tex.activeRightEditor,
       uvPanelTab: 'paint',
     });
@@ -1669,9 +1929,9 @@ export function UvPixelEditor({ session, workspace }: Props) {
         }
       }
 
-      if (!e.ctrlKey && !e.metaKey && (key === 'b' || key === 'e' || key === 'i' || key === 'f')) {
+      if (!e.ctrlKey && !e.metaKey && (key === 'b' || key === 'e' || key === 'i' || key === 'f' || key === 'l' || key === 'r' || key === 'o')) {
         e.preventDefault();
-        activatePaintTool(key === 'b' ? 'pencil' : key === 'e' ? 'eraser' : key === 'i' ? 'eyedropper' : 'fill');
+        activatePaintTool(key === 'b' ? 'pencil' : key === 'e' ? 'eraser' : key === 'i' ? 'eyedropper' : key === 'f' ? 'fill' : key === 'l' ? 'line' : key === 'o' ? 'ellipse' : e.shiftKey ? 'replace' : 'rectangle');
         return;
       }
       if (!e.ctrlKey && !e.metaKey && key === 'x' && !uvPointerActive) {
@@ -1686,11 +1946,25 @@ export function UvPixelEditor({ session, workspace }: Props) {
         });
         return;
       }
-      if (e.key === '[' || e.key === ']') {
+      if (key === 'd' && !e.ctrlKey && !e.metaKey && !uvPointerActive) {
         e.preventDefault();
         workspace.patchTexture({
-          brushSize: Math.max(1, Math.min(64, tex.brushSize + (e.key === '[' ? -1 : 1))),
+          foreground: [0, 0, 0, 255],
+          background: [255, 255, 255, 255],
         });
+        return;
+      }
+      if (e.key === '[' || e.key === ']' || e.key === '{' || e.key === '}') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          workspace.patchTexture({
+            foreground: shiftShadeColor(tex.foreground, e.key === '{' ? 'darker' : 'lighter'),
+          });
+        } else {
+          workspace.patchTexture({
+            brushSize: Math.max(1, Math.min(64, tex.brushSize + (e.key === '[' ? -1 : 1))),
+          });
+        }
         return;
       }
       if (!uvPointerActive && tex.activeRightEditor !== 'uv') return;
@@ -1751,41 +2025,41 @@ export function UvPixelEditor({ session, workspace }: Props) {
     const sel = selectedSnapshot();
     if (!sel) return null;
     const bounds = boundsOfUvs(sel.snap);
-    if (!bounds || !image) {
+    if (!bounds || !canvasImage) {
       return `${session.uvSelection.size} UV points · ${session.selection.state.selectedFaceIds.size} faces`;
     }
-    return `${session.uvSelection.size} pts · ${session.selection.state.selectedFaceIds.size} faces · ${Math.round(bounds.size.x * image.width)}×${Math.round(bounds.size.y * image.height)}px`;
+    return `${session.uvSelection.size} pts · ${session.selection.state.selectedFaceIds.size} faces · ${Math.round(bounds.size.x * canvasImage.width)}×${Math.round(bounds.size.y * canvasImage.height)}px`;
   })();
   const uvDiagnostics = (() => {
     const ctx = activeMesh();
-    if (!ctx || !image) return null;
-    return analyseUvs(ctx.mesh, ctx.layerId, image.width, image.height);
+    if (!ctx || !canvasImage) return null;
+    return analyseUvs(ctx.mesh, ctx.layerId, canvasImage.width, canvasImage.height);
   })();
   const modeSummary = uvPointerActive
     ? `UV ${tex.uvEditMode} · ${tex.uvTransformTool}`
-    : `${tex.pixelTool} · ${tex.brushSize}px ${tex.brushShape}${tex.paintMode3D ? ' · 3D paint' : ''}`;
+    : `${PIXEL_TOOL_LABELS[tex.pixelTool]} · ${tex.brushSize}px ${tex.brushShape}${tex.paintMode3D ? ' · 3D' : ''}`;
   const activeObjectId = session.selection.state.activeObjectId;
 
   return (
     <div className="uv-pixel-editor">
-      <div ref={hostRef} className="uv-pixel-canvas-host">
+      <div className="uv-pixel-canvas-column">
         <div className="uv-canvas-toolbar" aria-label="UV and pixel tools">
           <div className="uv-canvas-toolgroup" role="group" aria-label="Interaction mode">
             <button
               type="button"
               className={`uv-canvas-tool${uvPointerActive ? ' is-active' : ''}`}
               onClick={() => armUv({ uvPanelTab: 'edit' })}
-              title="Arrange how the texture wraps around the model"
+              title="Edit UV islands on the texture"
             >
-              UV Layout
+              UV
             </button>
             <button
               type="button"
               className={`uv-canvas-tool${!uvPointerActive ? ' is-active' : ''}`}
               onClick={() => activatePaintTool(tex.pixelTool)}
-              title="Draw colour on the texture and directly on the 3D model"
+              title="Paint the texture and the 3D model"
             >
-              Paint Texture
+              Paint
             </button>
           </div>
           {uvPointerActive ? (
@@ -1816,45 +2090,28 @@ export function UvPixelEditor({ session, workspace }: Props) {
               </div>
             </>
           ) : (
-            <div className="uv-canvas-toolgroup uv-canvas-brush-tools" role="group" aria-label="Brush">
-              {(['pencil', 'eraser', 'eyedropper', 'fill'] as const).map((tool) => (
+            <div className="uv-canvas-toolgroup uv-canvas-brush-tools" role="group" aria-label="Paint tools">
+              {PIXEL_TOOLS.map((tool) => (
                 <button
                   key={tool}
                   type="button"
                   className={`uv-canvas-tool${tex.pixelTool === tool ? ' is-active' : ''}`}
                   onClick={() => activatePaintTool(tool)}
-                  title={`${tool[0]!.toUpperCase() + tool.slice(1)} (${tool === 'pencil' ? 'B' : tool === 'eraser' ? 'E' : tool === 'eyedropper' ? 'I' : 'F'})`}
+                  title={`${PIXEL_TOOL_LABELS[tool]} (${PIXEL_TOOL_HOTKEYS[tool]})`}
                 >
-                  {tool === 'pencil' ? 'Draw' : tool === 'eyedropper' ? 'Pick' : tool[0]!.toUpperCase() + tool.slice(1)}
+                  {PIXEL_TOOL_LABELS[tool]}
                 </button>
               ))}
               <span className="uv-canvas-divider" aria-hidden />
               <button
                 type="button"
                 className={`uv-canvas-tool${tex.paintMode3D ? ' is-active' : ''}`}
-                title="Paint on the 3D model"
+                title="Paint on the 3D model (left view)"
+                aria-pressed={tex.paintMode3D}
                 onClick={() => workspace.patchTexture({ paintMode3D: !tex.paintMode3D })}
               >
                 3D
               </button>
-              <button
-                type="button"
-                className="uv-canvas-tool"
-                title="Toggle brush shape (C)"
-                onClick={() => workspace.patchTexture({ brushShape: tex.brushShape === 'square' ? 'circle' : 'square' })}
-              >
-                {tex.brushShape === 'circle' ? '○' : '□'}
-              </button>
-              <input
-                className="uv-canvas-size"
-                type="range"
-                min={1}
-                max={64}
-                value={tex.brushSize}
-                title={`Brush size ${tex.brushSize}px ([ ])`}
-                onChange={(e) => workspace.patchTexture({ brushSize: Number(e.target.value) })}
-              />
-              <span className="uv-canvas-zoom">{tex.brushSize}px</span>
               <label className="uv-canvas-swatch" title="Foreground colour (X swaps)">
                 <input
                   type="color"
@@ -1865,13 +2122,50 @@ export function UvPixelEditor({ session, workspace }: Props) {
             </div>
           )}
           <div className="uv-canvas-toolgroup uv-canvas-view-tools" role="group" aria-label="Canvas view">
-            <button type="button" className="uv-canvas-tool" onClick={() => stepZoom(-1)} aria-label="Zoom out">−</button>
-            <span className="uv-canvas-zoom">{Math.round(editorCamera(tex).zoom * 100)}%</span>
-            <button type="button" className="uv-canvas-tool" onClick={() => stepZoom(1)} aria-label="Zoom in">+</button>
             <button type="button" className="uv-canvas-tool" onClick={actualPixels} title="Actual pixels">1:1</button>
-            <button type="button" className="uv-canvas-tool" onClick={frameSelection} title="Frame selection or image">Frame</button>
+            <button
+              type="button"
+              className={`uv-canvas-tool${tex.uvInspectorOpen ? ' is-active' : ''}`}
+              onClick={() => workspace.patchTexture({ uvInspectorOpen: !tex.uvInspectorOpen })}
+              title={tex.uvInspectorOpen ? 'Hide inspector (N)' : 'Show inspector (N)'}
+              aria-pressed={tex.uvInspectorOpen}
+              aria-label={tex.uvInspectorOpen ? 'Hide inspector' : 'Show inspector'}
+            >
+              <BlenderIcon name="properties" size={13} />
+            </button>
           </div>
         </div>
+        <div ref={hostRef} className="uv-pixel-canvas-host">
+        {workspace.viewportNavToolsVisible && (
+          <ViewportNavToolbar
+            viewId="persp"
+            right={8}
+            top={8}
+            isPerspective={false}
+            isMaximized={workspace.texture.maximize === 'right'}
+            navMode={canvasNavMode}
+            navViewId={canvasNavMode === 'none' ? null : 'persp'}
+            onSetNav={(mode) => setCanvasNavMode(mode)}
+            onFrame={() => frameSelection()}
+            onMaximize={() => {
+              if (workspace.texture.maximize === 'right') workspace.restoreTextureSplit();
+              else workspace.toggleTextureMaximize('right');
+            }}
+            onDrag={(mode, deltaX, deltaY) => {
+              if (mode === 'orbit') return;
+              const host = hostRef.current;
+              const rect = host?.getBoundingClientRect();
+              applyUvCanvasNav(
+                mode,
+                deltaX,
+                deltaY,
+                (rect?.left ?? 0) + (rect?.width ?? 0) / 2,
+                (rect?.top ?? 0) + (rect?.height ?? 0) / 2,
+              );
+              draw();
+            }}
+          />
+        )}
         <canvas
           ref={canvasRef}
           className="uv-pixel-canvas"
@@ -1886,19 +2180,19 @@ export function UvPixelEditor({ session, workspace }: Props) {
           onWheel={onWheel}
           onContextMenu={(e) => e.preventDefault()}
         />
-        {image && (
+        {canvasImage && (
           <div className="uv-canvas-status" aria-live="polite">
             <span className={`uv-status-mode${uvPointerActive ? ' is-uv' : ' is-paint'}`}>
               {uvPointerActive ? 'UV EDIT' : 'PIXEL PAINT'}
             </span>
-            <span>{image.name}</span>
-            <span>{image.width}×{image.height}</span>
+            <span>{image ? image.name : 'UV guide · no texture assigned'}</span>
+            <span>{canvasImage.width}×{canvasImage.height}</span>
             <span>{Math.round(editorCamera(tex).zoom * 100)}%</span>
             <span>{modeSummary}</span>
             {selectionSummary && <span className="uv-status-selection">{selectionSummary}</span>}
           </div>
         )}
-        {!image && (
+        {!canvasImage && (
           <div className="uv-canvas-empty">
             <strong>{activeObjectId ? 'No editable texture yet' : 'Select a model first'}</strong>
             <span>
@@ -1919,32 +2213,38 @@ export function UvPixelEditor({ session, workspace }: Props) {
             </button>
           </div>
         )}
+        </div>
       </div>
-      <UvEditorSidePanel
-        session={session}
-        workspace={workspace}
-        uvPointerActive={uvPointerActive}
-        imageLabel={image ? `${image.name} · ${image.width}×${image.height}` : null}
-        selectionSummary={selectionSummary}
-        uvDiagnostics={uvDiagnostics}
-        onSelectAll={selectAllPoints}
-        onFocusSelectedFace={focusSelected3dFace}
-        onRotate={rotateSelectionBy}
-        onResizePixels={resizeSelectionToPixels}
-        onScaleFactor={scaleSelectionBy}
-        onFlip={flipSelection}
-        onUnwrap={runUnwrap}
-        onPack={runPack}
-        onNormalize={runNormalize}
-        onWeld={runWeld}
-        onSplit={runSplit}
-        onStraighten={runStraighten}
-        onRelax={runRelax}
-        onRotateToEdge={runRotateToEdge}
-        onToggleSeams={toggleSeams}
-        onFrame={frameSelection}
-        onArmUv={armUv}
-      />
+      <UvInspectorPortal>
+        <UvEditorSidePanel
+          session={session}
+          workspace={workspace}
+          uvPointerActive={uvPointerActive}
+          imageLabel={image ? `${image.name} · ${image.width}×${image.height}` : canvasImage ? 'UV guide · no texture assigned' : null}
+          selectionSummary={selectionSummary}
+          uvDiagnostics={uvDiagnostics}
+          onSelectAll={selectAllPoints}
+          onFocusSelectedFace={focusSelected3dFace}
+          onRotate={rotateSelectionBy}
+          onResizePixels={resizeSelectionToPixels}
+          onScaleFactor={scaleSelectionBy}
+          onFlip={flipSelection}
+          onUnwrap={runUnwrap}
+          onPack={runPack}
+          onNormalize={runNormalize}
+          onWeld={runWeld}
+          onSplit={runSplit}
+          onStraighten={runStraighten}
+          onRelax={runRelax}
+          onRotateToEdge={runRotateToEdge}
+          onFlipFaces={flipSelectedFaces}
+          onToggleSeams={toggleSeams}
+          onFrame={frameSelection}
+          onArmUv={armUv}
+          onRefresh={refresh}
+          embedded
+        />
+      </UvInspectorPortal>
       {tex.atlasPanelOpen && (
         <FloatingAtlasTilePanel
           session={session}

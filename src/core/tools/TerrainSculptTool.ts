@@ -1,3 +1,4 @@
+import { terrainAssetFromObject } from '@/core/terrain/Terrain';
 import { cloneVec3, type Vec3 } from '@/core/math/Vec3';
 import { inverseTransformPointApprox, type Transform } from '@/core/math/Transform';
 import { bumpPositions } from '@/core/mesh/EditableMesh';
@@ -9,7 +10,7 @@ import {
 } from '@/core/terrain/TerrainProps';
 import type { ModellingContext, Tool, ToolPointerInput } from '@/core/tools/Tool';
 
-export type TerrainBrushMode = 'raise' | 'lower' | 'smooth' | 'flatten' | 'noise';
+export type TerrainBrushMode = 'raise' | 'lower' | 'smooth' | 'flatten' | 'noise' | 'erosion' | 'thermal' | 'plateau';
 export type TerrainFalloff = 'smooth' | 'linear' | 'sharp';
 
 export class TerrainSculptTool implements Tool {
@@ -58,8 +59,8 @@ export class TerrainSculptTool implements Tool {
     if (input.button !== 'left' || !input.worldPosition) return;
     const target = terrainFromContext(context);
     if (!target) return;
-    // Alt+click in flatten mode samples the surface height without sculpting.
-    if (this.mode === 'flatten' && input.altKey) {
+    // Ctrl+click (or Alt when the viewport does not steal it) samples flatten height.
+    if (this.mode === 'flatten' && (input.ctrlKey || input.altKey)) {
       const local = inverseTransformPointApprox(input.worldPosition, target.object.transform);
       this.flattenHeight = local.y;
       this.revision += 1;
@@ -138,7 +139,7 @@ export class TerrainSculptTool implements Tool {
   }
 
   statusLine(): string {
-    const flattenHint = this.mode === 'flatten' ? ' · Alt+click sample height' : '';
+    const flattenHint = this.mode === 'flatten' ? ' · Ctrl+click sample height' : '';
     return `${this.mode} terrain · radius ${this.radius.toFixed(1)} · strength ${this.strength.toFixed(2)} · Shift invert${flattenHint}`;
   }
 
@@ -198,7 +199,13 @@ export class TerrainSculptTool implements Tool {
       else if (this.mode === 'lower') vertex.position.y -= amount * invert;
       else if (this.mode === 'smooth') vertex.position.y += (average - vertex.position.y) * Math.min(1, amount);
       else if (this.mode === 'flatten') vertex.position.y += (this.flattenHeight - vertex.position.y) * Math.min(1, amount);
-      else {
+      else if (this.mode === 'erosion') vertex.position.y -= amount * 0.35 * invert;
+      else if (this.mode === 'thermal') vertex.position.y += (average - vertex.position.y) * Math.min(1, amount * 1.2);
+      else if (this.mode === 'plateau') {
+        const step = 0.5;
+        const targetY = Math.round(vertex.position.y / step) * step;
+        vertex.position.y += (targetY - vertex.position.y) * Math.min(1, amount);
+      } else {
         const noise = Math.sin(vertex.position.x * 12.9898 + vertex.position.z * 78.233) * 43758.5453;
         vertex.position.y += ((noise - Math.floor(noise)) * 2 - 1) * amount * invert;
       }
@@ -207,10 +214,17 @@ export class TerrainSculptTool implements Tool {
 }
 
 function terrainFromContext(context: ModellingContext) {
+  const selected = terrainAssetFromObject(context.document, context.selection.state.activeObjectId);
+  if (selected) return selected;
   const objectId = context.selection.state.activeObjectId;
-  const object = objectId ? context.document.objects.get(objectId) : null;
-  const mesh = object?.meshId ? context.document.meshes.get(object.meshId) : null;
-  return object?.metadata.terrain === 'true' && mesh ? { object, mesh } : null;
+  const selectedObject = objectId ? context.document.objects.get(objectId) : null;
+  const owner = terrainAssetFromObject(context.document, selectedObject?.metadata.terrainOwnerId);
+  if (owner) return owner;
+  for (const object of context.document.objects.values()) {
+    const asset = terrainAssetFromObject(context.document, object.id);
+    if (asset) return asset;
+  }
+  return null;
 }
 
 function snapshot(mesh: EditableMesh): Map<VertexId, Vec3> {

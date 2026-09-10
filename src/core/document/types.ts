@@ -100,15 +100,30 @@ export type MaterialAsset = {
   uvLayerIndex: number;
 };
 
+export type PaintLayer = {
+  id: string;
+  name: string;
+  visible: boolean;
+  /** 0–1, applied when compositing onto the flattened image. */
+  opacity: number;
+  locked: boolean;
+  pixels: Uint8ClampedArray;
+};
+
 export type ImageAsset = {
   id: ImageId;
   name: string;
   width: number;
   height: number;
   colourMode: 'rgba' | 'indexed';
-  /** RGBA bytes length = width * height * 4 */
+  /** Flattened RGBA preview. Length = width * height * 4 */
   pixels: Uint8ClampedArray;
   revision: number;
+  /** Set when 2D/3D paint changes pixels so the viewport drops the shared clay PNG. */
+  userEdited?: boolean;
+  /** Optional paint stack. When present, `pixels` is the composite. */
+  paintLayers?: PaintLayer[];
+  activePaintLayerId?: string;
 };
 
 export type TextureAsset = {

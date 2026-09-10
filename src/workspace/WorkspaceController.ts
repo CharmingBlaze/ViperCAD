@@ -1,9 +1,13 @@
 import { InputRouter } from './InputRouter';
 import { SplitLayoutManager } from './SplitLayoutManager';
 import {
+  clampTexture3dWindow,
   clampTextureSplit,
+  isTextureSplitLayout,
   loadTextureWorkspace,
   saveTextureWorkspace,
+  type Texture3dWindowState,
+  type TexturePanelId,
   type TextureWorkspaceState,
 } from './TextureWorkspace';
 import {
@@ -15,14 +19,16 @@ import {
   normalizeShadingMode,
   VIEW_ORDER,
   type AppShellMode,
+  type BlockoutArrangement,
   type ShadingMode,
   type ViewId,
   type WorkspacePreferences,
 } from './types';
+import type { VertexBezierState } from '@/core/curves/BezierFromVertices';
 
 export type InspectorTab = 'create' | 'edit' | 'material';
 export type InspectorSection = 'select' | 'transform' | 'geometry' | 'symmetry' | 'scene';
-export type ViewportNavMode = 'none' | 'pan' | 'orbit' | 'zoom';
+export type ViewportNavMode = 'none' | 'pan' | 'orbit' | 'zoom' | 'select';
 
 type Listener = () => void;
 
@@ -44,6 +50,8 @@ export class WorkspaceController {
   /** Viewport node editing for procedural curves. */
   curveNodeEditMode = false;
   selectedCurvePointIndex = 0;
+  /** Overlay Bézier handles on existing mesh vertices (no new tube mesh). */
+  vertexBezierEdit: VertexBezierState | null = null;
   /** LightWave-style viewport navigation tool (per viewport). */
   viewportNavMode: ViewportNavMode = 'none';
   viewportNavViewId: ViewId | null = null;
@@ -53,6 +61,7 @@ export class WorkspaceController {
 
   constructor() {
     this.preferences = loadWorkspacePreferences();
+    this.preferences.viewportNavToolsVisible = true;
     this.splits = new SplitLayoutManager(this.preferences.layout);
     this.input = new InputRouter();
     this.texture = loadTextureWorkspace();
@@ -96,13 +105,29 @@ export class WorkspaceController {
     this.schedulePersist();
   }
 
+  setBlockoutArrangement(arrangement: BlockoutArrangement): void {
+    this.splits.setBlockoutArrangement(arrangement);
+    this.splits.restoreQuad();
+    this.notify();
+    this.schedulePersist();
+  }
+
+  setBlockoutColumns(partial: { a?: number; b?: number }): void {
+    this.splits.setBlockoutColumns(partial);
+    this.notify();
+    this.schedulePersist();
+  }
+
   handleTab(): boolean {
     if (this.shellMode === 'texture') {
-      this.toggleTextureMaximize();
+      if (!isTextureSplitLayout(this.texture)) this.restoreTextureSplit();
+      else this.toggleTexture3dPreview();
       return true;
     }
     if (this.shellMode === 'terrain') return true;
     if (this.shellMode === 'sculpt') return true;
+    if (this.shellMode === 'rig') return true;
+    if (this.shellMode === 'animate') return true;
     // Prefer hovered pane, else the last active one (never maximize with a null id).
     this.splits.toggleMaximize(
       this.splits.state.hoveredViewportId ?? this.splits.state.lastActiveViewportId,
@@ -120,18 +145,28 @@ export class WorkspaceController {
   }
 
   setShellMode(mode: AppShellMode): void {
-    if (this.shellMode === mode) return;
-    this.shellMode = mode;
-    this.texture.open = mode === 'texture';
-    if (this.shellMode === 'texture' || this.shellMode === 'terrain' || this.shellMode === 'sculpt') {
-      this.splits.setActive('persp');
-      this.splits.setHovered('persp');
+    const changed = this.shellMode !== mode;
+    if (changed) {
+      this.shellMode = mode;
+      this.texture.open = mode === 'texture';
+      if (this.shellMode === 'texture' || this.shellMode === 'terrain' || this.shellMode === 'sculpt' || this.shellMode === 'rig' || this.shellMode === 'animate') {
+        this.splits.setActive('persp');
+        this.splits.setHovered('persp');
+      }
+      if (mode === 'blockout') {
+        this.splits.restoreQuad();
+        this.setViewportNav('none', null);
+      }
+      if (mode !== 'texture') {
+        this.texture.maximize = 'none';
+      }
     }
-    if (mode !== 'texture') {
-      this.texture.maximize = 'none';
+    // Pan / orbit / zoom tools belong on every 3D (and UV) workspace.
+    this.setViewportNavToolsVisible(true);
+    if (changed) {
+      this.notify();
+      this.scheduleTexturePersist();
     }
-    this.notify();
-    this.scheduleTexturePersist();
   }
 
   setInspectorTab(tab: InspectorTab): void {
@@ -150,6 +185,13 @@ export class WorkspaceController {
   setCurveNodeEditMode(enabled: boolean): void {
     if (this.curveNodeEditMode === enabled) return;
     this.curveNodeEditMode = enabled;
+    if (!enabled) this.vertexBezierEdit = null;
+    this.notify();
+  }
+
+  setVertexBezierEdit(state: VertexBezierState | null): void {
+    this.vertexBezierEdit = state;
+    this.curveNodeEditMode = state !== null;
     this.notify();
   }
 
@@ -197,6 +239,51 @@ export class WorkspaceController {
     this.scheduleTexturePersist();
   }
 
+  setTexture3dWindow(partial: Partial<Texture3dWindowState>, bounds?: { width: number; height: number }): void {
+    this.setTexturePanelWindow('3d', partial, bounds);
+  }
+
+  setTexturePanelWindow(
+    panel: TexturePanelId,
+    partial: Partial<Texture3dWindowState>,
+    bounds?: { width: number; height: number },
+  ): void {
+    const key = panel === '3d' ? 'preview3d' : 'uvWindow';
+    const next = { ...this.texture[key], ...partial };
+    this.texture[key] = bounds ? clampTexture3dWindow(next, bounds) : next;
+    if (next.visible && this.texture.maximize === (panel === '3d' ? 'right' : 'left')) {
+      this.texture.maximize = 'none';
+    }
+    this.notify();
+    this.scheduleTexturePersist();
+  }
+
+  restoreTextureSplit(): void {
+    this.texture.maximize = 'none';
+    this.texture.preview3d = { ...this.texture.preview3d, visible: true, docked: true };
+    this.texture.uvWindow = { ...this.texture.uvWindow, visible: true, docked: true };
+    this.notify();
+    this.scheduleTexturePersist();
+  }
+
+  toggleTexture3dPreview(): void {
+    if (!this.texture.preview3d.visible) {
+      this.texture.preview3d.visible = true;
+      if (this.texture.uvWindow.docked && this.texture.uvWindow.visible) {
+        this.texture.preview3d.docked = true;
+      }
+      this.texture.maximize = 'none';
+    } else if (this.texture.maximize === 'left') {
+      this.texture.maximize = 'none';
+      this.texture.preview3d.visible = true;
+    } else {
+      this.texture.preview3d.visible = false;
+      this.texture.maximize = 'none';
+    }
+    this.notify();
+    this.scheduleTexturePersist();
+  }
+
   patchTexture(partial: Partial<TextureWorkspaceState>): void {
     this.texture = { ...this.texture, ...partial };
     this.notify();
@@ -214,9 +301,12 @@ export class WorkspaceController {
     this.scheduleTexturePersist();
   }
 
-  /** Viewport rects for the WebGL host (full host in texture shell = Perspective only). */
+  /** Viewport rects for the WebGL host (full host in texture shell = Perspective only, blockout = 3 viewports). */
   computeViewportRects(width: number, height: number) {
-    if (this.shellMode === 'texture' || this.shellMode === 'terrain' || this.shellMode === 'sculpt') {
+    if (this.shellMode === 'blockout') {
+      return this.splits.computeBlockoutRects(width, height);
+    }
+    if (this.shellMode === 'texture' || this.shellMode === 'terrain' || this.shellMode === 'sculpt' || this.shellMode === 'rig' || this.shellMode === 'animate') {
       return this.splits.computeSinglePersp(width, height);
     }
     return this.splits.computeRects(width, height);
@@ -258,12 +348,42 @@ export class WorkspaceController {
     return normalizeShadingMode(this.preferences.viewports.persp.shadingMode);
   }
 
+  getDisplayTextures(): boolean {
+    return this.preferences.displayTextures !== false;
+  }
+
+  setDisplayTextures(enabled: boolean): void {
+    if (this.getDisplayTextures() === enabled) return;
+    this.preferences.displayTextures = enabled;
+    this.notify();
+    this.schedulePersist();
+  }
+
+  getDrawOnSurfaces(): boolean {
+    return this.preferences.drawOnSurfaces !== false;
+  }
+
+  setDrawOnSurfaces(enabled: boolean): void {
+    if (this.getDrawOnSurfaces() === enabled) return;
+    this.preferences.drawOnSurfaces = enabled;
+    this.notify();
+    this.schedulePersist();
+  }
+
   setShadingMode(mode: ShadingMode): void {
     const normalized = normalizeShadingMode(mode);
-    if (this.getShadingMode() === normalized) return;
-    for (const id of VIEW_ORDER) {
-      this.preferences.viewports[id].shadingMode = normalized;
+    let changed = false;
+    if (this.getShadingMode() !== normalized) {
+      for (const id of VIEW_ORDER) {
+        this.preferences.viewports[id].shadingMode = normalized;
+      }
+      changed = true;
     }
+    if (normalized === 'material' && !this.getDisplayTextures()) {
+      this.preferences.displayTextures = true;
+      changed = true;
+    }
+    if (!changed) return;
     this.notify();
     this.schedulePersist();
   }

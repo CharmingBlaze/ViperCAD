@@ -19,12 +19,6 @@ export function DocumentTabs({ session, onRefresh, onBrowseOutliner }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const activeId = session.projectEditor.activeDocumentId;
-  if (!activeId) return null;
-
-  const activeDoc = getViperDocument(session.project, activeId);
-  const openIds = [...session.projectEditor.openDocuments.keys()];
-  const levelIds = filterDocumentIds(session.project, session.project.levelDocumentIds, query);
-  const modelIds = filterDocumentIds(session.project, session.project.modelDocumentIds, query);
 
   useEffect(() => {
     if (!open) {
@@ -45,6 +39,13 @@ export function DocumentTabs({ session, onRefresh, onBrowseOutliner }: Props) {
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [open]);
+
+  if (!activeId) return null;
+
+  const activeDoc = getViperDocument(session.project, activeId);
+  const openIds = [...session.projectEditor.openDocuments.keys()];
+  const levelIds = filterDocumentIds(session.project, session.project.levelDocumentIds, query);
+  const modelIds = filterDocumentIds(session.project, session.project.modelDocumentIds, query);
 
   const switchTo = (documentId: DocumentId) => {
     session.openDocument(documentId);
@@ -126,7 +127,7 @@ export function DocumentTabs({ session, onRefresh, onBrowseOutliner }: Props) {
     <div className="doc-switcher" ref={rootRef}>
       <button
         type="button"
-        className={`doc-switcher-trigger${open ? ' is-open' : ''}`}
+        className={`doc-switcher-trigger${open ? ' is-open' : ''}${activeDoc.dirty ? ' is-dirty' : ''}`}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}

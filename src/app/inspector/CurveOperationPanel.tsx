@@ -39,7 +39,7 @@ export function CurveOperationPanel({ session, workspace, object, mesh, onRefres
 
   useEffect(() => {
     setRadiusDraft(operation ? String(Number(operation.radius.toFixed(3))) : '');
-  }, [object?.id, operation?.radius]);
+  }, [object?.id, operation, operation?.radius]);
 
   if (!object || !mesh || !operation || session.selection.state.mode !== 'object') return null;
 

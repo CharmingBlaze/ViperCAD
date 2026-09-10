@@ -5,6 +5,62 @@ import { islandForFace } from '@/core/uv/UvOperations';
 import type { TextureWorkspaceState } from '@/workspace/TextureWorkspace';
 
 export const UV_ZOOM_STEPS = [0.0625, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32];
+export const UV_ZOOM_MIN = UV_ZOOM_STEPS[0]!;
+export const UV_ZOOM_MAX = UV_ZOOM_STEPS[UV_ZOOM_STEPS.length - 1]!;
+
+export type UvCanvasCamera = { panX: number; panY: number; zoom: number };
+
+export const PIXEL_TOOLS = ['pencil', 'eraser', 'eyedropper', 'fill', 'line', 'rectangle', 'ellipse', 'replace'] as const;
+export type PixelToolId = (typeof PIXEL_TOOLS)[number];
+export const PIXEL_TOOL_LABELS: Record<PixelToolId, string> = {
+  pencil: 'Pencil',
+  eraser: 'Eraser',
+  eyedropper: 'Eyedropper',
+  fill: 'Fill',
+  line: 'Line',
+  rectangle: 'Rectangle',
+  ellipse: 'Ellipse',
+  replace: 'Replace',
+};
+export const PIXEL_TOOL_HOTKEYS: Record<PixelToolId, string> = {
+  pencil: 'B',
+  eraser: 'E',
+  eyedropper: 'I',
+  fill: 'F',
+  line: 'L',
+  rectangle: 'R',
+  ellipse: 'O',
+  replace: 'Shift+R',
+};
+export const PIXEL_TOOL_ICONS: Record<PixelToolId, string> = {
+  pencil: 'greasepencil',
+  eraser: 'x',
+  eyedropper: 'eyedropper',
+  fill: 'gp_draw_fill',
+  line: 'snap_edge',
+  rectangle: 'mesh_plane',
+  ellipse: 'mesh_circle',
+  replace: 'color',
+};
+
+/** Zoom toward a canvas point without snapping to the 1:1 ladder. */
+export function zoomCameraAt(
+  cam: UvCanvasCamera,
+  mx: number,
+  my: number,
+  factor: number,
+  minZoom = UV_ZOOM_MIN,
+  maxZoom = UV_ZOOM_MAX,
+): UvCanvasCamera {
+  const nextZoom = Math.max(minZoom, Math.min(maxZoom, cam.zoom * factor));
+  const worldX = (mx - cam.panX) / cam.zoom;
+  const worldY = (my - cam.panY) / cam.zoom;
+  return {
+    zoom: nextZoom,
+    panX: mx - worldX * nextZoom,
+    panY: my - worldY * nextZoom,
+  };
+}
 
 export function uniqueFacesForCorners(
   mesh: { faceCorners: Map<FaceCornerId, { faceId: FaceId }> },
@@ -70,3 +126,47 @@ export function hexToRgba(hex: string, alpha: number): [number, number, number, 
     alpha,
   ];
 }
+
+/** Shift colour for shading (Aseprite style: shadow cooler/darker, highlight warmer/lighter). */
+export function shiftShadeColor(
+  c: readonly [number, number, number, number],
+  direction: 'darker' | 'lighter',
+): [number, number, number, number] {
+  const [r, g, b, a] = c;
+  const factor = direction === 'darker' ? 0.82 : 1.22;
+  const shiftR = direction === 'darker' ? -4 : 6;
+  const shiftG = direction === 'darker' ? -2 : 4;
+  const shiftB = direction === 'darker' ? 5 : -4;
+
+  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+  return [
+    clamp(r * factor + shiftR),
+    clamp(g * factor + shiftG),
+    clamp(b * factor + shiftB),
+    a,
+  ];
+}
+
+export const DITHER_MODES = ['none', 'checker', 'bayer4'] as const;
+export type DitherMode = (typeof DITHER_MODES)[number];
+
+const BAYER_4X4 = [
+  [0, 8, 2, 10],
+  [12, 4, 14, 6],
+  [3, 11, 1, 9],
+  [15, 7, 13, 5],
+];
+
+export function evaluateDither(x: number, y: number, mode: DitherMode): boolean {
+  if (mode === 'none') return true;
+  const px = Math.abs(Math.floor(x));
+  const py = Math.abs(Math.floor(y));
+  if (mode === 'checker') {
+    return (px + py) % 2 === 0;
+  }
+  if (mode === 'bayer4') {
+    return (BAYER_4X4[py % 4]![px % 4]! / 16) >= 0.5;
+  }
+  return true;
+}
+

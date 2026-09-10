@@ -67,6 +67,8 @@ const HANDLE_TO_CONSTRAINT: Record<GizmoHandleId, { type: TransformType; constra
   'scale-uniform': { type: 'scale', constraint: 'none' },
 };
 
+const GIZMO_LOCAL_RADIUS = 0.95;
+
 type HandleEntry = {
   id: GizmoHandleId;
   visual: Object3D;
@@ -88,7 +90,7 @@ export class TransformGizmo {
 
   constructor() {
     this.root.name = 'TransformGizmo';
-    this.root.renderOrder = 20;
+    this.root.renderOrder = 999;
     this.build();
   }
 
@@ -135,6 +137,7 @@ export class TransformGizmo {
     camera: Camera,
     mode: GizmoMode,
     show: boolean,
+    viewportHeight?: number,
   ): void {
     this.mode = mode;
     this.setVisible(show && mode !== 'select');
@@ -148,15 +151,43 @@ export class TransformGizmo {
     this.root.quaternion.setFromRotationMatrix(this.root.matrix);
     this.root.matrixAutoUpdate = true;
 
-    let scale: number;
+    // Calculate vertical world frustum height spanning the viewport
+    let hWorld: number;
     if (camera instanceof OrthographicCamera) {
-      scale = Math.max(0.2, (camera.top - camera.bottom) / camera.zoom * 0.12);
+      hWorld = (camera.top - camera.bottom) / (camera.zoom || 1);
     } else {
-      const dist = camera.position.distanceTo(this.root.position);
-      scale = Math.max(0.15, Math.min(8, dist * 0.12));
+      camera.updateMatrixWorld(true);
+      const camDir = new Vector3();
+      camera.getWorldDirection(camDir);
+      const toPivot = new Vector3(pivot.x, pivot.y, pivot.z).sub(camera.position);
+      const dist = Math.max(0.01, Math.abs(toPivot.dot(camDir)));
+      const persp = camera as { fov?: number };
+      hWorld = 2 * dist * Math.tan(((persp.fov || 45) * Math.PI) / 360);
     }
+
+    let scale: number;
+    if (viewportHeight && viewportHeight > 10) {
+      const targetPx = Math.min(95, Math.max(75, viewportHeight * 0.18));
+      const worldUnitsPerPixel = hWorld / viewportHeight;
+      scale = (targetPx / GIZMO_LOCAL_RADIUS) * worldUnitsPerPixel;
+    } else {
+      scale = hWorld * 0.16;
+    }
+    scale = Math.max(1e-4, scale);
     this.root.scale.setScalar(scale);
-    this.updateVisibility();
+
+    // Keep rotate-view ring facing the camera
+    const rotateViewEntry = this.handles.get('rotate-view');
+    if (rotateViewEntry) {
+      const camDir = new Vector3();
+      camera.getWorldDirection(camDir);
+      const invQuat = this.root.quaternion.clone().invert();
+      const localCamDir = camDir.clone().applyQuaternion(invQuat).normalize();
+      alignZ(rotateViewEntry.visual, localCamDir);
+      alignZ(rotateViewEntry.hit, localCamDir);
+    }
+
+    this.updateVisibility(camera, bx, by, bz);
     this.refreshStyles();
   }
 
@@ -175,14 +206,25 @@ export class TransformGizmo {
     });
     const intersects = raycaster.intersectObjects(objects, false);
     if (intersects.length) {
-      const id = intersects[0]!.object.userData.handleId as GizmoHandleId;
+      let bestHit = intersects[0]!;
+      let bestPriority = handlePickPriority(bestHit.object.userData.handleId as GizmoHandleId);
+      for (let i = 1; i < intersects.length; i++) {
+        const hit = intersects[i]!;
+        const priority = handlePickPriority(hit.object.userData.handleId as GizmoHandleId);
+        // Overlapping volumes at the origin: prioritize centre and plane handles
+        if (Math.abs(hit.distance - bestHit.distance) < 0.3 * this.root.scale.x && priority > bestPriority) {
+          bestHit = hit;
+          bestPriority = priority;
+        }
+      }
+      const id = bestHit.object.userData.handleId as GizmoHandleId;
       const meta = HANDLE_TO_CONSTRAINT[id];
       if (meta) return { handleId: id, type: meta.type, constraint: meta.constraint };
     }
 
-    // Screen-space fallback: thin 3D hit volumes are easy to miss; snap to nearest handle.
+    // Screen-space fallback: forgiving snapping to nearest handle.
     if (!screen || screen.width < 1 || screen.height < 1) return null;
-    const threshold = screen.thresholdPx ?? 14;
+    const threshold = screen.thresholdPx ?? 24;
     let bestId: GizmoHandleId | null = null;
     let bestDist = threshold;
     let bestPriority = -1;
@@ -192,7 +234,7 @@ export class TransformGizmo {
       const meta = HANDLE_TO_CONSTRAINT[id];
       if (!meta) continue;
       const priority = handlePickPriority(id);
-      for (const world of handleSamplePoints(entry, this.root, tmp)) {
+      for (const world of handleSamplePoints(entry, tmp)) {
         const projected = world.clone().project(camera);
         if (projected.z < -1 || projected.z > 1) continue;
         const sx = ((projected.x + 1) * 0.5) * screen.width;
@@ -223,9 +265,9 @@ export class TransformGizmo {
     this.addAxisArrow('move-x', AXIS.x, new Vector3(1, 0, 0));
     this.addAxisArrow('move-y', AXIS.y, new Vector3(0, 1, 0));
     this.addAxisArrow('move-z', AXIS.z, new Vector3(0, 0, 1));
-    this.addPlane('move-xy', AXIS.z, new Vector3(0.35, 0.35, 0), 'xy');
-    this.addPlane('move-xz', AXIS.y, new Vector3(0.35, 0, 0.35), 'xz');
-    this.addPlane('move-yz', AXIS.x, new Vector3(0, 0.35, 0.35), 'yz');
+    this.addPlane('move-xy', AXIS.z, new Vector3(0.38, 0.38, 0), 'xy');
+    this.addPlane('move-xz', AXIS.y, new Vector3(0.38, 0, 0.38), 'xz');
+    this.addPlane('move-yz', AXIS.x, new Vector3(0, 0.38, 0.38), 'yz');
     this.addCentre('move-view', AXIS.centre);
 
     this.addRing('rotate-x', AXIS.x, new Vector3(1, 0, 0));
@@ -236,28 +278,31 @@ export class TransformGizmo {
     this.addScaleHandle('scale-x', AXIS.x, new Vector3(1, 0, 0));
     this.addScaleHandle('scale-y', AXIS.y, new Vector3(0, 1, 0));
     this.addScaleHandle('scale-z', AXIS.z, new Vector3(0, 0, 1));
-    this.addPlane('scale-xy', AXIS.z, new Vector3(0.28, 0.28, 0), 'xy', true);
-    this.addPlane('scale-xz', AXIS.y, new Vector3(0.28, 0, 0.28), 'xz', true);
-    this.addPlane('scale-yz', AXIS.x, new Vector3(0, 0.28, 0.28), 'yz', true);
+    this.addPlane('scale-xy', AXIS.z, new Vector3(0.32, 0.32, 0), 'xy', true);
+    this.addPlane('scale-xz', AXIS.y, new Vector3(0.32, 0, 0.32), 'xz', true);
+    this.addPlane('scale-yz', AXIS.x, new Vector3(0, 0.32, 0.32), 'yz', true);
     this.addCentre('scale-uniform', AXIS.centre, true);
 
     this.updateVisibility();
+    this.root.traverse((obj) => {
+      obj.renderOrder = 999;
+    });
   }
 
   private addAxisArrow(id: GizmoHandleId, color: Color, dir: Vector3): void {
     const mat = new MeshBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.95 });
-    const shaft = new Mesh(new CylinderGeometry(0.02, 0.02, 0.7, 8), mat);
-    shaft.position.copy(dir.clone().multiplyScalar(0.4));
+    const shaft = new Mesh(new CylinderGeometry(0.012, 0.012, 0.74, 10), mat);
+    shaft.position.copy(dir.clone().multiplyScalar(0.41));
     alignY(shaft, dir);
-    const head = new Mesh(new ConeGeometry(0.055, 0.14, 10), mat);
-    head.position.copy(dir.clone().multiplyScalar(0.82));
+    const head = new Mesh(new ConeGeometry(0.036, 0.14, 12), mat);
+    head.position.copy(dir.clone().multiplyScalar(0.87));
     alignY(head, dir);
     const visual = new Group();
     visual.add(shaft, head);
     visual.userData.handleId = id;
 
-    const hit = new Mesh(new CylinderGeometry(0.14, 0.14, 1.05, 8), new MeshBasicMaterial({ visible: false }));
-    hit.position.copy(dir.clone().multiplyScalar(0.5));
+    const hit = new Mesh(new CylinderGeometry(0.22, 0.22, 0.95, 8), new MeshBasicMaterial({ visible: false }));
+    hit.position.copy(dir.clone().multiplyScalar(0.58));
     alignY(hit, dir);
     hit.userData.role = 'hit';
     hit.userData.handleId = id;
@@ -268,17 +313,17 @@ export class TransformGizmo {
 
   private addScaleHandle(id: GizmoHandleId, color: Color, dir: Vector3): void {
     const mat = new MeshBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.95 });
-    const shaft = new Mesh(new CylinderGeometry(0.018, 0.018, 0.65, 8), mat);
-    shaft.position.copy(dir.clone().multiplyScalar(0.38));
+    const shaft = new Mesh(new CylinderGeometry(0.011, 0.011, 0.70, 10), mat);
+    shaft.position.copy(dir.clone().multiplyScalar(0.39));
     alignY(shaft, dir);
-    const box = new Mesh(new BoxGeometry(0.1, 0.1, 0.1), mat);
-    box.position.copy(dir.clone().multiplyScalar(0.78));
+    const box = new Mesh(new BoxGeometry(0.08, 0.08, 0.08), mat);
+    box.position.copy(dir.clone().multiplyScalar(0.82));
     const visual = new Group();
     visual.add(shaft, box);
     visual.userData.handleId = id;
 
-    const hit = new Mesh(new CylinderGeometry(0.14, 0.14, 1, 8), new MeshBasicMaterial({ visible: false }));
-    hit.position.copy(dir.clone().multiplyScalar(0.48));
+    const hit = new Mesh(new CylinderGeometry(0.22, 0.22, 0.90, 8), new MeshBasicMaterial({ visible: false }));
+    hit.position.copy(dir.clone().multiplyScalar(0.56));
     alignY(hit, dir);
     hit.userData.role = 'hit';
     hit.userData.handleId = id;
@@ -298,43 +343,49 @@ export class TransformGizmo {
       color,
       depthTest: false,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.40,
       side: DoubleSide,
     });
-    const size = scaleMode ? 0.18 : 0.22;
+    const size = scaleMode ? 0.16 : 0.18;
     const geo = new BoxGeometry(
-      plane === 'yz' ? 0.02 : size,
-      plane === 'xz' ? 0.02 : size,
-      plane === 'xy' ? 0.02 : size,
+      plane === 'yz' ? 0.008 : size,
+      plane === 'xz' ? 0.008 : size,
+      plane === 'xy' ? 0.008 : size,
     );
     const visual = new Mesh(geo, mat);
     visual.position.copy(pos);
     visual.userData.handleId = id;
 
-    const hit = new Mesh(geo.clone(), new MeshBasicMaterial({ visible: false, side: DoubleSide }));
+    const hitSize = scaleMode ? 0.28 : 0.32;
+    const hitGeo = new BoxGeometry(
+      plane === 'yz' ? 0.12 : hitSize,
+      plane === 'xz' ? 0.12 : hitSize,
+      plane === 'xy' ? 0.12 : hitSize,
+    );
+    const hit = new Mesh(hitGeo, new MeshBasicMaterial({ visible: false, side: DoubleSide }));
     hit.position.copy(pos);
-    hit.scale.setScalar(1.4);
     hit.userData.role = 'hit';
     hit.userData.handleId = id;
 
     this.root.add(visual, hit);
-    this.handles.set(id, { id, visual, hit, material: mat, baseOpacity: 0.35 });
+    this.handles.set(id, { id, visual, hit, material: mat, baseOpacity: 0.40 });
   }
 
   private addRing(id: GizmoHandleId, color: Color, axis: Vector3): void {
+    const opacity = id === 'rotate-view' ? 0.45 : 0.88;
     const mat = new MeshBasicMaterial({
       color,
       depthTest: false,
       transparent: true,
-      opacity: 0.85,
+      opacity,
       side: DoubleSide,
     });
-    const torus = new Mesh(new TorusGeometry(0.75, 0.018, 8, 48), mat);
+    const torus = new Mesh(new TorusGeometry(0.58, 0.011, 8, 64), mat);
     alignZ(torus, axis);
     torus.userData.handleId = id;
 
     const hit = new Mesh(
-      new TorusGeometry(0.75, 0.07, 8, 48),
+      new TorusGeometry(0.58, 0.12, 8, 36),
       new MeshBasicMaterial({ visible: false, side: DoubleSide }),
     );
     alignZ(hit, axis);
@@ -342,32 +393,38 @@ export class TransformGizmo {
     hit.userData.handleId = id;
 
     this.root.add(torus, hit);
-    this.handles.set(id, { id, visual: torus, hit, material: mat, baseOpacity: 0.85 });
+    this.handles.set(id, { id, visual: torus, hit, material: mat, baseOpacity: opacity });
   }
 
   private addCentre(id: GizmoHandleId, color: Color, cube = false): void {
-    const mat = new MeshBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.9 });
-    // Larger free-move centre so view-plane drag is easy to grab.
+    const mat = new MeshBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.92 });
     const visual = new Mesh(
-      cube ? new BoxGeometry(0.16, 0.16, 0.16) : new SphereGeometry(0.1, 14, 14),
+      cube ? new BoxGeometry(0.09, 0.09, 0.09) : new SphereGeometry(0.055, 16, 16),
       mat,
     );
     visual.userData.handleId = id;
     const hit = new Mesh(
-      cube ? new BoxGeometry(0.32, 0.32, 0.32) : new SphereGeometry(0.22, 12, 12),
+      cube ? new BoxGeometry(0.36, 0.36, 0.36) : new SphereGeometry(0.26, 12, 12),
       new MeshBasicMaterial({ visible: false }),
     );
     hit.userData.role = 'hit';
     hit.userData.handleId = id;
     this.root.add(visual, hit);
-    this.handles.set(id, { id, visual, hit, material: mat, baseOpacity: 0.9 });
+    this.handles.set(id, { id, visual, hit, material: mat, baseOpacity: 0.92 });
   }
 
-  private updateVisibility(): void {
+  private updateVisibility(camera?: Camera, bx?: Vector3, by?: Vector3, bz?: Vector3): void {
+    let camForward: Vector3 | null = null;
+    const isOrtho = camera instanceof OrthographicCamera;
+    if (camera) {
+      camForward = new Vector3();
+      camera.getWorldDirection(camForward);
+    }
+
     for (const [id, entry] of this.handles) {
       const meta = HANDLE_TO_CONSTRAINT[id];
       let show = false;
-      if (this.mode === 'move') show = meta.type === 'translate';
+      if (this.mode === 'move' || this.mode === 'origin') show = meta.type === 'translate';
       else if (this.mode === 'rotate') show = meta.type === 'rotate';
       else if (this.mode === 'scale') show = meta.type === 'scale';
       else if (this.mode === 'combined') {
@@ -381,6 +438,31 @@ export class TransformGizmo {
           id === 'rotate-z' ||
           id === 'scale-uniform';
       }
+
+      // In orthographic views, hide axes viewed end-on (pointing into camera)
+      // and edge-on planes/rings to eliminate degenerate selection clutter.
+      if (show && isOrtho && camForward && bx && by && bz) {
+        if (id === 'move-x' || id === 'scale-x') {
+          if (Math.abs(bx.dot(camForward)) > 0.96) show = false;
+        } else if (id === 'move-y' || id === 'scale-y') {
+          if (Math.abs(by.dot(camForward)) > 0.96) show = false;
+        } else if (id === 'move-z' || id === 'scale-z') {
+          if (Math.abs(bz.dot(camForward)) > 0.96) show = false;
+        } else if (id === 'move-xy' || id === 'scale-xy') {
+          if (Math.abs(bz.dot(camForward)) < 0.08) show = false;
+        } else if (id === 'move-xz' || id === 'scale-xz') {
+          if (Math.abs(by.dot(camForward)) < 0.08) show = false;
+        } else if (id === 'move-yz' || id === 'scale-yz') {
+          if (Math.abs(bx.dot(camForward)) < 0.08) show = false;
+        } else if (id === 'rotate-x') {
+          if (Math.abs(bx.dot(camForward)) < 0.08) show = false;
+        } else if (id === 'rotate-y') {
+          if (Math.abs(by.dot(camForward)) < 0.08) show = false;
+        } else if (id === 'rotate-z') {
+          if (Math.abs(bz.dot(camForward)) < 0.08) show = false;
+        }
+      }
+
       entry.visual.visible = show;
       entry.hit.visible = show;
     }
@@ -391,7 +473,7 @@ export class TransformGizmo {
       const isHot = this.active === id || this.hovered === id;
       const isDim = this.active != null && this.active !== id;
       entry.material.opacity = isHot ? 1 : isDim ? 0.2 : entry.baseOpacity;
-      entry.visual.scale.setScalar(isHot ? 1.12 : 1);
+      entry.visual.scale.setScalar(isHot ? 1.08 : 1);
     }
   }
 }
@@ -404,29 +486,47 @@ function alignZ(obj: Object3D, dir: Vector3): void {
   obj.quaternion.setFromUnitVectors(new Vector3(0, 0, 1), dir.clone().normalize());
 }
 
-/** Prefer axis arrows over planes/centre when distances are similar. */
+/** Prefer centre view and planes when clicking inside quadrants, and arrows along shafts. */
 function handlePickPriority(id: GizmoHandleId): number {
-  if (id.endsWith('-x') || id.endsWith('-y') || id.endsWith('-z')) return 3;
-  if (id.includes('-xy') || id.includes('-xz') || id.includes('-yz')) return 2;
-  if (id === 'move-view' || id === 'scale-uniform' || id === 'rotate-view') return 1;
+  if (id === 'move-view' || id === 'scale-uniform') return 4;
+  if (id.includes('-xy') || id.includes('-xz') || id.includes('-yz')) return 3;
+  if (id.endsWith('-x') || id.endsWith('-y') || id.endsWith('-z')) return 2;
+  if (id === 'rotate-view') return 1;
   return 0;
 }
 
-function handleSamplePoints(entry: HandleEntry, root: Group, tmp: Vector3): Vector3[] {
+function handleSamplePoints(entry: HandleEntry, tmp: Vector3): Vector3[] {
   entry.hit.updateWorldMatrix(true, false);
   const points: Vector3[] = [];
-  // Centre of the hit volume.
+  // Centre of the hit volume
   points.push(entry.hit.getWorldPosition(tmp.clone()));
-  // Sample along local Y (axis arrows / scale shafts are aligned to Y).
-  for (const t of [0.15, 0.4, 0.65, 0.9]) {
-    tmp.set(0, (t - 0.5) * 1.0, 0);
+
+  // For rotation rings: sample around the torus circle
+  if (entry.id.startsWith('rotate-')) {
+    const ringRadius = 0.58;
+    for (let i = 0; i < 12; i++) {
+      const angle = (i / 12) * Math.PI * 2;
+      tmp.set(Math.cos(angle) * ringRadius, Math.sin(angle) * ringRadius, 0);
+      points.push(entry.hit.localToWorld(tmp.clone()));
+    }
+    return points;
+  }
+
+  // Sample along local Y for axis arrows and scale shafts
+  for (const t of [0.15, 0.35, 0.55, 0.75, 0.92]) {
+    tmp.set(0, (t - 0.5) * 1.1, 0);
     points.push(entry.hit.localToWorld(tmp.clone()));
   }
-  // Root-local samples for rings / planes around the gizmo origin.
-  for (const t of [0.25, 0.55, 0.85]) {
-    tmp.copy(entry.hit.position).multiplyScalar(t);
-    root.localToWorld(tmp);
-    points.push(tmp.clone());
+
+  // Plane quads: sample corners and centre
+  if (entry.id.includes('-xy') || entry.id.includes('-xz') || entry.id.includes('-yz')) {
+    for (const sx of [-0.12, 0, 0.12]) {
+      for (const sy of [-0.12, 0, 0.12]) {
+        tmp.set(sx, sy, 0);
+        points.push(entry.hit.localToWorld(tmp.clone()));
+      }
+    }
   }
+
   return points;
 }

@@ -44,14 +44,33 @@ export type SkinBinding = {
   vertexWeights: Map<VertexId, BoneInfluence[]>;
 };
 
+export type KeyframeInterpolation = 'smooth' | 'linear' | 'step';
+
 export type TransformKeyframe = {
   time: number;
   value: Transform;
+  interpolation?: KeyframeInterpolation;
 };
 
 export type BoneAnimationTrack = {
   boneId: BoneId;
   keyframes: TransformKeyframe[];
+};
+
+export type AnimationEvent = {
+  id: string;
+  time: number;
+  name: string;
+  parameter?: string;
+  category?: 'audio' | 'gameplay' | 'fx' | 'custom';
+  payload?: Record<string, unknown>;
+};
+
+export type AnimationMarker = {
+  id: string;
+  time: number;
+  name: string;
+  color?: string;
 };
 
 export type AnimationClip = {
@@ -60,6 +79,12 @@ export type AnimationClip = {
   duration: number;
   fps: number;
   tracks: BoneAnimationTrack[];
+  events?: AnimationEvent[];
+  markers?: AnimationMarker[];
+  rootMotion?: boolean;
+  rootMotionMode?: 'none' | 'xz' | 'xyz' | 'rotation' | 'translation_rotation';
+  loopMode?: 'once' | 'loop' | 'pingpong';
+  animationType?: 'normal' | 'additive';
 };
 
 export type RigDocumentSettings = {

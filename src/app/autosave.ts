@@ -15,19 +15,45 @@ export type AutosavePayload = {
 };
 
 export async function readAutosaves(): Promise<AutosavePayload[]> {
+  const fallback = readFallback();
   try {
     const db = await openRecoveryDb();
     const records = await request<AutosavePayload[]>(db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAll());
     db.close();
-    return records.sort((a, b) => b.savedAt - a.savedAt);
+    const merged = new Map<string, AutosavePayload>();
+    for (const item of [...records, ...fallback]) merged.set(item.id, item);
+    return [...merged.values()].sort((a, b) => b.savedAt - a.savedAt);
   } catch {
-    return readFallback();
+    return fallback;
   }
 }
 
 /** Compatibility helper: return the newest recovery snapshot. */
 export async function readAutosave(): Promise<AutosavePayload | null> {
   return (await readAutosaves())[0] ?? null;
+}
+
+/** Sync fallback for crash / pagehide. IndexedDB may not finish on unload. */
+export function writeEmergencyAutosave(projectJson: string, reason = 'Emergency'): boolean {
+  const payload: AutosavePayload = {
+    id: `autosave:emergency:${Date.now()}`,
+    name: reason,
+    savedAt: Date.now(),
+    project: projectJson,
+    kind: 'auto',
+  };
+  try {
+    const records = readFallback().filter((item) => item.id !== payload.id);
+    records.unshift(payload);
+    writeFallback([
+      ...records.filter((item) => item.kind === 'named'),
+      ...records.filter((item) => item.kind === 'auto').slice(0, MAX_AUTOSAVES),
+    ]);
+    void writeSnapshot(payload);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function writeAutosave(projectJson: string, name = 'Autosave'): Promise<boolean> {

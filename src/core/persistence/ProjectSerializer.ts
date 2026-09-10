@@ -1,3 +1,4 @@
+import { APP_VERSION } from '@/version';
 import { reserveExistingIds } from '@/core/ids/IdService';
 import { normalizeMaterialAsset } from '@/core/material/MaterialPresets';
 import { emptyDirtyFlags, type EditableMesh, type FaceCorner } from '@/core/mesh/types';
@@ -9,7 +10,7 @@ import {
   projectFromLegacyDocument,
   resolveDocumentView,
 } from '@/core/document/ViperProject';
-import type { DocumentId, ModelDocument, ObjectId, SceneObject, ViperDocument, ViperProject } from '@/core/document/types';
+import type { DocumentId, ImageAsset, ModelDocument, ObjectId, SceneObject, ViperDocument, ViperProject } from '@/core/document/types';
 import { DEFAULT_PROJECT_SETTINGS } from '@/core/document/types';
 import { defaultTransform } from '@/core/math/Transform';
 import {
@@ -91,7 +92,7 @@ type ProjectFileV3 = {
   project: ProjectFilePayload;
 };
 
-export function serializeViperProject(project: ViperProject, applicationVersion = '0.0.0'): string {
+export function serializeViperProject(project: ViperProject, applicationVersion = APP_VERSION): string {
   const payloadProject = {
     id: project.id,
     name: project.name,
@@ -118,7 +119,7 @@ export function serializeViperProject(project: ViperProject, applicationVersion 
     meshes: [...project.meshes.values()].map(encodeMesh),
     materials: [...project.materials.values()].map((m) => ({ ...m, baseColour: { ...m.baseColour }, emissive: { ...m.emissive } })),
     textures: [...project.textures.values()].map((t) => ({ ...t })),
-    images: [...project.images.values()].map((i) => ({ ...i, pixels: [...i.pixels] })),
+    images: [...project.images.values()].map(encodeImageAsset),
     armatures: [...project.armatures.values()].map(encodeArmature),
     skinBindings: [...project.skinBindings.values()].map(encodeSkinBinding),
     animationClips: [...project.animationClips.values()].map(encodeAnimationClip),
@@ -135,7 +136,7 @@ export function serializeViperProject(project: ViperProject, applicationVersion 
   });
 }
 
-export function serializeProject(doc: ModelDocument, applicationVersion = '0.0.0'): string {
+export function serializeProject(doc: ModelDocument, applicationVersion = APP_VERSION): string {
   const binding = resolveDocumentView(doc);
   if (binding) {
     binding.project.activeDocumentId = binding.documentId;
@@ -188,12 +189,15 @@ export function deserializeViperProject(text: string): DeserializeProjectResult 
     for (const encoded of p.meshes) {
       const mesh = decodeMesh(encoded);
       const report = validateMeshFull(mesh);
-      if (!report.ok) throw new Error(`Invalid mesh ${mesh.name}`);
+      if (!report.ok) {
+        const first = report.issues.find((issue) => issue.severity === 'error');
+        throw new Error(first ? `Invalid mesh ${mesh.name}: ${first.message}` : `Invalid mesh ${mesh.name}`);
+      }
       project.meshes.set(mesh.id, mesh);
     }
     project.materials = new Map(p.materials.map((m) => [m.id, normalizeMaterialAsset(m)]));
     project.textures = new Map(p.textures.map((t) => [t.id, t]));
-    project.images = new Map(p.images.map((i) => [i.id, { ...i, pixels: new Uint8ClampedArray(i.pixels) }]));
+    project.images = new Map(p.images.map((i) => [i.id, decodeImageAsset(i)]));
     project.armatures = new Map((p.armatures ?? []).map((entry) => [entry.id, decodeArmature(entry)]));
     project.skinBindings = new Map((p.skinBindings ?? []).map((entry) => [entry.id, decodeSkinBinding(entry)]));
     project.animationClips = new Map((p.animationClips ?? []).map((entry) => [entry.id, decodeAnimationClip(entry)]));
@@ -257,12 +261,15 @@ function buildLegacyModelDocument(d: LegacyProjectFile['document']): ModelDocume
     meshes: new Map(),
     materials: new Map(d.materials.map((m) => [m.id, normalizeMaterialAsset(m)])),
     textures: new Map(d.textures.map((t) => [t.id, t])),
-    images: new Map(d.images.map((i) => [i.id, { ...i, pixels: new Uint8ClampedArray(i.pixels) }])),
+    images: new Map(d.images.map((i) => [i.id, decodeImageAsset(i)])),
   };
   for (const encoded of d.meshes) {
     const mesh = decodeMesh(encoded);
     const report = validateMeshFull(mesh);
-    if (!report.ok) throw new Error(`Invalid mesh ${mesh.name}`);
+    if (!report.ok) {
+      const first = report.issues.find((issue) => issue.severity === 'error');
+      throw new Error(first ? `Invalid mesh ${mesh.name}: ${first.message}` : `Invalid mesh ${mesh.name}`);
+    }
     doc.meshes.set(mesh.id, mesh);
   }
   normalizeDocumentObjects(doc.objects);
@@ -297,6 +304,31 @@ function encodeMesh(mesh: EditableMesh): EncodedMesh {
 
 function decodeMesh(encoded: EncodedMesh): EditableMesh {
   return { ...encoded, vertices: new Map(encoded.vertices.map((v) => [v.id, v])), edges: new Map(encoded.edges.map((e) => [e.id, e])), halfEdges: new Map(encoded.halfEdges.map((h) => [h.id, h])), faces: new Map(encoded.faces.map((f) => [f.id, f])), faceCorners: new Map(encoded.faceCorners.map((c) => [c.id, { ...c, uvs: new Map(c.uvs) }])), uvLayers: new Map(encoded.uvLayers.map((u) => [u.id, u])), triangulationHints: new Map(encoded.triangulationHints), dirty: emptyDirtyFlags(true) };
+}
+
+function encodeImageAsset(image: ImageAsset) {
+  return {
+    ...image,
+    pixels: [...image.pixels],
+    paintLayers: image.paintLayers?.map((layer) => ({
+      ...layer,
+      pixels: [...layer.pixels],
+    })),
+  };
+}
+
+function decodeImageAsset(encoded: Omit<ImageAsset, 'pixels' | 'paintLayers'> & {
+  pixels: ArrayLike<number>;
+  paintLayers?: Array<Omit<NonNullable<ImageAsset['paintLayers']>[number], 'pixels'> & { pixels: ArrayLike<number> }>;
+}): ImageAsset {
+  return {
+    ...encoded,
+    pixels: new Uint8ClampedArray(encoded.pixels),
+    paintLayers: encoded.paintLayers?.map((layer) => ({
+      ...layer,
+      pixels: new Uint8ClampedArray(layer.pixels),
+    })),
+  };
 }
 
 function checksum(text: string): string {

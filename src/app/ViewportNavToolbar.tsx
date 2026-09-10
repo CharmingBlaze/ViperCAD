@@ -16,6 +16,9 @@ type Props = {
   onFrame: (viewId: ViewId) => void;
   onMaximize: (viewId: ViewId) => void;
   onDrag: (mode: DragMode, deltaX: number, deltaY: number, viewId: ViewId) => void;
+  compact?: boolean;
+  ghostEnabled?: boolean;
+  onToggleGhost?: () => void;
 };
 
 /** Inset from a pane's right edge; left-column panes need extra clearance at the split. */
@@ -41,6 +44,9 @@ export function ViewportNavToolbar({
   onFrame,
   onMaximize,
   onDrag,
+  compact = false,
+  ghostEnabled = false,
+  onToggleGhost,
 }: Props) {
   const dragRef = useRef<{
     mode: DragMode;
@@ -138,10 +144,31 @@ export function ViewportNavToolbar({
           <path d="M8 2.5v11M2.5 8h11" />
         </svg>
       </button>
+      {!compact && (
+        <button
+          type="button"
+          className={`viewport-nav-btn${navMode === 'select' && navViewId === viewId ? ' is-active' : ''}`}
+          aria-label="Stylus selection"
+          aria-pressed={navMode === 'select' && navViewId === viewId}
+          title="Stylus / Box Selection — Tap to select, drag to box-select with pen or stylus"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onSetNav(navMode === 'select' && navViewId === viewId ? 'none' : 'select', viewId);
+          }}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden>
+            <rect x="2" y="5.5" width="7" height="7.5" rx="1.5" strokeDasharray="2 1.5" />
+            <path d="M14.2 1.8a1.2 1.2 0 0 0-1.7 0L8.2 6.1l-.8 2.5 2.5-.8 4.3-4.3a1.2 1.2 0 0 0 0-1.7z" />
+            <path d="M8.2 6.1 9.9 7.8" />
+            <path d="M7.4 8.6 6 10" />
+          </svg>
+        </button>
+      )}
       {dragButton(
         'pan',
         'Pan',
-        'Pan view — drag here or in viewport',
+        'Pan view — RMB drag, Shift+scroll, or Alt+Shift+drag',
         (
           <svg viewBox="0 0 16 16" aria-hidden>
             <path d="M8 2.5v11M2.5 8h11" />
@@ -152,7 +179,7 @@ export function ViewportNavToolbar({
       {dragButton(
         'orbit',
         'Rotate',
-        isPerspective ? 'Orbit view — drag here or in viewport' : 'Orbit (perspective views only)',
+        isPerspective ? 'Orbit view — LMB drag, MMB, or Alt+drag (laptop)' : 'Orbit (perspective views only)',
         (
           <svg viewBox="0 0 16 16" aria-hidden>
             <path d="M3.5 8a4.5 4.5 0 0 1 7.8-3.1" />
@@ -165,7 +192,7 @@ export function ViewportNavToolbar({
       {dragButton(
         'zoom',
         'Zoom',
-        'Zoom view — drag here or in viewport',
+        'Zoom view — mouse wheel, pinch, or Ctrl+Alt+drag',
         (
           <svg viewBox="0 0 16 16" aria-hidden>
             <circle cx="7" cy="7" r="4.25" />
@@ -174,27 +201,49 @@ export function ViewportNavToolbar({
           </svg>
         ),
       )}
-      <button
-        type="button"
-        className={`viewport-nav-btn viewport-nav-maximize${isMaximized ? ' is-active' : ''}`}
-        aria-label={isMaximized ? 'Restore quad view' : 'Maximize viewport'}
-        title={isMaximized ? 'Restore quad view (Tab)' : 'Maximize viewport (Tab)'}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onMaximize(viewId);
-        }}
-      >
-        {isMaximized ? (
+      {onToggleGhost && (
+        <button
+          type="button"
+          className={`viewport-nav-btn${ghostEnabled ? ' is-active' : ''}`}
+          aria-label="Ghost frames"
+          aria-pressed={ghostEnabled}
+          title="Ghost frames"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onToggleGhost();
+          }}
+        >
           <svg viewBox="0 0 16 16" aria-hidden>
-            <path d="M3.5 6.5h6v6h-6zM6.5 3.5h6v6" />
+            <circle cx="5.5" cy="8" r="2.2" opacity="0.45" />
+            <circle cx="8" cy="8" r="2.4" />
+            <circle cx="10.5" cy="8" r="2.2" opacity="0.45" />
           </svg>
-        ) : (
-          <svg viewBox="0 0 16 16" aria-hidden>
-            <path d="M3.5 6V3.5H6M10 3.5h2.5V6M12.5 10v2.5H10M6 12.5H3.5V10" />
-          </svg>
-        )}
-      </button>
+        </button>
+      )}
+      {!compact && (
+        <button
+          type="button"
+          className={`viewport-nav-btn viewport-nav-maximize${isMaximized ? ' is-active' : ''}`}
+          aria-label={isMaximized ? 'Restore quad view' : 'Maximize viewport'}
+          title={isMaximized ? 'Restore quad view (Tab)' : 'Maximize viewport (Tab)'}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onMaximize(viewId);
+          }}
+        >
+          {isMaximized ? (
+            <svg viewBox="0 0 16 16" aria-hidden>
+              <path d="M3.5 6.5h6v6h-6zM6.5 3.5h6v6" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 16 16" aria-hidden>
+              <path d="M3.5 6V3.5H6M10 3.5h2.5V6M12.5 10v2.5H10M6 12.5H3.5V10" />
+            </svg>
+          )}
+        </button>
+      )}
     </div>
   );
 }

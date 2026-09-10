@@ -24,6 +24,13 @@ export class CreatePrimitiveTool implements Tool {
   label = 'Create Primitive';
   parameters: PrimitiveParameters = defaultPrimitiveParameters('box');
   state: PrimitivePreviewState = this.emptyState('box');
+  continuous = false;
+  /** True only after the user picks a primitive type (cards or Type dropdown). */
+  kindChosen = false;
+  private hoverOrigin: Vec3 | null = null;
+  private hoverPlane: ConstructionPlane | null = null;
+  private hoverPlaneId = 'top';
+  private hoverSize = 1;
   private previousSelection: SelectionState | null = null;
   /** Screen anchor for height drag when the camera looks along the extrusion axis. */
   private heightScreenAnchor: { screenY: number; startHeight: number } | null = null;
@@ -32,10 +39,16 @@ export class CreatePrimitiveTool implements Tool {
   deactivate(context: ModellingContext): void { this.cancel(context); }
 
   selectPrimitive(kind: PrimitiveKind, context: ModellingContext): void {
-    this.cancel(context); this.parameters = defaultPrimitiveParameters(kind, this.parameters.preset); this.state = this.emptyState(kind); context.requestRedraw();
+    this.cancel(context);
+    this.kindChosen = true;
+    this.parameters = defaultPrimitiveParameters(kind, this.parameters.preset);
+    this.state = this.emptyState(kind);
+    this.seedIdleGhost(context);
+    context.requestRedraw();
   }
 
   setPreset(preset: ComplexityPreset, context: ModellingContext): void { this.parameters = defaultPrimitiveParameters(this.state.kind, preset); this.touch(context); }
+  setContinuous(continuous: boolean, context: ModellingContext): void { this.continuous = continuous; this.touch(context); }
   setParameters(patch: Partial<PrimitiveParameters>, context: ModellingContext): void { this.parameters = clampPrimitiveParameters({ ...this.parameters, ...patch, preset: patch.preset ?? 'custom' }); this.touch(context); }
 
   begin(input: ToolPointerInput, context: ModellingContext): void {
@@ -124,11 +137,16 @@ export class CreatePrimitiveTool implements Tool {
     });
     context.selection.setMode('object'); context.selection.selectObjects([objectId], 'replace'); const afterSelection = cloneSelection(context.selection.state); let applied = true;
     context.history.execute({ name: `Create ${PRIMITIVE_LABELS[this.state.kind]}`, execute: () => { if (applied) return; context.document.objects.set(object.id, object); context.document.meshes.set(meshRef.id, meshRef); if (!context.document.rootObjectIds.includes(object.id)) context.document.rootObjectIds.push(object.id); context.selection.state = cloneSelection(afterSelection); context.document.dirty = true; applied = true; }, undo: () => { context.document.objects.delete(object.id); context.document.rootObjectIds = context.document.rootObjectIds.filter((id) => id !== object.id); if (![...context.document.objects.values()].some((o) => o.meshId === meshRef.id)) context.document.meshes.delete(meshRef.id); context.selection.state = cloneSelection(beforeSelection); context.document.dirty = true; applied = false; } });
+    context.notify?.(`${PRIMITIVE_LABELS[this.state.kind]} created`, 'success');
     const kind = this.state.kind;
     this.previousSelection = null;
     this.heightScreenAnchor = null;
     this.state = this.emptyState(kind);
     context.requestRedraw();
+    if (!this.continuous) {
+      context.setGizmoMode?.('combined');
+      context.setActiveTool?.('select');
+    }
   }
 
   cancel(context: ModellingContext): void {
@@ -154,7 +172,45 @@ export class CreatePrimitiveTool implements Tool {
     return { origin, axisU: plane.xAxis, axisV: plane.yAxis, axisNormal: plane.normal, sizeU, sizeV, sizeNormal: normal, minLocal: { x: 0, y: 0, z: 0 }, maxLocal: { x: sizeU, y: normal, z: sizeV }, constructionPlaneId: this.state.constructionPlaneId, creationDirection: direction };
   }
 
-  getPreviewMesh() { const cage = this.getCage(true); return cage && this.validBaseRaw() ? buildPrimitiveInCage(this.state.kind, cage, this.parameters) : null; }
+  getPreviewMesh() {
+    const cage = this.getCage(true) ?? this.getIdleCage();
+    return cage ? buildPrimitiveInCage(this.state.kind, cage, this.parameters) : null;
+  }
+
+  previewHover(input: ToolPointerInput, context: ModellingContext): void {
+    if (!this.kindChosen || this.state.stage !== 'idle') return;
+    const hit = this.hitOnPlane(input, context.constructionPlane, context);
+    if (!hit) return;
+    this.hoverOrigin = hit.position;
+    this.hoverPlane = { ...context.constructionPlane };
+    this.hoverPlaneId = context.constructionPlaneId ?? 'custom';
+    this.hoverSize = Math.max(context.gridSize || 1, 0.25);
+    this.touch(context);
+  }
+
+  getIdleCage(): PrimitiveConstructionCage | null {
+    if (!this.kindChosen || this.state.stage !== 'idle' || !this.hoverOrigin || !this.hoverPlane) return null;
+    const plane = this.hoverPlane;
+    const size = this.hoverSize;
+    const origin = addVec3(
+      this.hoverOrigin,
+      addVec3(scaleVec3(plane.xAxis, -size * 0.5), scaleVec3(plane.yAxis, -size * 0.5)),
+    );
+    const height = this.state.kind === 'plane' ? 0 : size;
+    return {
+      origin,
+      axisU: plane.xAxis,
+      axisV: plane.yAxis,
+      axisNormal: plane.normal,
+      sizeU: size,
+      sizeV: size,
+      sizeNormal: height,
+      minLocal: { x: 0, y: 0, z: 0 },
+      maxLocal: { x: size, y: height, z: size },
+      constructionPlaneId: this.hoverPlaneId,
+      creationDirection: 1,
+    };
+  }
 
   getDimensions(): PrimitiveDimensions {
     const c = this.getCage(); if (!c) return { width: 0, height: 0, depth: 0 };
@@ -223,8 +279,14 @@ export class CreatePrimitiveTool implements Tool {
   }
   private applyProportionalHeight(){const cage=this.getCage();if(!cage)return;this.state.normalDistance=Math.sign(this.state.normalDistance||1)*Math.max(cage.sizeU,cage.sizeV);}
   private validBase(context:ModellingContext){const c=this.getCage();return !!c&&c.sizeU>=this.tolerance(context)&&c.sizeV>=this.tolerance(context);}
-  private validBaseRaw(){const c=this.getCage();return !!c&&c.sizeU>1e-8&&c.sizeV>1e-8;}
   private tolerance(context:ModellingContext){return Math.max(1e-6,context.gridSize*1e-4);}
+  private seedIdleGhost(context: ModellingContext): void {
+    this.hoverPlane = { ...context.constructionPlane };
+    this.hoverPlaneId = context.constructionPlaneId ?? 'top';
+    this.hoverSize = Math.max(context.gridSize || 1, 0.25);
+    this.hoverOrigin = context.constructionPlane.origin;
+    this.state.revision += 1;
+  }
   private touch(context:ModellingContext){this.state.revision+=1;context.requestRedraw();}
   private emptyState(kind:PrimitiveKind):PrimitivePreviewState{return{stage:'idle',kind,cornerA:null,cornerB:null,normalDistance:0,plane:null,constructionPlaneId:'top',fromCentre:false,proportional:false,snapLabel:'none',revision:0};}
 }

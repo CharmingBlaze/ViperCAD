@@ -1,6 +1,5 @@
 import {
   createDefaultMirrorModifier,
-  createDefaultSubdivisionModifier,
   createEmptyModifierStack,
   MODIFIER_STACK_METADATA_KEY,
   type MirrorAxis,

@@ -7,11 +7,12 @@ import { MaterialEditor } from '@/app/MaterialEditor';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { bumpPositions } from '@/core/mesh/EditableMesh';
 import { cloneVec3 } from '@/core/math/Vec3';
+import { usePanelResizer } from '@/app/usePanelResizer';
 import {
-  activeTerrain,
   applyTerrainTileRepeat,
   createTerrain,
   resampleTerrain,
+  resolveTerrainAsset,
   terrainHeightRange,
 } from '@/core/terrain/Terrain';
 import {
@@ -53,6 +54,10 @@ import {
   commitOceanWithCarve,
   type TerrainFeatureKind,
 } from '@/core/terrain/TerrainFeatures';
+import { TerrainObjectTool, type TerrainObjectBrushMode } from '@/core/tools/TerrainObjectTool';
+import { activateTerrainWorkspaceTool } from '@/app/terrainWorkspace';
+import { applyHydraulicErosion, applyThermalErosion } from '@/core/terrain/TerrainErosion';
+import { applyAutoBiomeColors } from '@/core/terrain/TerrainBiomes';
 
 type Props = {
   session: EditorSession;
@@ -60,9 +65,10 @@ type Props = {
   onRefresh: () => void;
   onOpenSceneObjects: () => void;
   sceneObjectsOpen: boolean;
+  focusTab?: TerrainPanelTab | null;
 };
 
-type TerrainPanelTab = 'terrain' | 'sculpt' | 'height' | 'surface' | 'water' | 'objects';
+export type TerrainPanelTab = 'terrain' | 'sculpt' | 'height' | 'surface' | 'water' | 'objects';
 
 export function TerrainPanel({
   session,
@@ -70,8 +76,9 @@ export function TerrainPanel({
   onRefresh,
   onOpenSceneObjects,
   sceneObjectsOpen,
+  focusTab,
 }: Props) {
-  const [activeTab, setActiveTab] = useState<TerrainPanelTab>('terrain');
+  const [activeTab, setActiveTab] = useState<TerrainPanelTab>('sculpt');
   const [size, setSize] = useState(20);
   const [resolution, setResolution] = useState(32);
   const [tileRepeat, setTileRepeat] = useState(8);
@@ -108,19 +115,14 @@ export function TerrainPanel({
   const terrains = [...session.document.objects.values()].filter(
     (object) => object.metadata.terrain === 'true',
   );
-  const terrain = activeTerrain(session) ?? (() => {
-    const selected = session.selection.state.activeObjectId
-      ? session.document.objects.get(session.selection.state.activeObjectId)
-      : null;
-    const owner = selected?.metadata.terrainOwnerId
-      ? session.document.objects.get(selected.metadata.terrainOwnerId)
-      : null;
-    const object = owner?.metadata.terrain === 'true' ? owner : terrains[0];
-    const mesh = object?.meshId ? session.document.meshes.get(object.meshId) : null;
-    return object && mesh ? { object, mesh } : null;
-  })();
+  const terrain = resolveTerrainAsset(session);
   const tool = session.tools.get('terrain-sculpt') as TerrainSculptTool;
+  const objectTool = session.tools.get('terrain-object') as TerrainObjectTool;
   const featureTool = session.tools.get('terrain-feature') as TerrainFeatureTool;
+
+  useEffect(() => {
+    if (focusTab) setActiveTab(focusTab);
+  }, [focusTab]);
   const placedObjects = terrainPlacedObjects(session.document, terrain?.object.id);
   const projectImages = [...session.document.images.values()];
   const effectiveHeightmapId =
@@ -386,15 +388,35 @@ export function TerrainPanel({
     }
   };
 
+  const resizer = usePanelResizer({
+    storageKey: 'vipercad.sidebar.width.terrain',
+    defaultWidth: 280,
+    minWidth: 220,
+    maxWidth: 580,
+  });
+
   return (
-    <aside className="app-inspector terrain-panel" aria-label="Terrain editor">
+    <aside
+      className={`app-inspector terrain-panel${resizer.isResizing ? ' is-resizing' : ''}`}
+      ref={resizer.containerRef}
+      aria-label="Terrain editor"
+      style={{ width: resizer.width, flex: `0 0 ${resizer.width}px` }}
+    >
+      <div
+        className="panel-width-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize terrain panel"
+        title="Drag to resize terrain panel · Double-click resets (280px)"
+        {...resizer.resizerProps}
+      />
       <header className="app-inspector-header">
         <span className="uv-panel-kicker">Workspace</span>
         <strong>Terrain</strong>
         <p>
           {terrain
-            ? `${terrain.object.name} · ${terrain.mesh.vertices.size.toLocaleString()} vertices`
-            : 'Create or select terrain'}
+            ? `${terrain.object.name} · ${terrain.mesh.vertices.size.toLocaleString()} verts`
+            : 'Create a terrain mesh to sculpt'}
         </p>
       </header>
       <nav className="terrain-panel-tabs" aria-label="Terrain tools">
@@ -461,29 +483,66 @@ export function TerrainPanel({
                 <h3 className="uv-section-title">Level objects</h3>
                 <span className="terrain-count">{placedObjects.length} placed</span>
               </div>
+              <div className="uv-btn-grid uv-btn-grid-4">
+                {([
+                  ['place', 'Place'],
+                  ['scatter', 'Scatter'],
+                  ['erase', 'Erase'],
+                ] as [TerrainObjectBrushMode, string][]).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`tool${session.tools.getActive() === objectTool && objectTool.mode === mode ? ' is-active' : ''}`}
+                    aria-pressed={session.tools.getActive() === objectTool && objectTool.mode === mode}
+                    disabled={!terrain}
+                    onClick={() => {
+                      if (!terrain) return;
+                      objectTool.setTerrain(terrain.object.id, session.context());
+                      objectTool.setMode(mode, session.context());
+                      activateTerrainWorkspaceTool(session, 'objects');
+                      onOpenSceneObjects();
+                      onRefresh();
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className={`tool${session.tools.getActive()?.id === 'select' ? ' is-active' : ''}`}
+                  onClick={() => {
+                    activateTerrainWorkspaceTool(session, 'select');
+                    onRefresh();
+                  }}
+                >
+                  Select
+                </button>
+              </div>
               <button
                 type="button"
                 className="tool primary uv-btn-block"
-                disabled={sceneObjectsOpen}
+                disabled={!terrain}
                 onClick={onOpenSceneObjects}
               >
-                {sceneObjectsOpen ? 'Scene Objects is open' : 'Open Scene Objects'}
+                {sceneObjectsOpen ? 'Library is open' : 'Open object library'}
               </button>
               <p className="uv-hint">
-                The movable Scene Objects window contains object previews, placement,
-                scatter, erase, and selection controls.
+                Place / Scatter / Erase on the terrain. Select then G/R/S to move props. The library window holds presets and imports.
               </p>
             </section>
 
             <section className="uv-section" hidden={activeTab !== 'sculpt'}>
               <h3 className="uv-section-title">Sculpt</h3>
-              <div className="terrain-brush-grid">
+              <div className="uv-btn-grid uv-btn-grid-3">
                 {([
                   ['raise', 'Raise'],
                   ['lower', 'Lower'],
                   ['smooth', 'Smooth'],
                   ['flatten', 'Flatten'],
+                  ['erosion', 'Erosion'],
+                  ['thermal', 'Thermal'],
                   ['noise', 'Noise'],
+                  ['plateau', 'Plateau'],
                 ] as [TerrainBrushMode, string][]).map(([mode, label]) => (
                   <button
                     key={mode}
@@ -522,21 +581,70 @@ export function TerrainPanel({
                     <span>Flatten height</span>
                     <input className="uv-text" type="number" step={0.1} value={tool.flattenHeight} onChange={(event) => { tool.flattenHeight = Number(event.target.value); onRefresh(); }} />
                   </label>
-                  <p className="uv-hint">Alt+click samples height from the terrain surface.</p>
+                  <p className="uv-hint">Ctrl+click samples height from the terrain. Alt+drag still orbits.</p>
                 </>
               )}
-              <p className="uv-hint">LMB drag sculpts · Shift inverts raise/lower/noise · wheel changes brush size · RMB orbits camera.</p>
+              <p className="uv-hint">LMB sculpts on the ground · Alt+drag orbits · Shift+Alt pans · Ctrl+Alt zooms · RMB pans · wheel or [ ] brush size · Shift inverts raise/lower.</p>
             </section>
 
             <section className="uv-section" hidden={activeTab !== 'sculpt'}>
-              <h3 className="uv-section-title">Shape operations</h3>
+              <h3 className="uv-section-title">Shape &amp; Biome operations</h3>
               <div className="uv-btn-grid uv-btn-grid-2">
                 <button type="button" className="tool" onClick={() => editAllHeights('Flatten Terrain', (values) => values.map(() => tool.flattenHeight))}>Flatten all</button>
                 <button type="button" className="tool" onClick={() => editAllHeights('Smooth Terrain', smoothGrid)}>Smooth all</button>
                 <button type="button" className="tool" onClick={() => editAllHeights('Noise Terrain', (values, res) => values.map((value, i) => value + pseudoNoise(i % (res + 1), Math.floor(i / (res + 1))) * tool.strength))}>Add noise</button>
-                <button type="button" className="tool" onClick={() => editAllHeights('Erode Terrain', (values, res) => smoothGrid(smoothGrid(values, res), res))}>Soft erosion</button>
+                <button
+                  type="button"
+                  className="tool"
+                  onClick={() => {
+                    if (!terrain) return;
+                    applyHydraulicErosion(terrain.mesh, { iterations: 4, rainAmount: 0.08 });
+                    bumpPositions(terrain.mesh);
+                    session.document.dirty = true;
+                    session.requestRedraw();
+                    onRefresh();
+                    pushToast('Hydraulic erosion applied', 'info');
+                  }}
+                >
+                  Hydraulic erosion
+                </button>
+                <button
+                  type="button"
+                  className="tool"
+                  onClick={() => {
+                    if (!terrain) return;
+                    applyThermalErosion(terrain.mesh, { iterations: 3, talusAngle: 0.35 });
+                    bumpPositions(terrain.mesh);
+                    session.document.dirty = true;
+                    session.requestRedraw();
+                    onRefresh();
+                    pushToast('Thermal erosion applied', 'info');
+                  }}
+                >
+                  Thermal erosion
+                </button>
+                <button
+                  type="button"
+                  className="tool primary"
+                  onClick={() => {
+                    if (!terrain) return;
+                    const material = session.document.materials.get(terrain.object.materialSlotIds[0] ?? '');
+                    const texture = material?.baseColourTextureId ? session.document.textures.get(material.baseColourTextureId) : null;
+                    const image = texture?.imageAssetId ? session.document.images.get(texture.imageAssetId) : null;
+                    if (image) {
+                      applyAutoBiomeColors(terrain.mesh, image, { waterLevel: waterLevel });
+                      session.document.dirty = true;
+                      session.requestRedraw();
+                      onRefresh();
+                      pushToast('Auto-Biome colors painted!', 'info');
+                    } else {
+                      pushToast('No surface texture image found on terrain', 'error');
+                    }
+                  }}
+                >
+                  Paint biomes
+                </button>
               </div>
-              <p className="uv-meta">Height {heights.min.toFixed(2)} to {heights.max.toFixed(2)}</p>
             </section>
 
             <section className="uv-section terrain-heightmap-section" hidden={activeTab !== 'height'}>
@@ -790,7 +898,7 @@ export function TerrainPanel({
                 </span>
               </div>
               <p className="uv-hint">
-                Rivers, paths, and lakes carve soft depressions into the heightmap; water fills the cut.
+                Rivers, paths, and lakes carve soft depressions into the heightmap; water fills the cut. After a large sculpt pass, redraw a river or path so it sits on the new surface.
               </p>
               <label className="uv-check">
                 <input

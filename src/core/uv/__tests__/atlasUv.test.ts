@@ -116,6 +116,8 @@ describe('sprite atlas UV placement', () => {
 
   it('renders pixel-art unlit materials with a genuinely shadeless shader', () => {
     const material = createDefaultMaterial();
+    material.shadingModel = 'lit';
+    material.unlit = false;
     expect(materialAssetToThree(material)).toBeInstanceOf(MeshStandardMaterial);
     material.shadingModel = 'unlit';
     material.unlit = true;

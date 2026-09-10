@@ -21,10 +21,13 @@ export function listClipsForRig(project: ViperProject, rigDocument: ViperDocumen
 export function createClipForRig(
   project: ViperProject,
   rigDocument: ViperDocument,
-  name = 'Action',
+  name?: string,
 ): AnimationClip {
   const settings = readRigDocumentSettings(rigDocument);
-  const clip = createDefaultAnimationClip(name);
+  const existing = settings.clipIds.length;
+  const clip = createDefaultAnimationClip(
+    name ?? `Animation ${String(existing + 1).padStart(2, '0')}`,
+  );
   project.animationClips.set(clip.id, clip);
   if (!settings.clipIds.includes(clip.id)) settings.clipIds.push(clip.id);
   settings.activeClipId = clip.id;
@@ -85,10 +88,13 @@ export function duplicateClip(
   const clip = createDefaultAnimationClip(`${source.name} Copy`);
   clip.duration = source.duration;
   clip.fps = source.fps;
+  clip.rootMotion = source.rootMotion;
+  clip.events = source.events?.map((e) => ({ ...e }));
   clip.tracks = source.tracks.map((track) => ({
     boneId: track.boneId,
     keyframes: track.keyframes.map((keyframe) => ({
       time: keyframe.time,
+      interpolation: keyframe.interpolation,
       value: {
         position: { ...keyframe.value.position },
         rotation: { ...keyframe.value.rotation },

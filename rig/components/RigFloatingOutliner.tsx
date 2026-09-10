@@ -7,7 +7,6 @@ import type { ObjectId, SceneObject } from '@/core/document/types';
 import {
   listSceneCameras,
   sceneObjectKindLabel,
-  type RigLightType,
 } from '../scene/RigSceneAssets';
 import type { RigSession } from '../RigSession';
 import type { RigWorkspace } from '../RigWorkspace';
@@ -329,10 +328,6 @@ export function RigFloatingOutliner({ session, workspace, onClose, onRefresh }: 
       );
     });
 
-  const addLight = (lightType: RigLightType) => {
-    session.addLight(lightType);
-    touch();
-  };
 
   return (
     <aside
@@ -417,28 +412,13 @@ export function RigFloatingOutliner({ session, workspace, onClose, onRefresh }: 
                 type="button"
                 className="scene-toolbar-btn"
                 disabled={!source}
+                title="Create a new camera view"
                 onClick={() => {
                   session.addCamera();
                   touch();
                 }}
               >
                 + Camera
-              </button>
-              <button
-                type="button"
-                className="scene-toolbar-btn"
-                disabled={!source}
-                onClick={() => addLight('directional')}
-              >
-                + Sun
-              </button>
-              <button
-                type="button"
-                className="scene-toolbar-btn"
-                disabled={!source}
-                onClick={() => addLight('point')}
-              >
-                + Point
               </button>
             </div>
           </div>

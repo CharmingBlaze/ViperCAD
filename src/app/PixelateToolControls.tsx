@@ -70,13 +70,16 @@ export function PixelateToolControls({
     else setLocalMode(value);
   };
 
-  const mapEntries = material ? listMaterialMapEntries(session.document, material) : [];
+  const mapEntries = useMemo(
+    () => (material ? listMaterialMapEntries(session.document, material) : []),
+    [session.document, material],
+  );
   const previewImage = image ?? mapEntries[0]?.image ?? null;
 
   useEffect(() => {
     if (!showAllMapsAction || !mapEntries.length) return;
     setSelectedSlots(new Set(mapEntries.map((entry) => entry.slot)));
-  }, [showAllMapsAction, material?.id, mapEntries.length]);
+  }, [showAllMapsAction, material?.id, mapEntries]);
 
   const previewPixels = useMemo(() => {
     if (!previewImage) return null;
@@ -87,7 +90,7 @@ export function PixelateToolControls({
       blockSize,
       mode,
     );
-  }, [previewImage, previewImage?.revision, blockSize, mode]);
+  }, [previewImage, blockSize, mode]);
 
   useEffect(() => {
     if (!previewImage) return;

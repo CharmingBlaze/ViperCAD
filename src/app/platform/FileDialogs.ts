@@ -28,6 +28,34 @@ export type SaveFileOptions = {
   existing?: FileToken | null;
 };
 
+export const GLB_FILE: FileDialogType = {
+  description: 'Binary glTF (.glb)',
+  accept: {
+    'model/gltf-binary': ['.glb'],
+  },
+};
+
+export const GLBA_FILE: FileDialogType = {
+  description: 'GLB Animator Scene (.glba)',
+  accept: {
+    'application/json': ['.glba', '.json'],
+  },
+};
+
+export const GLBKF_FILE: FileDialogType = {
+  description: 'GLB Animator Keyframes (.glbkf)',
+  accept: {
+    'application/json': ['.glbkf', '.json'],
+  },
+};
+
+export const GLBCA_FILE: FileDialogType = {
+  description: 'GLB Animator Clip Sequence (.glbca)',
+  accept: {
+    'application/json': ['.glbca', '.json'],
+  },
+};
+
 type BrowserWritable = {
   write(data: Blob): Promise<void>;
   close(): Promise<void>;

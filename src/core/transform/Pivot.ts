@@ -7,6 +7,25 @@ import type { SelectionState } from '@/core/selection/SelectionManager';
 import type { TransformPivotMode } from './types';
 import { gatherTargetVertexIds } from './Targets';
 
+/** World-space mesh interior used to point gizmo arrows away from the volume. */
+export function computeSelectionInterior(
+  doc: ModelDocument,
+  selection: SelectionState,
+): Vec3 | null {
+  const ids =
+    selection.mode === 'object'
+      ? [...selection.selectedObjectIds]
+      : selection.activeObjectId
+        ? [selection.activeObjectId]
+        : [];
+  const points: Vec3[] = [];
+  for (const id of ids) {
+    points.push(...collectObjectWorldPoints(doc, id));
+  }
+  if (points.length < 2) return null;
+  return boundsCentre(points);
+}
+
 export function computePivot(
   doc: ModelDocument,
   selection: SelectionState,

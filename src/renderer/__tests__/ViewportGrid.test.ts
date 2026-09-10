@@ -1,27 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { BufferAttribute, BufferGeometry, LineSegments, Vector3 } from 'three';
-import { GRID_BASE_DIVISIONS, niceGridSize, ViewportGrid } from '@/renderer/ViewportGrid';
+import { ShaderMaterial, Vector3 } from 'three';
+import { niceGridSize, niceGridSpacing, ViewportGrid } from '@/renderer/ViewportGrid';
 
 describe('ViewportGrid', () => {
-  it('centres its adaptive patch around the snapped view target', () => {
+  it('anchors the floor patch on the snapped view target', () => {
     const grid = new ViewportGrid();
-    grid.update('top', 20, new Vector3(100, 0, -50));
-
-    const lines = grid.children[0] as LineSegments<BufferGeometry>;
-    const positions = lines.geometry.getAttribute('position') as BufferAttribute;
-    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-
-    for (let i = 0; i < positions.count; i++) {
-      minX = Math.min(minX, positions.getX(i)); maxX = Math.max(maxX, positions.getX(i));
-      minZ = Math.min(minZ, positions.getZ(i)); maxZ = Math.max(maxZ, positions.getZ(i));
-    }
-    expect((minX + maxX) / 2).toBeCloseTo(100);
-    expect((minZ + maxZ) / 2).toBeCloseTo(-50);
+    grid.update('top', 20, new Vector3(100, 0, -50), 1);
+    expect(grid.mesh.position.x).toBeCloseTo(100);
+    expect(grid.mesh.position.z).toBeCloseTo(-50);
+    expect((grid.mesh.material as ShaderMaterial).uniforms.planeMode.value).toBe(0);
+    expect((grid.mesh.material as ShaderMaterial).uniforms.cellSize.value).toBe(1);
   });
 
-  it('keeps about twenty cells visible at wide camera overviews', () => {
-    const size = niceGridSize(512);
-    const spacing = size / GRID_BASE_DIVISIONS;
-    expect(size / spacing).toBe(GRID_BASE_DIVISIONS);
+  it('uses a vertical plane for front views', () => {
+    const grid = new ViewportGrid();
+    grid.update('front', 20, new Vector3(0, 4, 0), 1);
+    expect((grid.mesh.material as ShaderMaterial).uniforms.planeMode.value).toBe(1);
+    expect(grid.mesh.position.y).toBeCloseTo(4);
+  });
+
+  it('keeps about eighteen cells visible across a view span', () => {
+    const span = 512;
+    const spacing = niceGridSpacing(span);
+    const cells = span / spacing;
+    expect(cells).toBeGreaterThan(10);
+    expect(cells).toBeLessThan(40);
+  });
+
+  it('extends the perspective patch far beyond the visible span', () => {
+    expect(niceGridSize(16, true)).toBeGreaterThan(niceGridSize(16, false));
   });
 });

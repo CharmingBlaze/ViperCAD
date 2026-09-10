@@ -1,6 +1,7 @@
 import {
   createEmptyProject,
   projectFromLegacyDocument,
+  removeGeneratedDefaultChecker,
 } from '@/core/document/ViperProject';
 import type { DocumentId, DocumentKind, ModelDocument, ObjectId, SceneObject, ViperProject } from '@/core/document/types';
 import { syncFocusScopeFilter } from '@/core/editor/GroupFocus';
@@ -19,11 +20,19 @@ import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
 import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
+import { BlockoutVectorTool } from '@/core/tools/BlockoutVectorTool';
+import { BlockoutSolidTool } from '@/core/tools/BlockoutSolidTool';
+import { BlockoutRoundTool } from '@/core/tools/BlockoutRoundTool';
+import { createEmptyBlockoutReferenceState, type BlockoutReferenceState } from '@/core/blockout/ReferenceImages';
 import { ToolController } from '@/core/tools/ToolController';
 import type { ModellingContext } from '@/core/tools/Tool';
 import type { SnapQuery, SnapResult } from '@/core/snap/SnapEngine';
 import type { EditableMesh } from '@/core/mesh/types';
 import { addVec3, crossVec3, lengthVec3, normalizeVec3, scaleVec3, subVec3, type Vec3 } from '@/core/math/Vec3';
+import {
+  hydrateDefaultPlaceholderImages,
+  syncHydrateDefaultPlaceholderImages,
+} from '@/core/image/DefaultPlaceholderImage';
 import { TransformSystem } from '@/core/transform/TransformSystem';
 import { UvSelection } from '@/core/uv/UvSelection';
 import { buildSnapIndex, type UniformGridIndex } from '@/core/spatial/SnapSpatialIndex';
@@ -46,6 +55,7 @@ export class EditorSession {
   tools: ToolController;
   transform: TransformSystem;
   document: ModelDocument;
+  blockoutReference: BlockoutReferenceState = createEmptyBlockoutReferenceState();
   private redrawListeners = new Set<() => void>();
   private snapIndexCache = new Map<string, SnapIndexCache>();
   private snapBvhCache = new Map<string, MeshBvh>();
@@ -58,6 +68,7 @@ export class EditorSession {
     } else {
       this.projectEditor = new ProjectEditor(createEmptyProject());
     }
+    removeGeneratedDefaultChecker(this.projectEditor.project);
     this.document = this.projectEditor.activeDocumentView();
     this.tools = new ToolController();
     this.transform = this.createTransformSystem(this.projectEditor.activeSession());
@@ -65,6 +76,7 @@ export class EditorSession {
     const open = this.projectEditor.activeSession();
     this.tools.setActive(open.activeToolId || 'create-primitive', this.context());
     syncFocusScopeFilter(this);
+    this.queuePlaceholderHydration();
   }
 
   get project(): ViperProject {
@@ -168,6 +180,11 @@ export class EditorSession {
       gridSize: this.document.settings.snapIncrement,
       resolveSnap: (query) => this.resolveDocumentSnap(query),
       requestRedraw: () => this.requestRedraw(),
+      notify: (text, kind) => {
+        void import('@/app/Toast').then(({ pushToast }) => pushToast(text, kind ?? 'info'));
+      },
+      setActiveTool: (id) => this.tools.setActive(id, this.context()),
+      setGizmoMode: (mode) => this.transform.setGizmoMode(mode),
     };
   }
 
@@ -236,6 +253,7 @@ export class EditorSession {
 
   loadProject(project: ViperProject, activeDocumentId?: DocumentId): void {
     this.tools.getActive()?.cancel?.(this.context());
+    removeGeneratedDefaultChecker(project);
     this.projectEditor = new ProjectEditor(project);
     const active = activeDocumentId ?? project.activeDocumentId ?? project.levelDocumentIds[0] ?? project.modelDocumentIds[0];
     if (!active) throw new Error('Project has no documents');
@@ -253,11 +271,21 @@ export class EditorSession {
     this.snapBvhCache.clear();
     this.tools.setActive('select', this.context());
     syncFocusScopeFilter(this);
+    this.queuePlaceholderHydration();
     this.requestRedraw();
   }
 
   loadDocument(document: ModelDocument): void {
     this.loadProject(projectFromLegacyDocument(document), document.id);
+  }
+
+  private queuePlaceholderHydration(): void {
+    if (syncHydrateDefaultPlaceholderImages(this.project.images, this.project.textures)) {
+      this.requestRedraw();
+    }
+    void hydrateDefaultPlaceholderImages(this.project.images, this.project.textures).then((changed) => {
+      if (changed) this.requestRedraw();
+    });
   }
 
   private registerTools(): void {
@@ -272,6 +300,9 @@ export class EditorSession {
     this.tools.register(new MeshSculptTool());
     this.tools.register(new TerrainObjectTool());
     this.tools.register(new TerrainFeatureTool());
+    this.tools.register(new BlockoutVectorTool());
+    this.tools.register(new BlockoutSolidTool());
+    this.tools.register(new BlockoutRoundTool());
   }
 
   private createTransformSystem(open: OpenDocumentSession): TransformSystem {

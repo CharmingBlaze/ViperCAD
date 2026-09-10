@@ -180,7 +180,7 @@ export class TerrainObjectTool implements Tool {
     if (this.mode === 'scatter') {
       return `scatter on ${this.placementMode === 'terrain' ? 'terrain surface' : 'base plane'} · radius ${this.radius.toFixed(1)} · density ${this.density}`;
     }
-    return `place on ${this.placementMode === 'terrain' ? 'terrain surface' : 'base plane'} · click terrain · RMB orbit`;
+    return `place on ${this.placementMode === 'terrain' ? 'terrain surface' : 'base plane'} · click terrain · RMB pan`;
   }
 
   getAllowedSelectionModes() { return ['object'] as const; }

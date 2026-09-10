@@ -1,7 +1,9 @@
 import {
   BufferAttribute,
   BufferGeometry,
+  CanvasTexture,
   Color,
+  NearestFilter,
   DoubleSide,
   Group,
   LineBasicMaterial,
@@ -11,9 +13,10 @@ import {
   Points,
   PointsMaterial,
   Vector3,
+  type Texture,
 } from 'three';
 import type { ObjectId } from '@/core/document/types';
-import { faceVertexIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
+import { faceHalfEdgeIds, faceVertexIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
 import { triangulateFace } from '@/core/mesh/Triangulation';
 import type { EditableMesh, EdgeId, FaceId } from '@/core/mesh/types';
 import type { SelectionState } from '@/core/selection/SelectionManager';
@@ -25,18 +28,37 @@ import {
 } from '@/renderer/ViewportRenderStyle';
 import type { ObjectRenderHandle } from './MeshRenderAdapter';
 
-/** Blender-like selection palette — overlays only; never replaces materials. */
+/**
+ * Edit-mode palette: idle stays bright on dark clay, hover is cyan,
+ * selection is amber. Overlays only — never replaces materials.
+ */
 export const SELECTION_COLORS = {
-  hover: new Color(0xff9a3c),
-  selected: new Color(0xff7a18),
-  active: new Color(0xffcc66),
-  topology: new Color(0x2a3140),
-  objectOutline: new Color(0xff8c28),
-  objectHover: new Color(0xffb060),
-  faceTintSelected: new Color(0xff7a18),
-  faceTintHover: new Color(0xffb060),
-  faceTintActive: new Color(0xffcc66),
+  hover: new Color(0x3ee8ff),
+  selected: new Color(0xffb020),
+  active: new Color(0xfff36a),
+  topology: new Color(0xd8ecff),
+  topologyWire: new Color(0x9eb6d0),
+  objectOutline: new Color(0xffc14d),
+  objectHover: new Color(0x5cefff),
+  faceTintSelected: new Color(0xffb020),
+  faceTintHover: new Color(0x3ee8ff),
+  faceTintActive: new Color(0xfff36a),
 };
+
+/** CSS-pixel sizes. Three.js point size is device pixels, so we multiply by DPR. */
+export const VERTEX_MARKER_CSS = {
+  idle: 16,
+  hover: 19,
+  selected: 20,
+  active: 22,
+};
+
+let vertexMarkerTexture: Texture | null | undefined;
+
+export function vertexMarkerDeviceSize(cssPx: number): number {
+  const dpr = typeof window === 'undefined' ? 1 : Math.min(window.devicePixelRatio || 1, 2);
+  return cssPx * dpr;
+}
 
 /**
  * GPU overlay layer for object / vertex / edge / face feedback.
@@ -48,6 +70,7 @@ export class SelectionOverlaySystem {
   private hoverEdge: LineSegments;
   private activeEdge: LineSegments;
   private vertices: Points;
+  private topologyVertices: Points;
   private faceFill: Mesh;
   private outlinePool = new Map<ObjectId, LineSegments>();
 
@@ -58,13 +81,16 @@ export class SelectionOverlaySystem {
     this.selectedEdges = makeLines(SELECTION_COLORS.selected, 0.95);
     this.hoverEdge = makeLines(SELECTION_COLORS.hover, 1);
     this.activeEdge = makeLines(SELECTION_COLORS.active, 1);
-    this.vertices = makePoints(6);
+    this.topologyVertices = makePoints(vertexMarkerDeviceSize(VERTEX_MARKER_CSS.idle));
+    this.vertices = makePoints(vertexMarkerDeviceSize(VERTEX_MARKER_CSS.selected));
+    this.topologyVertices.renderOrder = 13;
+    this.vertices.renderOrder = 15;
     this.faceFill = new Mesh(
       new BufferGeometry(),
       new MeshBasicMaterial({
         color: SELECTION_COLORS.faceTintSelected,
         transparent: true,
-        opacity: 0.22,
+        opacity: 0.34,
         depthWrite: false,
         depthTest: true,
         side: DoubleSide,
@@ -80,6 +106,7 @@ export class SelectionOverlaySystem {
     this.root.add(this.selectedEdges);
     this.root.add(this.hoverEdge);
     this.root.add(this.activeEdge);
+    this.root.add(this.topologyVertices);
     this.root.add(this.vertices);
     this.root.add(this.faceFill);
   }
@@ -115,8 +142,8 @@ export class SelectionOverlaySystem {
         handle.edgeOverlay.visible = false;
       } else if (objectId === activeObjectId) {
         handle.edgeOverlay.visible = true;
-        mat.color.copy(SELECTION_COLORS.topology);
-        mat.opacity = mode === 'edge' ? 0.45 : mode === 'face' ? 0.32 : 0.28;
+        mat.color.copy(SELECTION_COLORS.topologyWire);
+        mat.opacity = mode === 'edge' ? 0.72 : mode === 'face' ? 0.55 : 0.5;
         mat.depthTest = !xRay;
       } else {
         handle.edgeOverlay.visible = false;
@@ -213,10 +240,12 @@ export class SelectionOverlaySystem {
     getMesh: (objectId: ObjectId) => EditableMesh | null,
   ): void {
     const hideComponents = selection.mode === 'object';
-    this.selectedEdges.visible = !hideComponents && selection.mode === 'edge';
-    this.hoverEdge.visible = !hideComponents && selection.mode === 'edge';
-    this.activeEdge.visible = !hideComponents && selection.mode === 'edge';
+    const showFaceOutlines = !hideComponents && selection.mode === 'face';
+    this.selectedEdges.visible = (!hideComponents && selection.mode === 'edge') || showFaceOutlines;
+    this.hoverEdge.visible = (!hideComponents && selection.mode === 'edge') || showFaceOutlines;
+    this.activeEdge.visible = (!hideComponents && selection.mode === 'edge') || showFaceOutlines;
     this.vertices.visible = !hideComponents && selection.mode === 'vertex';
+    this.topologyVertices.visible = !hideComponents && selection.mode === 'vertex';
     this.faceFill.visible = !hideComponents && selection.mode === 'face';
 
     if (hideComponents || !selection.activeObjectId) {
@@ -224,6 +253,7 @@ export class SelectionOverlaySystem {
       clearGeometry(this.hoverEdge.geometry);
       clearGeometry(this.activeEdge.geometry);
       clearGeometry(this.vertices.geometry);
+      clearGeometry(this.topologyVertices.geometry);
       clearGeometry(this.faceFill.geometry);
       return;
     }
@@ -248,13 +278,13 @@ export class SelectionOverlaySystem {
     } else if (selection.mode === 'edge') {
       this.buildEdgeLines(mesh, selection, toWorld);
       clearGeometry(this.vertices.geometry);
+      clearGeometry(this.topologyVertices.geometry);
       clearGeometry(this.faceFill.geometry);
     } else if (selection.mode === 'face') {
       this.buildFaceFill(mesh, selection, toWorld);
+      this.buildFaceBoundaryLines(mesh, selection, toWorld);
       clearGeometry(this.vertices.geometry);
-      clearGeometry(this.selectedEdges.geometry);
-      clearGeometry(this.hoverEdge.geometry);
-      clearGeometry(this.activeEdge.geometry);
+      clearGeometry(this.topologyVertices.geometry);
     }
   }
 
@@ -263,38 +293,63 @@ export class SelectionOverlaySystem {
     selection: SelectionState,
     toWorld: (p: { x: number; y: number; z: number }) => Vector3,
   ): void {
-    const positions: number[] = [];
-    const colors: number[] = [];
+    const highlighted = new Set(selection.selectedVertexIds);
+    if (selection.hoveredVertexId) highlighted.add(selection.hoveredVertexId);
+    if (selection.activeVertexId) highlighted.add(selection.activeVertexId);
 
-    for (const v of mesh.vertices.values()) {
+    const selectedPos: number[] = [];
+    const selectedCol: number[] = [];
+    for (const id of highlighted) {
+      const v = mesh.vertices.get(id);
+      if (!v) continue;
       const w = toWorld(v.position);
-      positions.push(w.x, w.y, w.z);
-
-      let color = SELECTION_COLORS.topology;
-      if (selection.activeVertexId === v.id) {
-        color = SELECTION_COLORS.active;
-      } else if (selection.selectedVertexIds.has(v.id)) {
-        color = SELECTION_COLORS.selected;
-      } else if (selection.hoveredVertexId === v.id) {
+      selectedPos.push(w.x, w.y, w.z);
+      let color = SELECTION_COLORS.selected;
+      if (selection.activeVertexId === id) color = SELECTION_COLORS.active;
+      else if (selection.hoveredVertexId === id && !selection.selectedVertexIds.has(id)) {
         color = SELECTION_COLORS.hover;
       }
-      colors.push(color.r, color.g, color.b);
+      selectedCol.push(color.r, color.g, color.b);
     }
 
-    const geo = this.vertices.geometry;
-    geo.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
-    geo.setAttribute('color', new BufferAttribute(new Float32Array(colors), 3));
-    const mat = this.vertices.material as PointsMaterial;
-    mat.size =
-      selection.activeVertexId || selection.hoveredVertexId
-        ? selection.activeVertexId
-          ? 9
-          : 8
-        : 6;
-    mat.vertexColors = true;
-    mat.depthTest = !selection.xRay;
-    mat.opacity = selection.xRay ? 0.85 : 1;
-    geo.computeBoundingSphere();
+    const topoPos: number[] = [];
+    const topoCol: number[] = [];
+    const drawTopology = mesh.vertices.size <= 8000;
+    if (drawTopology) {
+      const dim = SELECTION_COLORS.topology;
+      for (const v of mesh.vertices.values()) {
+        if (highlighted.has(v.id)) continue;
+        const w = toWorld(v.position);
+        topoPos.push(w.x, w.y, w.z);
+        topoCol.push(dim.r, dim.g, dim.b);
+      }
+    }
+
+    const selGeo = this.vertices.geometry;
+    selGeo.setAttribute('position', new BufferAttribute(new Float32Array(selectedPos), 3));
+    selGeo.setAttribute('color', new BufferAttribute(new Float32Array(selectedCol), 3));
+    const selMat = this.vertices.material as PointsMaterial;
+    selMat.size = vertexMarkerDeviceSize(
+      selection.activeVertexId
+        ? VERTEX_MARKER_CSS.active
+        : selection.hoveredVertexId
+          ? VERTEX_MARKER_CSS.hover
+          : VERTEX_MARKER_CSS.selected,
+    );
+    selMat.vertexColors = true;
+    selMat.depthTest = false;
+    selMat.opacity = 1;
+    selGeo.computeBoundingSphere();
+
+    const topoGeo = this.topologyVertices.geometry;
+    topoGeo.setAttribute('position', new BufferAttribute(new Float32Array(topoPos), 3));
+    topoGeo.setAttribute('color', new BufferAttribute(new Float32Array(topoCol), 3));
+    const topoMat = this.topologyVertices.material as PointsMaterial;
+    topoMat.size = vertexMarkerDeviceSize(VERTEX_MARKER_CSS.idle);
+    topoMat.vertexColors = true;
+    topoMat.depthTest = !selection.xRay;
+    topoMat.opacity = selection.xRay ? 0.55 : 0.95;
+    topoGeo.computeBoundingSphere();
   }
 
   private buildEdgeLines(
@@ -337,6 +392,50 @@ export class SelectionOverlaySystem {
     }
   }
 
+  private buildFaceBoundaryLines(
+    mesh: EditableMesh,
+    selection: SelectionState,
+    toWorld: (p: { x: number; y: number; z: number }) => Vector3,
+  ): void {
+    const selected: number[] = [];
+    const hover: number[] = [];
+    const active: number[] = [];
+
+    const pushFace = (faceId: FaceId, into: number[]) => {
+      for (const heId of faceHalfEdgeIds(mesh, faceId)) {
+        const edgeId = mesh.halfEdges.get(heId)?.edgeId;
+        if (!edgeId) continue;
+        const pair = getEdgeVertices(mesh, edgeId);
+        if (!pair) continue;
+        const a = toWorld(mesh.vertices.get(pair[0])!.position);
+        const b = toWorld(mesh.vertices.get(pair[1])!.position);
+        into.push(a.x, a.y, a.z, b.x, b.y, b.z);
+      }
+    };
+
+    for (const id of selection.selectedFaceIds) {
+      if (id === selection.activeFaceId) continue;
+      pushFace(id, selected);
+    }
+    if (selection.activeFaceId) pushFace(selection.activeFaceId, active);
+    if (
+      selection.hoveredFaceId &&
+      !selection.selectedFaceIds.has(selection.hoveredFaceId)
+    ) {
+      pushFace(selection.hoveredFaceId, hover);
+    }
+
+    setLinePositions(this.selectedEdges, selected);
+    setLinePositions(this.hoverEdge, hover);
+    setLinePositions(this.activeEdge, active);
+
+    for (const line of [this.selectedEdges, this.hoverEdge, this.activeEdge]) {
+      const mat = line.material as LineBasicMaterial;
+      mat.depthTest = !selection.xRay;
+      mat.opacity = selection.xRay ? 0.75 : 1;
+    }
+  }
+
   private buildFaceFill(
     mesh: EditableMesh,
     selection: SelectionState,
@@ -375,7 +474,7 @@ export class SelectionOverlaySystem {
     const mat = this.faceFill.material as MeshBasicMaterial;
     mat.vertexColors = true;
     mat.depthTest = !selection.xRay;
-    mat.opacity = selection.xRay ? 0.14 : 0.22;
+    mat.opacity = selection.xRay ? 0.2 : 0.34;
     geo.computeBoundingSphere();
   }
 
@@ -391,6 +490,7 @@ export class SelectionOverlaySystem {
       this.hoverEdge,
       this.activeEdge,
       this.vertices,
+      this.topologyVertices,
       this.faceFill,
     ]) {
       obj.geometry.dispose();
@@ -417,7 +517,35 @@ function makeLines(color: Color, opacity: number): LineSegments {
   return line;
 }
 
+function getVertexMarkerTexture(): Texture | null {
+  if (vertexMarkerTexture !== undefined) return vertexMarkerTexture;
+  if (typeof document === 'undefined') {
+    vertexMarkerTexture = null;
+    return null;
+  }
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    vertexMarkerTexture = null;
+    return null;
+  }
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = 'rgba(8, 12, 20, 0.96)';
+  ctx.fillRect(2, 2, size - 4, size - 4);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(8, 8, size - 16, size - 16);
+  const texture = new CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  texture.magFilter = NearestFilter;
+  texture.minFilter = NearestFilter;
+  vertexMarkerTexture = texture;
+  return texture;
+}
+
 function makePoints(size: number): Points {
+  const map = getVertexMarkerTexture();
   const points = new Points(
     new BufferGeometry(),
     new PointsMaterial({
@@ -427,6 +555,8 @@ function makePoints(size: number): Points {
       transparent: true,
       depthWrite: false,
       depthTest: true,
+      map: map ?? undefined,
+      alphaTest: map ? 0.12 : 0,
     }),
   );
   points.renderOrder = 14;

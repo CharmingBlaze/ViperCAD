@@ -1,6 +1,8 @@
 import {
   addVec3,
   cloneVec3,
+  crossVec3,
+  dotVec3,
   lengthVec3,
   normalizeVec3,
   scaleVec3,
@@ -10,16 +12,25 @@ import {
 import { computeVertexNormals } from '@/core/mesh/Normals';
 import type { EditableMesh, VertexId } from '@/core/mesh/types';
 import { falloffWeight, type SculptFalloff } from '@/core/sculpt/BrushFalloff';
-import { buildVertexNeighborMap, neighborAverage } from '@/core/sculpt/VertexNeighbors';
+import { getOrCreateSpatialIndex } from '@/core/sculpt/SculptSpatialIndex';
+import { getCachedVertexNeighborMap, neighborAverage } from '@/core/sculpt/VertexNeighbors';
 
 export type MeshBrushMode =
+  | 'draw'
+  | 'clay'
   | 'grab'
   | 'inflate'
   | 'smooth'
   | 'flatten'
+  | 'scrape'
   | 'pinch'
   | 'crease'
-  | 'noise';
+  | 'snake_hook'
+  | 'twist'
+  | 'nudge'
+  | 'noise'
+  | 'mask'
+  | 'unmask';
 
 export type BrushAffected = { id: VertexId; weight: number; distance: number };
 
@@ -29,18 +40,31 @@ export function collectBrushVertices(
   radius: number,
   falloff: SculptFalloff,
 ): BrushAffected[] {
+  const index = getOrCreateSpatialIndex(mesh);
+  const near = index.querySphere(mesh, center, radius);
   const affected: BrushAffected[] = [];
-  for (const vertex of mesh.vertices.values()) {
-    const distance = lengthVec3(subVec3(vertex.position, center));
-    if (distance > radius) continue;
-    affected.push({
-      id: vertex.id,
-      weight: falloffWeight(distance / radius, falloff),
-      distance,
-    });
+  for (const item of near) {
+    const weight = falloffWeight(item.distance / radius, falloff);
+    if (weight > 0) {
+      affected.push({
+        id: item.id,
+        weight,
+        distance: item.distance,
+      });
+    }
   }
   return affected;
 }
+
+export type BrushApplyOptions = {
+  grabDelta?: Vec3;
+  strokeDelta?: Vec3;
+  flattenPlanePoint?: Vec3;
+  flattenPlaneNormal?: Vec3;
+  strokeBase?: Map<VertexId, Vec3>;
+  contactNormal?: Vec3;
+  mask?: Map<VertexId, number>;
+};
 
 export function applyMeshBrush(
   mesh: EditableMesh,
@@ -50,35 +74,64 @@ export function applyMeshBrush(
   strength: number,
   falloff: SculptFalloff,
   invert: boolean,
-  options: {
-    grabDelta?: Vec3;
-    flattenPlanePoint?: Vec3;
-    flattenPlaneNormal?: Vec3;
-    strokeBase?: Map<VertexId, Vec3>;
-  } = {},
+  options: BrushApplyOptions = {},
 ): void {
   const affected = collectBrushVertices(mesh, center, radius, falloff);
   if (!affected.length) return;
   const sign = invert ? -1 : 1;
+
+  // Masking brushes modify vertex mask weights and return without modifying geometry
+  if (mode === 'mask' || mode === 'unmask') {
+    if (!options.mask) return;
+    for (const item of affected) {
+      const current = options.mask.get(item.id) ?? 0;
+      const delta = (mode === 'mask' ? 1 : -1) * strength * item.weight * sign;
+      options.mask.set(item.id, Math.max(0, Math.min(1, current + delta)));
+    }
+    return;
+  }
+
   const vertexNormals = computeVertexNormals(mesh);
-  const neighborMap = buildVertexNeighborMap(mesh);
+  const neighborMap = getCachedVertexNeighborMap(mesh);
+  const contactNormal = normalizeVec3(options.contactNormal ?? { x: 0, y: 1, z: 0 });
 
   if (mode === 'grab' && options.grabDelta && options.strokeBase) {
     for (const item of affected) {
+      const maskVal = options.mask?.get(item.id) ?? 0;
+      if (maskVal >= 1) continue;
       const base = options.strokeBase.get(item.id);
       const vertex = mesh.vertices.get(item.id);
       if (!base || !vertex) continue;
-      vertex.position = addVec3(base, scaleVec3(options.grabDelta, item.weight));
+      const effWeight = item.weight * (1 - maskVal);
+      vertex.position = addVec3(base, scaleVec3(options.grabDelta, effWeight));
     }
     return;
   }
 
   for (const item of affected) {
+    const maskVal = options.mask?.get(item.id) ?? 0;
+    if (maskVal >= 1) continue;
     const vertex = mesh.vertices.get(item.id)!;
-    const amount = strength * item.weight * sign;
-    const normal = vertexNormals.get(item.id) ?? { x: 0, y: 1, z: 0 };
+    const effWeight = item.weight * (1 - maskVal);
+    const amount = strength * effWeight * sign;
+    const normal = vertexNormals.get(item.id) ?? contactNormal;
 
-    if (mode === 'inflate') {
+    if (mode === 'draw') {
+      // Moves vertices along contact normal with spherical bell profile
+      vertex.position = addVec3(vertex.position, scaleVec3(contactNormal, amount));
+    } else if (mode === 'clay') {
+      // Builds up flat clay layers clamped to an offset build plane
+      const targetOffset = radius * 0.28 * sign;
+      const planePt = addVec3(center, scaleVec3(contactNormal, targetOffset));
+      const distToPlane = dotVec3(subVec3(planePt, vertex.position), contactNormal);
+      if (sign > 0 && distToPlane > 0) {
+        const step = Math.min(distToPlane, Math.abs(amount) * radius * 0.6);
+        vertex.position = addVec3(vertex.position, scaleVec3(contactNormal, step));
+      } else if (sign < 0 && distToPlane < 0) {
+        const step = Math.max(distToPlane, -Math.abs(amount) * radius * 0.6);
+        vertex.position = addVec3(vertex.position, scaleVec3(contactNormal, step));
+      }
+    } else if (mode === 'inflate') {
       vertex.position = addVec3(vertex.position, scaleVec3(normal, amount));
     } else if (mode === 'smooth') {
       const average = neighborAverage(mesh, item.id, neighborMap);
@@ -90,11 +143,19 @@ export function applyMeshBrush(
     } else if (mode === 'flatten') {
       const planePoint = options.flattenPlanePoint ?? center;
       const planeNormal = normalizeVec3(options.flattenPlaneNormal ?? normal);
-      const offset = dot(subVec3(vertex.position, planePoint), planeNormal);
+      const offset = dotVec3(subVec3(vertex.position, planePoint), planeNormal);
       vertex.position = addVec3(
         vertex.position,
         scaleVec3(planeNormal, -offset * Math.min(1, Math.abs(amount))),
       );
+    } else if (mode === 'scrape') {
+      // Scrapes away material extending above the contact plane
+      const planeNormal = normalizeVec3(options.flattenPlaneNormal ?? contactNormal);
+      const dist = dotVec3(subVec3(vertex.position, center), planeNormal);
+      if (dist * sign > 0) {
+        const correction = -dist * Math.min(1, Math.abs(amount) * 2.5);
+        vertex.position = addVec3(vertex.position, scaleVec3(planeNormal, correction));
+      }
     } else if (mode === 'pinch') {
       const toCenter = subVec3(center, vertex.position);
       const len = lengthVec3(toCenter);
@@ -108,6 +169,30 @@ export function applyMeshBrush(
         vertex.position,
         scaleVec3(deviation, Math.min(1, Math.abs(amount)) * 0.65),
       );
+    } else if (mode === 'snake_hook') {
+      // Pulls geometry along continuous stroke delta
+      if (options.strokeDelta) {
+        const factor = Math.min(1, effWeight * 1.5);
+        vertex.position = addVec3(vertex.position, scaleVec3(options.strokeDelta, factor));
+      }
+    } else if (mode === 'twist') {
+      // Rotates vertices around contact normal
+      const v = subVec3(vertex.position, center);
+      const angle = amount * 3.14159;
+      const cosA = Math.cos(angle);
+      const sinA = Math.sin(angle);
+      const rotated = addVec3(
+        addVec3(scaleVec3(v, cosA), scaleVec3(crossVec3(contactNormal, v), sinA)),
+        scaleVec3(contactNormal, dotVec3(contactNormal, v) * (1 - cosA)),
+      );
+      vertex.position = addVec3(center, rotated);
+    } else if (mode === 'nudge') {
+      // Moves vertices tangentially along the stroke direction
+      if (options.strokeDelta) {
+        const normalComp = dotVec3(options.strokeDelta, normal);
+        const tangent = subVec3(options.strokeDelta, scaleVec3(normal, normalComp));
+        vertex.position = addVec3(vertex.position, scaleVec3(tangent, effWeight * strength));
+      }
     } else if (mode === 'noise') {
       const seed = vertex.position.x * 12.9898 + vertex.position.y * 78.233 + vertex.position.z * 37.719;
       const noise = Math.sin(seed) * 43758.5453;
@@ -115,10 +200,6 @@ export function applyMeshBrush(
       vertex.position = addVec3(vertex.position, scaleVec3(normal, value));
     }
   }
-}
-
-function dot(a: Vec3, b: Vec3): number {
-  return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
 export function snapshotVertexPositions(mesh: EditableMesh): Map<VertexId, Vec3> {

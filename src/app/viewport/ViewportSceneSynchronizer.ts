@@ -1,4 +1,4 @@
-import { LineBasicMaterial, type Matrix4, type Scene } from 'three';
+import { LineBasicMaterial, type Matrix4, type Scene, type Texture } from 'three';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { getObjectWorldMatrix } from '@/core/editor/Hierarchy';
 import { isObjectInFocusScope } from '@/core/editor/GroupFocus';
@@ -15,11 +15,14 @@ import {
   serializeModifierStack,
 } from '@/core/modifiers/serialize';
 import { createEmptyModifierStack } from '@/core/modifiers/types';
+import { DEFAULT_MATERIAL_COLOUR, retuneDefaultPlaceholderMaterial } from '@/core/document/ModelDocument';
 import { v3 } from '@/core/math/Vec3';
 import {
   applyMeshEvaluation,
   createObjectRenderHandle,
+  disposeOwnedTexture,
   updateObjectRenderHandle,
+  updateRenderPositionsInPlace,
   type ObjectRenderHandle,
 } from '@/renderer/MeshRenderAdapter';
 import { evaluateMeshAsync } from '@/renderer/workers/MeshEvaluationWorkerClient';
@@ -42,6 +45,24 @@ export class ViewportSceneSynchronizer {
 
   reset(): void {
     this.pending.clear();
+  }
+
+  /** Position-only GPU rewrite while a modal G/R/S or inset is live. */
+  syncLivePositions(): void {
+    const session = this.options.getSession();
+    if (!this.options.isAttached() || !session) return;
+    for (const handle of this.options.handles.values()) {
+      const mesh = session.document.meshes.get(handle.meshId);
+      if (!mesh) continue;
+      if (
+        handle.renderData.geometryVersion === mesh.geometryVersion &&
+        handle.renderData.topologyVersion === mesh.topologyVersion
+      ) {
+        continue;
+      }
+      if (handle.renderData.topologyVersion !== mesh.topologyVersion) continue;
+      updateRenderPositionsInPlace(handle, mesh, { live: true });
+    }
   }
 
   /** Update only object matrices during object-mode transforms. */
@@ -110,7 +131,21 @@ export class ViewportSceneSynchronizer {
       handle.renderData.geometry.dispose();
       handle.edgeOverlay.geometry.dispose();
       (handle.edgeOverlay.material as LineBasicMaterial).dispose();
-      for (const material of handle.materials) material.dispose();
+      for (const material of handle.materials) {
+        const maps = material as {
+          map?: Texture | null;
+          normalMap?: Texture | null;
+          roughnessMap?: Texture | null;
+          metalnessMap?: Texture | null;
+          emissiveMap?: Texture | null;
+        };
+        disposeOwnedTexture(maps.map);
+        disposeOwnedTexture(maps.normalMap);
+        disposeOwnedTexture(maps.roughnessMap);
+        disposeOwnedTexture(maps.metalnessMap);
+        disposeOwnedTexture(maps.emissiveMap);
+        material.dispose();
+      }
       this.options.handles.delete(id);
       this.pending.delete(id);
     }
@@ -140,6 +175,7 @@ export class ViewportSceneSynchronizer {
     const materials = materialSlotIds
       .map((id) => session.document.materials.get(id))
       .filter(Boolean) as MaterialAsset[];
+    for (const material of materials) retuneDefaultPlaceholderMaterial(material);
     const resolvedMaterials = materials.length ? materials : [defaultMaterial(session)];
 
     let handle = this.options.handles.get(handleKey);
@@ -243,11 +279,11 @@ export class ViewportSceneSynchronizer {
 function defaultMaterial(session: EditorSession): MaterialAsset {
   return [...session.document.materials.values()][0] ?? {
     id: 'mat_fallback', name: 'Default', shadingModel: 'lit',
-    baseColour: v3(0.72, 0.74, 0.78), baseColourTextureId: null,
+    baseColour: { ...DEFAULT_MATERIAL_COLOUR }, baseColourTextureId: null,
     normalTextureId: null, roughness: 0.55, roughnessTextureId: null,
     metallic: 0, metallicTextureId: null, emissive: v3(0, 0, 0),
     emissiveTextureId: null, opacity: 1, alphaMode: 'opaque', alphaCutoff: 0.5,
-    doubleSided: false, unlit: false, flatShaded: true,
-    textureFiltering: 'nearest', textureWrapping: 'repeat', uvLayerIndex: 0,
+    doubleSided: false, unlit: false, flatShaded: false,
+    textureFiltering: 'linear', textureWrapping: 'repeat', uvLayerIndex: 0,
   };
 }

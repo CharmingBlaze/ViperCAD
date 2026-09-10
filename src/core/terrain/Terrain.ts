@@ -3,7 +3,7 @@ import {
   createMaterial,
   removeObject,
 } from '@/core/document/ModelDocument';
-import type { ObjectId } from '@/core/document/types';
+import type { ModelDocument, ObjectId } from '@/core/document/types';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { createImageAsset, createTextureAsset } from '@/core/image/PixelEditor';
 import { v2 } from '@/core/math/Vec2';
@@ -138,11 +138,32 @@ export function createTerrain(session: EditorSession, options: TerrainOptions = 
   return { ...committed, size, resolution };
 }
 
-export function activeTerrain(session: EditorSession) {
-  const objectId = session.selection.state.activeObjectId;
-  const object = objectId ? session.document.objects.get(objectId) : null;
-  const mesh = object?.meshId ? session.document.meshes.get(object.meshId) : null;
+export function terrainAssetFromObject(document: ModelDocument, objectId: ObjectId | null | undefined) {
+  if (!objectId) return null;
+  const object = document.objects.get(objectId);
+  const mesh = object?.meshId ? document.meshes.get(object.meshId) : null;
   return object?.metadata.terrain === 'true' && mesh ? { object, mesh } : null;
+}
+
+export function activeTerrain(session: EditorSession) {
+  return terrainAssetFromObject(session.document, session.selection.state.activeObjectId);
+}
+
+/** Terrain under the selection, a placed prop's owner, or the first terrain in the level. */
+export function resolveTerrainAsset(session: EditorSession, preferredId?: ObjectId | null) {
+  const preferred = terrainAssetFromObject(session.document, preferredId);
+  if (preferred) return preferred;
+  const selected = activeTerrain(session);
+  if (selected) return selected;
+  const objectId = session.selection.state.activeObjectId;
+  const selectedObject = objectId ? session.document.objects.get(objectId) : null;
+  const owner = terrainAssetFromObject(session.document, selectedObject?.metadata.terrainOwnerId);
+  if (owner) return owner;
+  for (const object of session.document.objects.values()) {
+    const asset = terrainAssetFromObject(session.document, object.id);
+    if (asset) return asset;
+  }
+  return null;
 }
 
 /**

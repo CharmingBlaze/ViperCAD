@@ -192,14 +192,14 @@ export function FloatingTerrainObjects({
         }}
       >
         <div>
-          <strong>Scene Objects</strong>
+          <strong>Level objects</strong>
           <span>{placedObjects.length} placed</span>
         </div>
         <div className="outliner-actions">
           <button
             type="button"
             className="outliner-icon"
-            aria-label={minimized ? 'Restore Scene Objects' : 'Minimize Scene Objects'}
+            aria-label={minimized ? 'Restore object library' : 'Minimize object library'}
             title={minimized ? 'Restore' : 'Minimize'}
             onClick={() => setMinimized((value) => !value)}
           >
@@ -208,7 +208,7 @@ export function FloatingTerrainObjects({
           <button
             type="button"
             className="outliner-icon danger"
-            aria-label="Close Scene Objects"
+            aria-label="Close object library"
             title="Close"
             onClick={onClose}
           >
@@ -219,7 +219,7 @@ export function FloatingTerrainObjects({
       {!minimized && (
         <div className="scene-objects-body">
           {!terrain ? (
-            <p className="outliner-empty">Create a terrain to place scene objects.</p>
+            <p className="outliner-empty">Create a terrain to place level objects.</p>
           ) : (
             <>
               <section className="uv-section">

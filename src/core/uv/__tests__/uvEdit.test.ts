@@ -23,6 +23,7 @@ import {
 } from '@/core/uv/UvEdit';
 import {
   packSelectedUvIslands,
+  unwrapUvAngleBased,
   unwrapUvAuto,
   unwrapUvBox,
   unwrapUvCylinder,
@@ -240,6 +241,22 @@ describe('UvEdit', () => {
     });
     const unique = new Set(origins.map((o) => `${o.x.toFixed(3)},${o.y.toFixed(3)}`));
     expect(unique.size).toBeGreaterThan(1);
+  });
+
+  it('angle-unwraps only the selected faces into finite packed islands', () => {
+    const mesh = buildBox({ width: 2, height: 1, depth: 1 });
+    const layerId = mesh.defaultUvLayerId!;
+    const selected = [...mesh.faces.keys()].slice(0, 3);
+    unwrapUvAngleBased(mesh, selected, layerId, 66, 0.02);
+    for (const cornerId of cornersForFaces(mesh, selected)) {
+      const uv = mesh.faceCorners.get(cornerId)!.uvs.get(layerId)!;
+      expect(Number.isFinite(uv.x)).toBe(true);
+      expect(Number.isFinite(uv.y)).toBe(true);
+      expect(uv.x).toBeGreaterThanOrEqual(-0.001);
+      expect(uv.y).toBeGreaterThanOrEqual(-0.001);
+      expect(uv.x).toBeLessThanOrEqual(1.001);
+      expect(uv.y).toBeLessThanOrEqual(1.001);
+    }
   });
 
   it('box-unwraps a cube into a net without NaNs', () => {

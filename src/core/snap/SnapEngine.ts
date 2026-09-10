@@ -1,5 +1,12 @@
 import type { Vec3 } from '@/core/math/Vec3';
-import { almostEqualVec3, lengthVec3, subVec3, v3 } from '@/core/math/Vec3';
+import {
+  almostEqualVec3,
+  crossVec3,
+  lengthVec3,
+  normalizeVec3,
+  subVec3,
+  v3,
+} from '@/core/math/Vec3';
 
 export type SnapTargetType =
   | 'grid'
@@ -117,6 +124,32 @@ export const WORLD_YZ_PLANE: ConstructionPlane = {
   xAxis: v3(0, 0, 1),
   yAxis: v3(0, 1, 0),
 };
+
+/** Axis-aligned or camera-facing draw plane through an origin. */
+export function constructionPlaneFromNormal(origin: Vec3, normal: Vec3): ConstructionPlane {
+  const n = normalizeVec3(normal);
+  const reference = Math.abs(n.y) < 0.9 ? v3(0, 1, 0) : v3(1, 0, 0);
+  const xAxis = normalizeVec3(crossVec3(reference, n));
+  const yAxis = normalizeVec3(crossVec3(n, xAxis));
+  return {
+    origin: { x: origin.x, y: origin.y, z: origin.z },
+    normal: n,
+    xAxis,
+    yAxis,
+  };
+}
+
+export function constructionPlaneThrough(
+  plane: ConstructionPlane,
+  origin: Vec3,
+): ConstructionPlane {
+  return {
+    origin: { x: origin.x, y: origin.y, z: origin.z },
+    normal: { ...plane.normal },
+    xAxis: { ...plane.xAxis },
+    yAxis: { ...plane.yAxis },
+  };
+}
 
 export function snapToGrid(position: Vec3, gridSize: number): Vec3 {
   const g = gridSize > 0 ? gridSize : 1;

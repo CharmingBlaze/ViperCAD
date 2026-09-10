@@ -5,6 +5,7 @@ import {
   curveOperationFromStroke,
   evaluateCurvePath,
   evaluateCurveOperation,
+  localizeCurveOperationToMeshCenter,
   readCurveOperation,
   serializeCurveOperation,
 } from '@/core/curves/CurveOperation';
@@ -280,5 +281,22 @@ describe('CurveOperation', () => {
     expect(readCurveOperation(serializeCurveOperation(bezier))?.handlesOut).toEqual(
       bezier.handlesOut,
     );
+  });
+
+  it('centres a committed curve mesh on a local origin', () => {
+    const operation = curveOperationFromStroke({
+      style: 'tube',
+      points: [v3(4, 2, 0), v3(6, 2, 0), v3(8, 2, 0)],
+      radius: 0.1,
+      resolution: 'low',
+      smooth: false,
+      cyclic: false,
+    });
+    const mesh = evaluateCurveOperation(operation);
+    const { origin, operation: local } = localizeCurveOperationToMeshCenter(mesh, operation);
+    expect(origin.x).toBeGreaterThan(4);
+    const xs = [...mesh.vertices.values()].map((vertex) => vertex.position.x);
+    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(0, 5);
+    expect(local.points[0]!.x).toBeCloseTo(operation.points[0]!.x - origin.x);
   });
 });

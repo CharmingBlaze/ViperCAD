@@ -2,10 +2,27 @@ import { describe, expect, it } from 'vitest';
 import { addVertex, createEmptyMesh, faceCornerIds } from '@/core/mesh/EditableMesh';
 import { makeFaceFromVertices } from '@/core/mesh/ops/draw';
 import { v3 } from '@/core/math/Vec3';
-import { ensurePaintableUvs } from '@/core/uv/EnsurePaintableUvs';
+import { ensureEditableUvs, ensurePaintableUvs } from '@/core/uv/EnsurePaintableUvs';
 import { analyseUvs } from '@/core/uv/UvDiagnostics';
 
 describe('ensurePaintableUvs', () => {
+  it('creates and unwraps a UV layer for imported meshes that have none', () => {
+    const mesh = createEmptyMesh('Imported');
+    const a = addVertex(mesh, v3(0, 0, 0));
+    const b = addVertex(mesh, v3(2, 0, 0));
+    const c = addVertex(mesh, v3(0, 0, 1));
+    makeFaceFromVertices(mesh, [a, b, c]);
+    mesh.uvLayers.clear();
+    mesh.defaultUvLayerId = null;
+
+    const result = ensureEditableUvs(mesh);
+
+    expect(result.changed).toBe(true);
+    expect(result.mode).toBe('auto-unwrapped');
+    expect(mesh.defaultUvLayerId).not.toBeNull();
+    expect(analyseUvs(mesh, mesh.defaultUvLayerId!, 256, 256).degenerateFaces).toBe(0);
+  });
+
   it('automatically gives a newly drawn mesh a non-degenerate paint layout', () => {
     const mesh = createEmptyMesh('Draw');
     const a = addVertex(mesh, v3(0, 0, 0));

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_PLACEHOLDER_IMAGE_NAME } from '@/core/image/DefaultPlaceholderImage';
 import { EditorSession } from '@/core/editor/EditorSession';
+import { computeFaceNormal } from '@/core/mesh/Normals';
 import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
 import {
   WORLD_XY_PLANE,
@@ -102,6 +104,81 @@ describe('CreatePrimitiveTool in every ortho view', () => {
     expect(tool.state.stage).toBe('height');
     tool.confirm(session.context());
     expect(session.document.objects.size).toBe(1);
+    const object = [...session.document.objects.values()][0]!;
+    const mesh = session.document.meshes.get(object.meshId!)!;
+    const material = session.document.materials.get(object.materialSlotIds[0]!)!;
+    expect(material.baseColour.z).toBeGreaterThan(material.baseColour.x);
+    expect(material.baseColourTextureId).toBeTruthy();
+    expect(mesh.defaultUvLayerId).toBeTruthy();
+    const faceCorner = [...mesh.faceCorners.values()][0]!;
+    const uv = faceCorner.uvs.get(mesh.defaultUvLayerId!);
+    expect(uv).toBeTruthy();
+  });
+
+  it('returns to select after one primitive when Continuous is off', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-primitive') as CreatePrimitiveTool;
+    expect(tool.continuous).toBe(false);
+    session.tools.setActive('create-primitive', session.context());
+    session.constructionPlane = WORLD_XZ_PLANE;
+    session.constructionPlaneId = 'top';
+    const down: Ray = { origin: { x: 0, y: 10, z: 0 }, direction: { x: 0, y: -1, z: 0 } };
+    const corner: Ray = { origin: { x: 2, y: 10, z: 2 }, direction: { x: 0, y: -1, z: 0 } };
+    tool.begin(pointer(down, 200), session.context());
+    tool.update(pointer(corner, 200), session.context());
+    tool.begin(pointer(corner, 200), session.context());
+    tool.begin(pointer(corner, 120), session.context());
+    expect(session.document.objects.size).toBe(1);
+    expect(session.tools.getActive()?.id).toBe('select');
+    expect(session.transform.prefs.gizmoMode).toBe('combined');
+  });
+
+  it('keeps the primitive tool active when Continuous is on', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-primitive') as CreatePrimitiveTool;
+    session.tools.setActive('create-primitive', session.context());
+    tool.setContinuous(true, session.context());
+    session.constructionPlane = WORLD_XZ_PLANE;
+    session.constructionPlaneId = 'top';
+    const down: Ray = { origin: { x: 0, y: 10, z: 0 }, direction: { x: 0, y: -1, z: 0 } };
+    const corner: Ray = { origin: { x: 2, y: 10, z: 2 }, direction: { x: 0, y: -1, z: 0 } };
+    tool.begin(pointer(down, 200), session.context());
+    tool.update(pointer(corner, 200), session.context());
+    tool.begin(pointer(corner, 200), session.context());
+    tool.begin(pointer(corner, 120), session.context());
+    expect(session.document.objects.size).toBe(1);
+    expect(session.tools.getActive()?.id).toBe('create-primitive');
+    expect(tool.state.stage).toBe('idle');
+    tool.begin(pointer({ origin: { x: 4, y: 10, z: 0 }, direction: { x: 0, y: -1, z: 0 } }, 200), session.context());
+    tool.update(pointer({ origin: { x: 6, y: 10, z: 2 }, direction: { x: 0, y: -1, z: 0 } }, 200), session.context());
+    tool.begin(pointer({ origin: { x: 6, y: 10, z: 2 }, direction: { x: 0, y: -1, z: 0 } }, 200), session.context());
+    tool.begin(pointer({ origin: { x: 6, y: 10, z: 2 }, direction: { x: 0, y: -1, z: 0 } }, 80), session.context());
+    expect(session.document.objects.size).toBe(2);
+    expect(session.tools.getActive()?.id).toBe('create-primitive');
+  });
+
+  it('drawn plane faces the construction-plane top', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-primitive') as CreatePrimitiveTool;
+    tool.selectPrimitive('plane', session.context());
+    session.constructionPlane = WORLD_XZ_PLANE;
+    session.constructionPlaneId = 'top';
+    const start: Ray = { origin: { x: 0, y: 10, z: 0 }, direction: { x: 0, y: -1, z: 0 } };
+    const corner: Ray = { origin: { x: 2, y: 10, z: 2 }, direction: { x: 0, y: -1, z: 0 } };
+    tool.begin(pointer(start, 200), session.context());
+    tool.update(pointer(corner, 200), session.context());
+    tool.begin(pointer(corner, 200), session.context());
+    expect(session.document.objects.size).toBe(1);
+    const mesh = [...session.document.meshes.values()][0]!;
+    const normal = computeFaceNormal(mesh, [...mesh.faces.keys()][0]!);
+    expect(normal.y).toBeGreaterThan(0.9);
+    const object = [...session.document.objects.values()][0]!;
+    const material = session.document.materials.get(object.materialSlotIds[0]!)!;
+    expect(material.baseColourTextureId).toBeTruthy();
+    const texture = session.document.textures.get(material.baseColourTextureId!)!;
+    expect(session.document.images.get(texture.imageAssetId)?.name).toBe(
+      DEFAULT_PLACEHOLDER_IMAGE_NAME,
+    );
   });
 
   it('cylinder finalizes on Front plane without inward-winding errors', () => {
@@ -117,5 +194,24 @@ describe('CreatePrimitiveTool in every ortho view', () => {
     tool.begin(pointer(corner, 200), session.context());
     tool.begin(pointer(corner, 80), session.context());
     expect(session.document.objects.size).toBe(1);
+  });
+
+  it('sits the box base on a raised surface plane', () => {
+    const plane: ConstructionPlane = {
+      origin: { x: 0, y: 2, z: 0 },
+      normal: { x: 0, y: 1, z: 0 },
+      xAxis: { x: 1, y: 0, z: 0 },
+      yAxis: { x: 0, y: 0, z: 1 },
+    };
+    const session = new EditorSession();
+    const tool = session.tools.get('create-primitive') as CreatePrimitiveTool;
+    tool.selectPrimitive('box', session.context());
+    session.constructionPlane = plane;
+    session.constructionPlaneId = 'face:surface';
+    tool.begin(
+      pointer({ origin: { x: 1, y: 10, z: 1 }, direction: { x: 0, y: -1, z: 0 } }, 200),
+      session.context(),
+    );
+    expect(tool.state.cornerA?.y).toBeCloseTo(2, 5);
   });
 });

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createEmptyProject } from '@/core/document/ViperProject';
 import { deserializeViperProject } from '@/core/persistence/ProjectSerializer';
 import { parseLinkSearchParams } from '@/core/link/ViperLink';
-import { getActiveClip } from '@/core/rig/RigDocument';
+import { getActiveClip, readRigDocumentSettings } from '@/core/rig/RigDocument';
 import { RigQuadViewport } from './components/RigQuadViewport';
 import { RigViewportOverlay } from './components/RigViewportOverlay';
 import { RigSidebar } from './components/RigSidebar';
@@ -48,7 +48,7 @@ export default function RigApp() {
     return next;
   }, [params.projectId, params.rigDocumentId]);
 
-  const [timelineOpen, setTimelineOpen] = useState(true);
+  const [timelineOpen, setTimelineOpen] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(TIMELINE_HEIGHT_DEFAULT);
   const [outlinerOpen, setOutlinerOpen] = useState(true);
   const workspaceStackRef = useRef<HTMLDivElement>(null);
@@ -135,7 +135,21 @@ export default function RigApp() {
   const activePane = workspace.maximizedViewportId ?? workspace.activeViewportId;
   const viewHint = workspace.layoutMode === 'maximized'
     ? `${RIG_VIEW_LABELS[activePane as keyof typeof RIG_VIEW_LABELS] ?? 'View'} · Tab restore`
-    : 'Camera · Perspective · Tab maximize';
+    : 'Quad View · Tab maximize';
+
+  const docSettings = readRigDocumentSettings(session.rigDocument);
+  const armature = docSettings.armatureId ? session.project.armatures.get(docSettings.armatureId) : null;
+  const selectedBone = session.selectedBoneId && armature ? armature.bones.get(session.selectedBoneId) : null;
+  const selectedObj = session.selectedObjectId ? session.getSourceModel()?.objects.get(session.selectedObjectId) : null;
+
+  const modeLabel = session.editMode === 'edit' ? 'Edit Bones' : session.editMode === 'pose' ? 'Pose' : 'Weights';
+  const selectionLabel = selectedBone
+    ? `Bone: ${selectedBone.name}`
+    : selectedObj
+      ? `Mesh: ${selectedObj.name}`
+      : 'Nothing selected';
+  const activeClip = getActiveClip(session.project, session.rigDocument);
+  const currentFrame = Math.round(session.playbackTime * (activeClip?.fps ?? 24));
 
   return (
     <div className="app">
@@ -149,6 +163,13 @@ export default function RigApp() {
                 key={mode}
                 type="button"
                 className={`tool${session.editMode === mode ? ' is-active' : ''}`}
+                title={
+                  mode === 'edit'
+                    ? 'Edit bone hierarchy, positions, and roll'
+                    : mode === 'pose'
+                      ? 'Pose bones and test articulation'
+                      : 'Paint vertex envelope weights'
+                }
                 onClick={() => { session.editMode = mode; refresh(); }}
               >
                 {mode === 'edit' ? 'Edit bones' : mode === 'pose' ? 'Pose' : 'Weights'}
@@ -159,17 +180,32 @@ export default function RigApp() {
           <RigAnimationBar session={session} onRefresh={refresh} />
         </div>
         <div className="bar-right">
-          <span className="rig-link-pill">
+          <span className="rig-link-pill" title="Linked ViperCAD Project Model">
             <span className="rig-link-dot" aria-hidden />
             {status.sourceModelName ?? 'ViperCAD'}
           </span>
-          <button type="button" className="tool" onClick={() => setOutlinerOpen((v) => !v)}>
+          <button
+            type="button"
+            className={`tool${outlinerOpen ? ' is-active' : ''}`}
+            title="Toggle Hierarchy Outliner"
+            onClick={() => setOutlinerOpen((v) => !v)}
+          >
             Outliner
           </button>
-          <button type="button" className="tool" onClick={() => setTimelineOpen((v) => !v)}>
+          <button
+            type="button"
+            className={`tool${timelineOpen ? ' is-active' : ''}`}
+            title="Toggle Dope Sheet Timeline"
+            onClick={() => setTimelineOpen((v) => !v)}
+          >
             Timeline
           </button>
-          <button type="button" className="tool" onClick={() => session.pushToCad()}>
+          <button
+            type="button"
+            className="tool"
+            title="Push changes back to main ViperCAD project"
+            onClick={() => session.pushToCad()}
+          >
             Sync
           </button>
           <span className="meta dim">{viewHint}</span>
@@ -213,15 +249,20 @@ export default function RigApp() {
         </div>
       </main>
 
-      <footer className="status">
-        <span>{RIG_VIEW_LABELS[activePane as keyof typeof RIG_VIEW_LABELS] ?? 'View'}</span>
-        <span>
-          {session.editMode}
-          {' · '}
-          {session.selectedBoneId ? 'bone selected' : session.selectedObjectId ? 'object selected' : 'nothing selected'}
-          {' · '}
-          F{Math.round(session.playbackTime * (getActiveClip(session.project, session.rigDocument)?.fps ?? 24))}
-        </span>
+      <footer className="status rig-status-bar">
+        <div className="status-left">
+          <span className="status-pane">{RIG_VIEW_LABELS[activePane as keyof typeof RIG_VIEW_LABELS] ?? 'View'}</span>
+          <span className="status-sep">·</span>
+          <span className="status-mode">{modeLabel}</span>
+        </div>
+        <div className="status-center">
+          <span className="status-selection">{selectionLabel}</span>
+          <span className="status-sep">·</span>
+          <span className="status-frame">F{currentFrame} ({session.playbackTime.toFixed(2)}s)</span>
+        </div>
+        <div className="status-right">
+          <span className="status-hint">Tab: Maximize View · LMB: Select / Manipulate</span>
+        </div>
       </footer>
 
       {outlinerOpen && (

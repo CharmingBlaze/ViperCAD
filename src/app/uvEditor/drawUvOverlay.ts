@@ -93,7 +93,7 @@ export function drawUvOverlay(
           ? '#ffcc66'
           : isSel
             ? '#ff7a18'
-            : 'rgba(200,220,255,0.45)';
+            : 'rgba(80,150,240,0.35)';
       ctx.lineWidth = ((edge?.seam ? 2.4 : isActive ? 2.2 : isSel ? 1.6 : 1)) / zoom;
       ctx.stroke();
     }

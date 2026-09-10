@@ -1,6 +1,8 @@
 import { defaultTransform } from '@/core/math/Transform';
 import type {
   AnimationClip,
+  AnimationEvent,
+  AnimationMarker,
   Armature,
   Bone,
   BoneAnimationTrack,
@@ -40,6 +42,12 @@ export type EncodedAnimationClip = {
   duration: number;
   fps: number;
   tracks: BoneAnimationTrack[];
+  events?: AnimationEvent[];
+  markers?: AnimationMarker[];
+  rootMotion?: boolean;
+  rootMotionMode?: AnimationClip['rootMotionMode'];
+  loopMode?: AnimationClip['loopMode'];
+  animationType?: AnimationClip['animationType'];
 };
 
 export function encodeArmature(armature: Armature): EncodedArmature {
@@ -103,8 +111,15 @@ export function encodeAnimationClip(clip: AnimationClip): EncodedAnimationClip {
       keyframes: track.keyframes.map((keyframe) => ({
         time: keyframe.time,
         value: cloneTransform(keyframe.value),
+        interpolation: keyframe.interpolation,
       })),
     })),
+    events: clip.events?.map((event) => ({ ...event, payload: event.payload ? { ...event.payload } : undefined })),
+    markers: clip.markers?.map((marker) => ({ ...marker })),
+    rootMotion: clip.rootMotion,
+    rootMotionMode: clip.rootMotionMode,
+    loopMode: clip.loopMode,
+    animationType: clip.animationType,
   };
 }
 
@@ -119,8 +134,15 @@ export function decodeAnimationClip(encoded: EncodedAnimationClip): AnimationCli
       keyframes: track.keyframes.map((keyframe) => ({
         time: keyframe.time,
         value: cloneTransform(keyframe.value),
+        interpolation: keyframe.interpolation ?? 'smooth',
       })),
     })),
+    events: encoded.events?.map((event) => ({ ...event, payload: event.payload ? { ...event.payload } : undefined })),
+    markers: encoded.markers?.map((marker) => ({ ...marker })),
+    rootMotion: encoded.rootMotion,
+    rootMotionMode: encoded.rootMotionMode,
+    loopMode: encoded.loopMode,
+    animationType: encoded.animationType,
   };
 }
 

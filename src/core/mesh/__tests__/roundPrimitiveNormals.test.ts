@@ -2,10 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { faceVertexIds } from '@/core/mesh/EditableMesh';
 import { computeFaceNormal } from '@/core/mesh/Normals';
 import { buildCone } from '@/core/mesh/builders/ConeBuilder';
+import { buildPyramid } from '@/core/mesh/builders/PyramidBuilder';
 import { buildCylinder } from '@/core/mesh/builders/CylinderBuilder';
 import type { EditableMesh } from '@/core/mesh/types';
 
 describe('round primitive face winding', () => {
+  it('points every pyramid face outward', () => {
+    expectOutwardNormals(buildPyramid({
+      width: 2,
+      depth: 2,
+      height: 3,
+    }));
+  });
+
   it('points every cone face outward', () => {
     expectOutwardNormals(buildCone({
       radius: 1,

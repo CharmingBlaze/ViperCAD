@@ -2,13 +2,14 @@ import { addVec3, crossVec3, dotVec3, normalizeVec3, scaleVec3, subVec3, type Ve
 import { MeshBuilder } from '@/core/mesh/MeshBuilder';
 import { buildBox, buildCone, buildCylinder, buildPlane, buildPyramid, buildRamp, buildSphere } from '@/core/mesh/builders';
 import { faceCornerIds, faceHalfEdgeIds } from '@/core/mesh/EditableMesh';
+import { computeFaceNormal } from '@/core/mesh/Normals';
 import { flipFaces } from '@/core/mesh/ops/basic';
 import type { EditableMesh, FaceId, UvLayerId } from '@/core/mesh/types';
 import { unwrapUvAuto } from '@/core/uv/UvOperations';
 import { v2 } from '@/core/math/Vec2';
 import { validateMeshFull } from '@/core/mesh/Validation';
 
-export type PrimitiveKind = 'box' | 'plane' | 'cylinder' | 'cone' | 'pyramid' | 'sphere' | 'icosphere' | 'capsule' | 'ramp' | 'stairs' | 'arch' | 'column' | 'torus' | 'tube';
+export type PrimitiveKind = 'box' | 'plane' | 'cylinder' | 'cone' | 'pyramid' | 'sphere' | 'icosphere' | 'capsule' | 'ramp' | 'stairs' | 'arch' | 'torus' | 'tube';
 export type ComplexityPreset = 'low' | 'medium' | 'custom';
 
 export type PrimitiveConstructionCage = {
@@ -43,7 +44,7 @@ export const PRIMITIVE_LIMITS = {
   radialSegments: { min: 3, max: 32 }, heightSegments: { min: 1, max: 16 }, subdivisions: { min: 0, max: 2 }, stairCount: { min: 1, max: 64 }, archSegments: { min: 3, max: 32 }, torusMajorSegments: { min: 6, max: 32 }, torusTubeSegments: { min: 3, max: 16 },
 } as const;
 
-export const PRIMITIVE_LABELS: Record<PrimitiveKind, string> = { box: 'Box', plane: 'Plane', cylinder: 'Cylinder', cone: 'Cone', pyramid: 'Pyramid', sphere: 'Sphere', icosphere: 'Icosphere', capsule: 'Capsule', ramp: 'Ramp', stairs: 'Stairs', arch: 'Arch', column: 'Column', torus: 'Torus', tube: 'Tube' };
+export const PRIMITIVE_LABELS: Record<PrimitiveKind, string> = { box: 'Box', plane: 'Plane', cylinder: 'Cylinder', cone: 'Cone', pyramid: 'Pyramid', sphere: 'Sphere', icosphere: 'Icosphere', capsule: 'Capsule', ramp: 'Ramp', stairs: 'Stairs', arch: 'Arch', torus: 'Torus', tube: 'Tube' };
 export const PRIMITIVE_KINDS = Object.keys(PRIMITIVE_LABELS) as PrimitiveKind[];
 
 export function defaultPrimitiveParameters(kind: PrimitiveKind, preset: ComplexityPreset = 'low'): PrimitiveParameters {
@@ -102,16 +103,19 @@ export function buildPrimitiveInCage(kind: PrimitiveKind, cage: PrimitiveConstru
   const p = clampPrimitiveParameters(input);
   let mesh = buildNormalised(kind, p);
   const centre = primitiveCageCentre(cage);
-  const reflectNormal = kind === 'cone' && cage.creationDirection < 0;
+  const reflectNormal = (kind === 'cone' || kind === 'pyramid') && cage.creationDirection < 0;
   // Local (x,y,z) maps to (axisU, axisNormal, axisV). Flip when that basis is left-handed
   // (e.g. Front / WORLD_XY) so closed meshes keep outward winding in every view.
+  // Open planes have only one face — keep it aligned with the construction-plane
+  // normal (the "top" of the draw) instead of the closed-mesh heuristic.
   const basisSign = Math.sign(dotVec3(cage.axisU, crossVec3(cage.axisNormal, cage.axisV))) || 1;
-  const flipWinding = reflectNormal !== (basisSign < 0);
+  const flipWinding = kind !== 'plane' && reflectNormal !== (basisSign < 0);
   for (const vertex of mesh.vertices.values()) {
     const local = vertex.position;
     vertex.position = addVec3(centre, addVec3(scaleVec3(cage.axisU, local.x * cage.sizeU), addVec3(scaleVec3(cage.axisNormal, local.y * cage.sizeNormal * (reflectNormal ? -1 : 1)), scaleVec3(cage.axisV, local.z * cage.sizeV))));
   }
-  if (flipWinding) flipFaces(mesh, [...mesh.faces.keys()]);
+  if (kind === 'plane') alignFacesToNormal(mesh, cage.axisNormal);
+  else if (flipWinding) flipFaces(mesh, [...mesh.faces.keys()]);
   mesh.name = PRIMITIVE_LABELS[kind];
   mesh.geometryVersion += 1; mesh.dirty.positions = mesh.dirty.normals = mesh.dirty.bounds = mesh.dirty.bvh = true;
   return mesh;
@@ -121,7 +125,7 @@ function buildNormalised(kind: PrimitiveKind, p: PrimitiveParameters): EditableM
   let mesh: EditableMesh;
   if (kind === 'box') mesh = buildBox({ width: 1, height: 1, depth: 1, centered: true });
   else if (kind === 'plane') mesh = buildPlane({ width: 1, depth: 1 });
-  else if (kind === 'cylinder' || kind === 'column') mesh = buildCylinder({ radius: 0.5, height: 1, radialSegments: p.radialSegments, capped: p.capped, name: PRIMITIVE_LABELS[kind] });
+  else if (kind === 'cylinder') mesh = buildCylinder({ radius: 0.5, height: 1, radialSegments: p.radialSegments, capped: p.capped, name: PRIMITIVE_LABELS[kind] });
   else if (kind === 'cone') mesh = buildCone({ radius: 0.5, height: 1, radialSegments: p.radialSegments, capped: p.capped });
   else if (kind === 'pyramid') mesh = buildPyramid({ width: 1, height: 1, depth: 1 });
   else if (kind === 'sphere') mesh = buildSphere({ radius: 0.5, widthSegments: p.radialSegments, heightSegments: p.heightSegments });
@@ -172,10 +176,19 @@ function ensureUsableUvs(mesh: EditableMesh): void {
   }
 }
 
+function alignFacesToNormal(mesh: EditableMesh, target: Vec3): void {
+  const faceIds = [...mesh.faces.keys()];
+  const first = faceIds[0];
+  if (!first) return;
+  if (dotVec3(computeFaceNormal(mesh, first), target) >= 0) return;
+  const flipped = flipFaces(mesh, faceIds);
+  if (!flipped.ok) throw new Error(flipped.error?.message ?? 'Could not orient plane');
+}
+
 function applyShading(mesh: EditableMesh, kind: PrimitiveKind, p: PrimitiveParameters): void {
   if (!p.smooth) return;
   for (const face of mesh.faces.values()) face.flatShaded = false;
-  if (kind === 'cylinder' || kind === 'column' || kind === 'cone') {
+  if (kind === 'cylinder' || kind === 'cone') {
     for (const face of mesh.faces.values()) if (faceHalfEdgeIds(mesh, face.id).length > 4) face.flatShaded = true;
     for (const edge of mesh.edges.values()) {
       const faces = [edge.halfEdgeAId, edge.halfEdgeBId].filter((id): id is string => !!id).map((id) => mesh.halfEdges.get(id)?.faceId).filter(Boolean).map((id) => mesh.faces.get(id!));

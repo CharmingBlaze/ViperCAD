@@ -1,6 +1,6 @@
 import { cloneTransform, defaultTransform, type Transform } from '@/core/math/Transform';
 import type { Vec3 } from '@/core/math/Vec3';
-import type { AnimationClip, Armature, BoneId } from '@/core/rig/types';
+import type { AnimationClip, Armature, BoneId, KeyframeInterpolation, TransformKeyframe } from '@/core/rig/types';
 
 type Quat = { x: number; y: number; z: number; w: number };
 
@@ -83,7 +83,7 @@ function lerpTransform(a: Transform, b: Transform, t: number): Transform {
   };
 }
 
-function sampleTrack(keyframes: { time: number; value: Transform }[], time: number): Transform {
+function sampleTrack(keyframes: TransformKeyframe[], time: number): Transform {
   if (!keyframes.length) return defaultTransform();
   if (time <= keyframes[0]!.time) return cloneTransform(keyframes[0]!.value);
   const last = keyframes[keyframes.length - 1]!;
@@ -92,8 +92,13 @@ function sampleTrack(keyframes: { time: number; value: Transform }[], time: numb
     const current = keyframes[index]!;
     const next = keyframes[index + 1]!;
     if (time >= current.time && time <= next.time) {
+      const mode = current.interpolation ?? 'smooth';
+      if (mode === 'step') return cloneTransform(current.value);
       const span = next.time - current.time || 1;
-      const t = (time - current.time) / span;
+      let t = (time - current.time) / span;
+      if (mode === 'smooth') {
+        t = t * t * (3 - 2 * t);
+      }
       return lerpTransform(current.value, next.value, t);
     }
   }
@@ -121,6 +126,7 @@ export function insertBoneKeyframe(
   boneId: BoneId,
   time: number,
   value: Transform,
+  interpolation: KeyframeInterpolation = 'smooth',
 ): void {
   let track = clip.tracks.find((entry) => entry.boneId === boneId);
   if (!track) {
@@ -129,11 +135,29 @@ export function insertBoneKeyframe(
   }
   const existing = track.keyframes.findIndex((keyframe) => Math.abs(keyframe.time - time) < 1e-4);
   const snapshot = cloneTransform(value);
-  if (existing >= 0) track.keyframes[existing] = { time, value: snapshot };
-  else track.keyframes.push({ time, value: snapshot });
+  if (existing >= 0) {
+    const prevInterp = track.keyframes[existing]!.interpolation;
+    track.keyframes[existing] = { time, value: snapshot, interpolation: interpolation ?? prevInterp ?? 'smooth' };
+  } else {
+    track.keyframes.push({ time, value: snapshot, interpolation });
+  }
   track.keyframes.sort((a, b) => a.time - b.time);
   const lastTime = track.keyframes[track.keyframes.length - 1]?.time ?? clip.duration;
   if (lastTime > clip.duration) clip.duration = lastTime;
+}
+
+export function setKeyframeInterpolation(
+  clip: AnimationClip,
+  boneId: BoneId,
+  time: number,
+  interpolation: KeyframeInterpolation,
+): void {
+  const track = clip.tracks.find((entry) => entry.boneId === boneId);
+  if (!track) return;
+  const keyframe = track.keyframes.find((k) => Math.abs(k.time - time) < 1e-4);
+  if (keyframe) {
+    keyframe.interpolation = interpolation;
+  }
 }
 
 export function removeBoneKeyframe(clip: AnimationClip, boneId: BoneId, time: number): void {
@@ -174,3 +198,28 @@ export function keyframeTimesForBone(clip: AnimationClip | null, boneId: BoneId)
   const track = clip.tracks.find((entry) => entry.boneId === boneId);
   return track ? track.keyframes.map((keyframe) => keyframe.time) : [];
 }
+
+export function allKeyframeTimes(clip: AnimationClip | null): number[] {
+  if (!clip) return [];
+  const set = new Set<number>();
+  for (const track of clip.tracks) {
+    for (const kf of track.keyframes) {
+      set.add(Number(kf.time.toFixed(4)));
+    }
+  }
+  return [...set].sort((a, b) => a - b);
+}
+
+export function getNextKeyframeTime(clip: AnimationClip | null, currentTime: number): number | null {
+  const times = allKeyframeTimes(clip);
+  return times.find((t) => t > currentTime + 1e-4) ?? null;
+}
+
+export function getPrevKeyframeTime(clip: AnimationClip | null, currentTime: number): number | null {
+  const times = allKeyframeTimes(clip);
+  for (let i = times.length - 1; i >= 0; i--) {
+    if (times[i]! < currentTime - 1e-4) return times[i]!;
+  }
+  return null;
+}
+

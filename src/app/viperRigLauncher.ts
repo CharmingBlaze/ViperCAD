@@ -1,5 +1,6 @@
 import type { ViperProject } from '@/core/document/types';
-import { deserializeViperProject, serializeViperProject } from '@/core/persistence/ProjectSerializer';
+import { serializeViperProject } from '@/core/persistence/ProjectSerializer';
+import { openViperProjectText } from '@/core/persistence/projectHealth';
 import { ViperLink } from '@/core/link/ViperLink';
 
 let linkHost: ViperLink | null = null;
@@ -48,7 +49,7 @@ export function syncProjectToRig(project: ViperProject, activeDocumentId: string
 }
 
 export function applyRigProjectSnapshot(projectJson: string): ViperProject {
-  return deserializeViperProject(projectJson).project;
+  return openViperProjectText(projectJson).project;
 }
 
 export function bindViperCadLink(

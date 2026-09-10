@@ -23,7 +23,7 @@ const MAX_CUTS = 32;
 
 /**
  * Blender-style Ctrl+R workflow:
- * hover ring → click → slide → click/Enter, RMB centres, Esc cancels.
+ * hover ring → click → slide → click/Enter, RMB click centres, Esc cancels.
  */
 export class LoopCutTool implements Tool {
   id = 'loop-cut' as const;
@@ -41,6 +41,7 @@ export class LoopCutTool implements Tool {
   private lockedPick: LoopCutViewportPick | null = null;
   private ring: LoopCutRing | null = null;
   private slideStartX = 0;
+  private slideStartY = 0;
   private previewSegments: Array<[Vec3, Vec3]> = [];
 
   setViewportPick(pick: LoopCutViewportPick | null): void {
@@ -71,6 +72,12 @@ export class LoopCutTool implements Tool {
   }
 
   begin(input: ToolPointerInput, context: ModellingContext): void {
+    // Blender: RMB while sliding centres the cut and confirms; RMB before a
+    // ring is chosen simply exits the modal tool.
+    if (input.button === 'right') {
+      this.centreAndConfirm(context);
+      return;
+    }
     if (input.button !== 'left') return;
     if (this.state.phase === 'slide') {
       this.confirm(context);
@@ -85,6 +92,7 @@ export class LoopCutTool implements Tool {
     this.state.phase = 'slide';
     this.state.slide = 0;
     this.slideStartX = input.screenX;
+    this.slideStartY = input.screenY;
     context.selection.setMode('edge');
     context.selection.selectObjects([this.lockedPick.objectId], 'replace');
     context.selection.selectEdges([this.lockedPick.edgeId], 'replace');
@@ -93,7 +101,12 @@ export class LoopCutTool implements Tool {
 
   update(input: ToolPointerInput, context: ModellingContext): void {
     if (this.state.phase === 'slide') {
-      this.state.slide = clamp((input.screenX - this.slideStartX) * 0.01, -1, 1);
+      // Use whichever screen axis the user moves furthest. This gives a
+      // predictable slide even when the quad ring is viewed vertically.
+      const dx = input.screenX - this.slideStartX;
+      const dy = input.screenY - this.slideStartY;
+      const distance = Math.abs(dx) >= Math.abs(dy) ? dx : -dy;
+      this.state.slide = clamp(distance * 0.01, -1, 1);
       this.refreshPreview(context);
       return;
     }
@@ -215,6 +228,7 @@ export class LoopCutTool implements Tool {
     this.lockedPick = null;
     this.ring = null;
     this.slideStartX = 0;
+    this.slideStartY = 0;
     this.previewSegments = [];
     this.state.revision += 1;
   }

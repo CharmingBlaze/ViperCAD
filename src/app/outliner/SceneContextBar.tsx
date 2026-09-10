@@ -4,10 +4,10 @@ type OutlinerTab = 'models' | 'levels';
 
 type Props = {
   session: EditorSession;
-  onBrowseTab: (tab: OutlinerTab) => void;
+  onBrowseTab?: (tab: OutlinerTab) => void;
 };
 
-export function SceneContextBar({ session, onBrowseTab }: Props) {
+export function SceneContextBar({ session }: Props) {
   const doc = session.document;
   const kindLabel = doc.kind === 'model' ? 'Model' : 'Level';
   const objectCount = session.document.objects.size;
@@ -25,14 +25,6 @@ export function SceneContextBar({ session, onBrowseTab }: Props) {
             {doc.dirty ? ' · unsaved' : ''}
           </span>
         </div>
-      </div>
-      <div className="scene-context-nav">
-        <button type="button" className="scene-context-link" onClick={() => onBrowseTab('levels')}>
-          Levels
-        </button>
-        <button type="button" className="scene-context-link" onClick={() => onBrowseTab('models')}>
-          Models
-        </button>
       </div>
     </div>
   );

@@ -1,5 +1,7 @@
 # ViperCAD modelling architecture
 
+Onboarding and file ownership: [CONTRIBUTING.md](./CONTRIBUTING.md), [docs/CODEMAP.md](./docs/CODEMAP.md).
+
 ## Source-of-truth rule
 
 `ModelDocument` owns scene objects and asset repositories. Every mesh asset is an `EditableMesh` with stable IDs for vertices, edges, half-edges, faces, face corners and UV layers. Logical polygons remain triangles, quads or n-gons; render triangles are derived by `MeshRenderAdapter` and carry mappings back to logical face/corner/vertex IDs.

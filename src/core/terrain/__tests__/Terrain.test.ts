@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { commitMeshObject } from '@/core/document/ModelDocument';
 import { EditorSession } from '@/core/editor/EditorSession';
 import { resetIdCounter } from '@/core/ids/IdService';
+import { buildBox } from '@/core/mesh/builders/BoxBuilder';
 import { validateMeshFull } from '@/core/mesh/Validation';
 import {
   applyTerrainTileRepeat,
@@ -91,6 +93,22 @@ describe('terrain sculpting', () => {
 
     expect(session.undo()).toBe(true);
     expect(terrainHeightRange(mesh)).toEqual({ min: 0, max: 0 });
+  });
+
+  it('keeps sculpting when a prop is selected instead of the terrain', () => {
+    const session = new EditorSession();
+    const terrain = createTerrain(session, { size: 10, resolution: 10 });
+    const mesh = session.document.meshes.get(terrain.meshId)!;
+    const decoy = commitMeshObject(session.document, buildBox({ width: 0.4, height: 0.4, depth: 0.4 }));
+    session.document.objects.get(decoy.objectId)!.metadata.terrainOwnerId = terrain.objectId;
+    session.selection.selectObjects([decoy.objectId], 'replace');
+    const tool = session.tools.get('terrain-sculpt') as TerrainSculptTool;
+    tool.setRadius(2, session.context());
+    tool.setStrength(0.8, session.context());
+    tool.begin(pointer(0, 0), session.context());
+    tool.update(pointer(0.5, 0), session.context());
+    expect(tool.endStroke(session.context())).toBe(true);
+    expect(terrainHeightRange(mesh).max).toBeGreaterThan(0);
   });
 
   it('supports inverted raise strokes with Shift', () => {

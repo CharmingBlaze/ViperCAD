@@ -19,7 +19,8 @@ export type IdKind =
   | 'bone'
   | 'arm'
   | 'skin'
-  | 'clip';
+  | 'clip'
+  | 'seq';
 
 export type ElementId = string;
 

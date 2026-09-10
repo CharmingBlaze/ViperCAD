@@ -1,4 +1,17 @@
-import { Group, Mesh, Scene, type Material, type Object3D, type Texture } from 'three';
+import {
+  AnimationClip as ThreeAnimationClip,
+  Euler,
+  Group,
+  Mesh,
+  MeshStandardMaterial,
+  Quaternion,
+  QuaternionKeyframeTrack,
+  Scene,
+  VectorKeyframeTrack,
+  type Material,
+  type Object3D,
+  type Texture,
+} from 'three';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { bakeAtlasTilesForExport } from '@/app/AtlasGltfBake';
@@ -12,6 +25,9 @@ import {
   editableMeshToRenderData,
   materialAssetToThree,
 } from '@/renderer/MeshRenderAdapter';
+import { buildSkinnedMesh } from '@/core/rig/SkinnedMeshBuilder';
+import { readRigDocumentSettings } from '@/core/rig/RigDocument';
+import type { AnimationSession } from '@/app/animation/AnimationSession';
 
 /** Objects that would be included in an engine export for the given profile. */
 export function objectsForExport(
@@ -63,6 +79,9 @@ export async function exportDocumentGlb(
           assets,
           { forGltfExport: true },
         ));
+      if (materials.length === 0) {
+        materials.push(new MeshStandardMaterial({ color: 0xcccccc, roughness: 0.8, metalness: 0 }));
+      }
       disposableMaterials.push(...materials);
       for (const material of materials) {
         if (material.map) disposableTextures.push(material.map);
@@ -124,6 +143,117 @@ export async function exportDocumentGlb(
     for (const material of disposableMaterials) material.dispose();
     for (const texture of disposableTextures) texture.dispose();
   }
+}
+
+/** Export rigged character with skinned meshes, skeleton, and animation clips as a game-ready binary glTF. */
+export async function exportRigGlb(
+  session: AnimationSession,
+  profile: ExportProfile = EXPORT_PROFILES.godot,
+): Promise<ArrayBuffer> {
+  const doc = session.rigDocument;
+  const settings = readRigDocumentSettings(doc);
+  const source = session.getSourceModel();
+  const armature = settings.armatureId ? session.project.armatures.get(settings.armatureId) : null;
+  if (!source || !armature) {
+    throw new Error('No source model or armature found for animation export.');
+  }
+
+  const scene = new Scene();
+  scene.name = doc.name;
+  const exportRoot = new Group();
+  exportRoot.name = `${source.name}_RigRoot`;
+  const unitScale = source.settings?.units === 'centimeters' ? 0.01 : 1;
+  exportRoot.scale.setScalar(unitScale * profile.scale);
+  if (profile.upAxis === 'z') exportRoot.rotation.x = -Math.PI / 2;
+  scene.add(exportRoot);
+
+  for (const bindingId of settings.skinBindingIds) {
+    const binding = session.project.skinBindings.get(bindingId);
+    if (!binding) continue;
+    const object = source.objects.get(binding.objectId);
+    const mesh = object?.meshId ? session.project.meshes.get(object.meshId) : null;
+    if (!mesh) continue;
+    const materials = source.materials ? [...source.materials.values()] : [...session.project.materials.values()];
+    const textures = source.textures ?? session.project.textures ?? new Map();
+    const images = source.images ?? session.project.images ?? new Map();
+    const rigMesh = buildSkinnedMesh(mesh, binding, armature, {
+      materials,
+      assets: { textures, images },
+    });
+    rigMesh.mesh.name = object?.name ?? 'SkinnedMesh';
+    exportRoot.add(rigMesh.mesh);
+  }
+
+  // Convert AnimationClips to Three.js AnimationClips
+  const threeClips: ThreeAnimationClip[] = [];
+  for (const clip of session.getClips()) {
+    const tracks: (VectorKeyframeTrack | QuaternionKeyframeTrack)[] = [];
+
+    for (const track of clip.tracks) {
+      const bone = armature.bones.get(track.boneId);
+      if (!bone || track.keyframes.length === 0) continue;
+
+      const sorted = [...track.keyframes].sort((a, b) => a.time - b.time);
+      const times = new Float32Array(sorted.length);
+      const posVals = new Float32Array(sorted.length * 3);
+      const quatVals = new Float32Array(sorted.length * 4);
+      const scaleVals = new Float32Array(sorted.length * 3);
+
+      const euler = new Euler();
+      const quat = new Quaternion();
+
+      for (let i = 0; i < sorted.length; i += 1) {
+        const kf = sorted[i]!;
+        times[i] = kf.time;
+
+        posVals[i * 3] = kf.value.position.x;
+        posVals[i * 3 + 1] = kf.value.position.y;
+        posVals[i * 3 + 2] = kf.value.position.z;
+
+        euler.set(kf.value.rotation.x, kf.value.rotation.y, kf.value.rotation.z);
+        quat.setFromEuler(euler);
+        quatVals[i * 4] = quat.x;
+        quatVals[i * 4 + 1] = quat.y;
+        quatVals[i * 4 + 2] = quat.z;
+        quatVals[i * 4 + 3] = quat.w;
+
+        scaleVals[i * 3] = kf.value.scale.x;
+        scaleVals[i * 3 + 1] = kf.value.scale.y;
+        scaleVals[i * 3 + 2] = kf.value.scale.z;
+      }
+
+      tracks.push(new VectorKeyframeTrack(`${bone.name}.position`, times as unknown as number[], posVals as unknown as number[]));
+      tracks.push(new QuaternionKeyframeTrack(`${bone.name}.quaternion`, times as unknown as number[], quatVals as unknown as number[]));
+      tracks.push(new VectorKeyframeTrack(`${bone.name}.scale`, times as unknown as number[], scaleVals as unknown as number[]));
+    }
+
+    const threeClip = new ThreeAnimationClip(clip.name, clip.duration, tracks);
+    if (clip.events && clip.events.length > 0) {
+      threeClip.userData = { ...threeClip.userData, events: clip.events };
+    }
+    if (clip.rootMotion) {
+      threeClip.userData = { ...threeClip.userData, rootMotion: true };
+    }
+    threeClips.push(threeClip);
+  }
+
+  return await new Promise<ArrayBuffer>((resolve, reject) => {
+    new GLTFExporter().parse(
+      scene,
+      (result) => {
+        if (result instanceof ArrayBuffer) resolve(result);
+        else reject(new Error('GLB exporter returned JSON instead of binary data'));
+      },
+      (error) => reject(error),
+      {
+        binary: true,
+        onlyVisible: profile.onlyVisible,
+        animations: threeClips,
+        trs: true,
+        includeCustomExtensions: true,
+      },
+    );
+  });
 }
 
 export type GlbRoundTripReport = {

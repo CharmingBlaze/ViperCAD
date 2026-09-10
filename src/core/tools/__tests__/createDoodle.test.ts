@@ -4,6 +4,7 @@ import { CreateDoodleTool, smoothDoodlePoints } from '@/core/tools/CreateDoodleT
 import { v3 } from '@/core/math/Vec3';
 import type { ToolPointerInput } from '@/core/tools/Tool';
 import { readCurveOperation } from '@/core/curves/CurveOperation';
+import { DEFAULT_PLACEHOLDER_IMAGE_NAME } from '@/core/image/DefaultPlaceholderImage';
 
 function pointer(
   origin: { x: number; y: number; z: number },
@@ -44,6 +45,20 @@ describe('CreateDoodleTool', () => {
     expect(session.document.objects.size).toBe(1);
     expect(session.document.meshes.size).toBe(1);
     const object = [...session.document.objects.values()][0]!;
+    expect(object.kind).toBe('mesh');
+    const mesh = session.document.meshes.get(object.meshId!)!;
+    const xs = [...mesh.vertices.values()].map((vertex) => vertex.position.x);
+    const ys = [...mesh.vertices.values()].map((vertex) => vertex.position.y);
+    const zs = [...mesh.vertices.values()].map((vertex) => vertex.position.z);
+    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(0, 5);
+    expect((Math.min(...ys) + Math.max(...ys)) / 2).toBeCloseTo(0, 5);
+    expect((Math.min(...zs) + Math.max(...zs)) / 2).toBeCloseTo(0, 5);
+    const material = session.document.materials.get(object.materialSlotIds[0]!)!;
+    expect(material.baseColourTextureId).toBeTruthy();
+    const texture = session.document.textures.get(material.baseColourTextureId!)!;
+    expect(session.document.images.get(texture.imageAssetId)?.name).toBe(
+      DEFAULT_PLACEHOLDER_IMAGE_NAME,
+    );
     const operation = readCurveOperation(object.metadata.curveOperation);
     expect(operation?.style).toBe('soft');
     expect(operation?.points.length).toBeGreaterThanOrEqual(2);
@@ -225,11 +240,14 @@ describe('CreateDoodleTool', () => {
     tool.confirm(session.context());
     const object = [...session.document.objects.values()][0]!;
     const committed = readCurveOperation(object.metadata.curveOperation)!;
-    expect(committed.points[1]!.x).toBe(1.234567891);
-    expect(committed.handlesOut[0]).toEqual(movedHandle);
+    const pivot = object.transform.position;
+    expect(committed.points[1]!.x + pivot.x).toBeCloseTo(1.234567891);
+    expect(committed.handlesOut[0]!.x + pivot.x).toBeCloseTo(movedHandle.x);
+    expect(committed.handlesOut[0]!.y + pivot.y).toBeCloseTo(movedHandle.y);
+    expect(committed.handlesOut[0]!.z + pivot.z).toBeCloseTo(movedHandle.z);
   });
 
-  it('can begin another stroke after confirm while the doodle tool stays active', () => {
+  it('returns to select after confirm so Draw must be clicked again', () => {
     const session = new EditorSession();
     const tool = session.tools.get('create-doodle') as CreateDoodleTool;
     session.tools.setActive('create-doodle', session.context());
@@ -239,8 +257,9 @@ describe('CreateDoodleTool', () => {
     tool.confirm(session.context());
     expect(tool.state.stage).toBe('idle');
     expect(session.document.objects.size).toBe(1);
-    expect(session.tools.getActive()).toBe(tool);
+    expect(session.tools.getActive()?.id).toBe('select');
 
+    session.tools.setActive('create-doodle', session.context());
     tool.begin(pointer({ x: 1, y: 2, z: 4 }, { x: 0, y: 0, z: -1 }, 40, 40), session.context());
     expect(tool.state.stage).toBe('drawing');
     expect(tool.state.points.length).toBe(1);
@@ -288,5 +307,22 @@ describe('CreateDoodleTool', () => {
     tool.update(pointer(origin, { x: -0.345, y: 0.205, z: -1 }), session.context());
     expect(tool.state.closed).toBe(false);
     expect(tool.state.previewPoint).not.toEqual(first);
+  });
+
+  it('starts a stroke on a face construction plane', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-doodle') as CreateDoodleTool;
+    session.tools.setActive('create-doodle', session.context());
+    session.constructionPlane = {
+      origin: { x: 0, y: 3, z: 0 },
+      normal: { x: 0, y: 1, z: 0 },
+      xAxis: { x: 1, y: 0, z: 0 },
+      yAxis: { x: 0, y: 0, z: 1 },
+    };
+    session.constructionPlaneId = 'face:surface';
+    tool.begin(pointer({ x: 1, y: 10, z: 2 }, { x: 0, y: -1, z: 0 }), session.context());
+    expect(tool.state.stage).toBe('drawing');
+    expect(tool.state.points[0]!.y).toBeCloseTo(3, 5);
+    expect(tool.state.points[0]!.x).toBeCloseTo(1, 5);
   });
 });

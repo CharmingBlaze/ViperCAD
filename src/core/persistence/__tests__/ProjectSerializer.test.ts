@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createEmptyDocument } from '@/core/document/ModelDocument';
 import type { ModelDocument } from '@/core/document/types';
+import { APP_VERSION } from '@/version';
 import {
   deserializeProject,
   PROJECT_FORMAT,
@@ -46,6 +47,8 @@ describe('ProjectSerializer migrations', () => {
   it('writes the current format with save metadata', () => {
     const encoded = JSON.parse(serializeProject(createEmptyDocument(), 'test'));
     expect(encoded.formatVersion).toBe(PROJECT_FORMAT_VERSION);
+    expect(encoded.applicationVersion).toBe('test');
+    expect(JSON.parse(serializeProject(createEmptyDocument())).applicationVersion).toBe(APP_VERSION);
     expect(Number.isNaN(Date.parse(encoded.savedAt))).toBe(false);
     expect(encoded.project).toBeDefined();
   });
@@ -86,5 +89,11 @@ describe('ProjectSerializer migrations', () => {
     const encoded = JSON.parse(serializeProject(createEmptyDocument(), 'future'));
     encoded.formatVersion = PROJECT_FORMAT_VERSION + 1;
     expect(() => deserializeProject(JSON.stringify(encoded))).toThrow(/newer than supported/);
+  });
+
+  it('rejects a tampered checksum', () => {
+    const encoded = JSON.parse(serializeProject(createEmptyDocument()));
+    encoded.checksum = '00000000';
+    expect(() => deserializeProject(JSON.stringify(encoded))).toThrow(/integrity check/);
   });
 });

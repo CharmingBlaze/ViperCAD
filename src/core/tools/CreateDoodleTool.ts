@@ -1,6 +1,5 @@
 import { commitMeshObject } from '@/core/document/ModelDocument';
 import {
-  applySimpleTextureToObject,
   defaultSimpleTextureSettings,
   type SimpleTextureSettings,
 } from '@/core/curves/SimpleTexture';
@@ -32,6 +31,7 @@ import {
   defaultBezierHandles,
   evaluateCurveOperation,
   isPathStyle,
+  localizeCurveOperationToMeshCenter,
   serializeCurveOperation,
   type CurveOperation,
   type CurveInputMode,
@@ -41,6 +41,7 @@ import {
 } from '@/core/curves/CurveOperation';
 import type { LatheAxis } from '@/core/mesh/builders/LatheBuilder';
 export { smoothCurvePoints as smoothDoodlePoints } from '@/core/curves/CurveOperation';
+import { rayPlaneIntersection } from '@/core/snap/SnapEngine';
 import type { ModellingContext, Tool, ToolPointerInput } from './Tool';
 
 export type DoodleDrawStage = 'idle' | 'drawing';
@@ -331,10 +332,22 @@ export class CreateDoodleTool implements Tool {
       return;
     }
     if (this.state.stage !== 'idle') return;
-    const depth = this.resolveDepth(input);
-    const point = this.samplePoint(input, depth);
-    this.strokePlaneOrigin = { ...point };
-    this.strokePlaneNormal = normalizeVec3(input.rayDirection);
+    const surfacePlane =
+      typeof context.constructionPlaneId === 'string' &&
+      context.constructionPlaneId.startsWith('face:')
+        ? context.constructionPlane
+        : null;
+    const surfaceHit = surfacePlane
+      ? rayPlaneIntersection(input.rayOrigin, input.rayDirection, surfacePlane)
+      : null;
+    const depth = surfaceHit
+      ? Math.max(0.35, Math.sqrt(lengthSqVec3(subVec3(surfaceHit, input.rayOrigin))))
+      : this.resolveDepth(input);
+    const point = surfaceHit ?? this.samplePoint(input, depth);
+    this.strokePlaneOrigin = surfacePlane ? { ...surfacePlane.origin } : { ...point };
+    this.strokePlaneNormal = surfacePlane
+      ? { ...surfacePlane.normal }
+      : normalizeVec3(input.rayDirection);
     this.previousSelection = cloneSelection(context.selection.state);
     this.state = {
       stage: 'drawing',
@@ -463,10 +476,12 @@ export class CreateDoodleTool implements Tool {
       ? cloneSelection(this.previousSelection)
       : cloneSelection(context.selection.state);
     const label = this.objectLabel();
+    const localized = localizeCurveOperationToMeshCenter(mesh, operation);
     const { objectId, meshId } = commitMeshObject(context.document, mesh, { name: label });
     const object = context.document.objects.get(objectId)!;
-    object.metadata.curveOperation = serializeCurveOperation(operation);
-    applySimpleTextureToObject(context.document, object, this.simpleTextureSettings);
+    object.transform.position = localized.origin;
+    object.kind = 'mesh';
+    object.metadata.curveOperation = serializeCurveOperation(localized.operation);
     const meshRef = context.document.meshes.get(meshId)!;
     context.selection.setMode('object');
     context.selection.selectObjects([objectId], 'replace');
@@ -504,6 +519,8 @@ export class CreateDoodleTool implements Tool {
     this.strokePlaneOrigin = null;
     this.strokePlaneNormal = null;
     this.state = this.emptyState(this.state.revision + 1);
+    context.setGizmoMode?.('combined');
+    context.setActiveTool?.('select');
     context.requestRedraw();
   }
 

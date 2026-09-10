@@ -151,16 +151,31 @@ export class SelectionManager {
 
   private stashMode(): void {
     const s = this.state;
-    if (s.mode === 'vertex') {
+    if (s.mode === 'vertex' && s.selectedVertexIds.size > 0) {
       this.modeCache.vertexIds = new Set(s.selectedVertexIds);
       this.modeCache.activeVertexId = s.activeVertexId;
-    } else if (s.mode === 'edge') {
+    } else if (s.mode === 'edge' && s.selectedEdgeIds.size > 0) {
       this.modeCache.edgeIds = new Set(s.selectedEdgeIds);
       this.modeCache.activeEdgeId = s.activeEdgeId;
-    } else if (s.mode === 'face') {
+    } else if (s.mode === 'face' && s.selectedFaceIds.size > 0) {
       this.modeCache.faceIds = new Set(s.selectedFaceIds);
       this.modeCache.activeFaceId = s.activeFaceId;
     }
+  }
+
+  /**
+   * Switch edit mode. Between vertex/edge/face, a non-empty selection is converted
+   * so 1/2/3 and the mode buttons keep working like a modeller. Empty selection restores
+   * the per-mode cache.
+   */
+  switchEditMode(mode: SelectionMode, mesh?: EditableMesh | null): void {
+    const prev = this.state.mode;
+    const hasComponent =
+      (prev === 'vertex' && this.state.selectedVertexIds.size > 0) ||
+      (prev === 'edge' && this.state.selectedEdgeIds.size > 0) ||
+      (prev === 'face' && this.state.selectedFaceIds.size > 0);
+    const convert = !!mesh && prev !== 'object' && mode !== 'object' && hasComponent;
+    this.setMode(mode, convert ? { convert: true, mesh } : undefined);
   }
 
   setMode(mode: SelectionMode, options?: { convert?: boolean; mesh?: EditableMesh }): void {
@@ -356,6 +371,69 @@ export class SelectionManager {
         }
       }
       this.selectFaces([...next]);
+    }
+  }
+
+  /** Deselect the outer ring, leaving the interior of the current component selection. */
+  shrink(mesh: EditableMesh): void {
+    if (this.state.mode === 'vertex') {
+      const selected = this.state.selectedVertexIds;
+      const next = new Set<VertexId>();
+      for (const id of selected) {
+        let boundary = false;
+        for (const edge of mesh.edges.values()) {
+          const pair = getEdgeVertices(mesh, edge.id);
+          if (!pair) continue;
+          if (pair[0] !== id && pair[1] !== id) continue;
+          const other = pair[0] === id ? pair[1] : pair[0];
+          if (!selected.has(other)) {
+            boundary = true;
+            break;
+          }
+        }
+        if (!boundary) next.add(id);
+      }
+      this.selectVertices([...next]);
+    } else if (this.state.mode === 'edge') {
+      const selected = this.state.selectedEdgeIds;
+      const incident = new Map<VertexId, EdgeId[]>();
+      for (const edge of mesh.edges.values()) {
+        const pair = getEdgeVertices(mesh, edge.id);
+        if (!pair) continue;
+        for (const v of pair) {
+          const list = incident.get(v) ?? [];
+          list.push(edge.id);
+          incident.set(v, list);
+        }
+      }
+      const next: EdgeId[] = [];
+      for (const id of selected) {
+        const pair = getEdgeVertices(mesh, id);
+        if (!pair) continue;
+        const touchesUnselected = pair.some((v) =>
+          (incident.get(v) ?? []).some((other) => !selected.has(other)),
+        );
+        if (!touchesUnselected) next.push(id);
+      }
+      this.selectEdges(next);
+    } else if (this.state.mode === 'face') {
+      const selected = this.state.selectedFaceIds;
+      const next: FaceId[] = [];
+      for (const id of selected) {
+        let boundary = false;
+        for (const heId of faceHalfEdgeIds(mesh, id)) {
+          const he = mesh.halfEdges.get(heId);
+          const adjacent = he?.twinHalfEdgeId
+            ? mesh.halfEdges.get(he.twinHalfEdgeId)?.faceId
+            : null;
+          if (!adjacent || !selected.has(adjacent)) {
+            boundary = true;
+            break;
+          }
+        }
+        if (!boundary) next.push(id);
+      }
+      this.selectFaces(next);
     }
   }
 

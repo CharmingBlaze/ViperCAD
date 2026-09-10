@@ -16,8 +16,12 @@ export function evaluateArmaturePose(
   armature: Armature,
   clip: AnimationClip | null,
   time: number,
+  overlay?: Map<BoneId, Transform>,
 ): Map<BoneId, BonePose> {
   const locals = sampledLocalTransforms(armature, clip, time);
+  if (overlay) {
+    for (const [id, transform] of overlay) locals.set(id, transform);
+  }
   const worldCache = new Map<BoneId, import('@/core/rig/boneMatrices').Mat4>();
   const poses = new Map<BoneId, BonePose>();
 

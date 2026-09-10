@@ -1,7 +1,7 @@
 import type { CommandHistory } from '@/core/history/CommandHistory';
 import type { ImageAsset, ImageId } from '@/core/document/types';
 import type { Rgba } from './PixelEditor';
-import { getPixel } from './PixelEditor';
+import { compositePaintRect, getPaintPixel, getPaintTarget } from '@/core/image/PaintLayers';
 
 /** Compact dirty-region patch for one brush stroke / fill. */
 export type PixelPatch = {
@@ -47,7 +47,7 @@ export class PixelStrokeRecorder {
     if (!this.active || !this.image) return;
     const key = `${x},${y}`;
     if (!this.before.has(key)) {
-      const prev = getPixel(this.image, x, y) ?? ([0, 0, 0, 0] as Rgba);
+      const prev = getPaintPixel(this.image, x, y) ?? ([0, 0, 0, 0] as Rgba);
       // Read before was already overwritten — store previous from after map if re-touch
       this.before.set(key, prev);
       // Fix: we need before from before write. Caller should pass previous.
@@ -90,7 +90,7 @@ export class PixelStrokeRecorder {
         const gy = y + py;
         const key = `${gx},${gy}`;
         const i = (py * width + px) * 4;
-        const b = this.before.get(key) ?? getPixel(image, gx, gy) ?? ([0, 0, 0, 0] as const);
+        const b = this.before.get(key) ?? getPaintPixel(image, gx, gy) ?? ([0, 0, 0, 0] as const);
         const a = this.after.get(key) ?? b;
         beforePixels[i] = b[0];
         beforePixels[i + 1] = b[1];
@@ -150,15 +150,18 @@ export class PixelStrokeRecorder {
 
   cancel(): void {
     if (this.active && this.image) {
+      const buf = getPaintTarget(this.image);
       for (const [key, colour] of this.before) {
         const [sx, sy] = key.split(',').map(Number) as [number, number];
         const i = (sy * this.image.width + sx) * 4;
-        this.image.pixels[i] = colour[0];
-        this.image.pixels[i + 1] = colour[1];
-        this.image.pixels[i + 2] = colour[2];
-        this.image.pixels[i + 3] = colour[3];
+        buf[i] = colour[0];
+        buf[i + 1] = colour[1];
+        buf[i + 2] = colour[2];
+        buf[i + 3] = colour[3];
+        compositePaintRect(this.image, sx, sy, 1, 1);
       }
       this.image.revision += 1;
+      this.image.userEdited = true;
     }
     this.active = false;
     this.image = null;
@@ -167,17 +170,20 @@ export class PixelStrokeRecorder {
 
 function applyPatch(image: ImageAsset, patch: PixelPatch, which: 'before' | 'after'): void {
   const src = which === 'before' ? patch.beforePixels : patch.afterPixels;
+  const buf = getPaintTarget(image);
   for (let py = 0; py < patch.height; py++) {
     for (let px = 0; px < patch.width; px++) {
       const i = (py * patch.width + px) * 4;
       const gi = ((patch.y + py) * image.width + (patch.x + px)) * 4;
-      image.pixels[gi] = src[i]!;
-      image.pixels[gi + 1] = src[i + 1]!;
-      image.pixels[gi + 2] = src[i + 2]!;
-      image.pixels[gi + 3] = src[i + 3]!;
+      buf[gi] = src[i]!;
+      buf[gi + 1] = src[i + 1]!;
+      buf[gi + 2] = src[i + 2]!;
+      buf[gi + 3] = src[i + 3]!;
     }
   }
+  compositePaintRect(image, patch.x, patch.y, patch.width, patch.height);
   image.revision += 1;
+  image.userEdited = true;
 }
 
 /** Combine two dirty-region patches into one undoable region. */

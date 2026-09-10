@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { objectsForExport } from '@/app/GameExport';
+import { exportDocumentGlb, objectsForExport, validateGlbRoundTrip } from '@/app/GameExport';
 import {
   EXPORT_PROFILES,
   exportDiagnostics,
@@ -82,5 +82,36 @@ describe('objectsForExport', () => {
     session.document.objects.get(objectId)!.metadata.excludeFromExport = 'true';
     const exported = objectsForExport(session.document, EXPORT_PROFILES.godot);
     expect(exported.some((object) => object.id === objectId)).toBe(false);
+  });
+});
+
+describe('exportDocumentGlb', () => {
+  it('exports a box that round-trips with triangles', async () => {
+    if (typeof FileReader === 'undefined') {
+      class NodeFileReader {
+        result: ArrayBuffer | null = null;
+        onloadend: ((this: NodeFileReader, ev: unknown) => void) | null = null;
+        readAsArrayBuffer(blob: Blob) {
+          void blob.arrayBuffer().then((buffer) => {
+            this.result = buffer;
+            this.onloadend?.call(this, {});
+          });
+        }
+      }
+      (globalThis as { FileReader: typeof NodeFileReader }).FileReader = NodeFileReader;
+    }
+    const document = createEmptyDocument('Prop');
+    const { objectId } = commitMeshObject(document, buildBox({ width: 1, height: 1, depth: 1 }), { name: 'Box' });
+    // Node has no canvas; strip maps so GLTFExporter does not rasterize textures.
+    document.objects.get(objectId)!.materialSlotIds = [];
+    document.materials.clear();
+    document.textures.clear();
+    document.images.clear();
+    const buffer = await exportDocumentGlb(document, EXPORT_PROFILES.godot);
+    expect(buffer.byteLength).toBeGreaterThan(100);
+    const report = await validateGlbRoundTrip(buffer);
+    expect(report.errors).toEqual([]);
+    expect(report.meshes).toBeGreaterThan(0);
+    expect(report.triangles).toBeGreaterThan(0);
   });
 });

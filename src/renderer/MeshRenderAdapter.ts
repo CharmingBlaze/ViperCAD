@@ -16,13 +16,20 @@ import {
   RGBAFormat,
   SRGBColorSpace,
   FrontSide,
+  TextureLoader,
   Group,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
   type Material,
+  type Texture,
 } from 'three';
 import type { ImageAsset, MaterialAsset, TextureAsset } from '@/core/document/types';
+import {
+  canUseSharedStockPlaceholderMap,
+  DEFAULT_PLACEHOLDER_IMAGE_NAME,
+  syncHydrateDefaultPlaceholderImages,
+} from '@/core/image/DefaultPlaceholderImage';
 import { faceCornerIds, faceVertexIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
 import { computeCornerNormal, computeFaceNormal } from '@/core/mesh/Normals';
 import { triangulateFace } from '@/core/mesh/Triangulation';
@@ -178,6 +185,49 @@ export type MaterialToThreeOptions = {
   forGltfExport?: boolean;
 };
 
+const DEFAULT_LOW_POLY_TERRAIN_PRESET = 'default-low-poly-terrain';
+const LEGACY_PIXEL_CLAY_PRESET = 'default-pixel-clay';
+let placeholderLowPolyTerrainTexture: Texture | null = null;
+
+/** Shared viewport PNG. Never dispose this — preview and committed meshes share it. */
+function getPlaceholderLowPolyTerrainTexture(): Texture | null {
+  if (placeholderLowPolyTerrainTexture) return placeholderLowPolyTerrainTexture;
+  // Core tests and project tooling run without a DOM. They still receive the
+  if (typeof window === 'undefined' || typeof Image === 'undefined' || typeof document === 'undefined' || !document?.createElementNS) {
+    return null;
+  }
+  const texture = new TextureLoader().load('/placeholders/default-pixel-clay.png');
+  texture.name = 'ViperCAD pixel-clay placeholder';
+  texture.userData.viperSharedPlaceholder = true;
+  texture.colorSpace = SRGBColorSpace;
+  // 1254×1254 is not power-of-two. Repeat + mipmaps is an incomplete texture on WebGL1.
+  texture.wrapS = texture.wrapT = ClampToEdgeWrapping;
+  texture.magFilter = LinearFilter;
+  texture.minFilter = LinearFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  placeholderLowPolyTerrainTexture = texture;
+  return texture;
+}
+
+function isSharedPlaceholderTexture(texture: Texture | null | undefined): boolean {
+  return !!texture && (texture === placeholderLowPolyTerrainTexture || !!texture.userData.viperSharedPlaceholder);
+}
+
+/** Dispose a material map unless it is the shared default viewport texture. */
+export function disposeOwnedTexture(texture: Texture | null | undefined): void {
+  if (!texture || isSharedPlaceholderTexture(texture)) return;
+  texture.dispose();
+}
+
+function rgbaTextureBytes(pixels: ArrayLike<number>): Uint8Array {
+  return pixels instanceof Uint8ClampedArray ? new Uint8Array(pixels) : new Uint8Array(pixels);
+}
+
+function isPowerOfTwo(value: number): boolean {
+  return value > 0 && (value & (value - 1)) === 0;
+}
+
 /** Vertically flip an RGBA pixel buffer (row 0 ↔ last row). */
 export function flipImagePixelsVertically(
   pixels: ArrayLike<number>,
@@ -199,15 +249,28 @@ export function materialAssetToThree(
   assets?: RenderAssetResolver,
   options: MaterialToThreeOptions = {},
 ): MeshStandardMaterial | MeshBasicMaterial | MeshPhysicalMaterial {
+  if (assets) {
+    syncHydrateDefaultPlaceholderImages(assets.images, assets.textures);
+  }
+  const placeholderImage = (() => {
+    if (!assets || !mat.baseColourTextureId) return null;
+    const texture = assets.textures.get(mat.baseColourTextureId);
+    return texture ? assets.images.get(texture.imageAssetId) ?? null : null;
+  })();
+  const isStockPlaceholderName = placeholderImage?.name === DEFAULT_PLACEHOLDER_IMAGE_NAME;
+  const isStockPlaceholder =
+    isStockPlaceholderName ||
+    ((mat.presetId === DEFAULT_LOW_POLY_TERRAIN_PRESET || mat.presetId === LEGACY_PIXEL_CLAY_PRESET) &&
+      !!mat.baseColourTextureId);
   const colour = new Color(mat.baseColour.x, mat.baseColour.y, mat.baseColour.z);
   const emissive = new Color(
     mat.emissive.x * mat.emissiveIntensity,
     mat.emissive.y * mat.emissiveIntensity,
     mat.emissive.z * mat.emissiveIntensity,
   );
+  const useUnlit = isStockPlaceholder || mat.unlit || mat.shadingModel === 'unlit';
   const usePhysical =
-    !mat.unlit &&
-    mat.shadingModel !== 'unlit' &&
+    !useUnlit &&
     (mat.shadingModel === 'physical' || mat.transmission > 0.01 || mat.clearcoat > 0.01);
   const transparent = mat.alphaMode === 'blend' || mat.opacity < 0.999 || mat.transmission > 0.01;
   const common = {
@@ -219,8 +282,9 @@ export function materialAssetToThree(
   };
 
   let material: MeshStandardMaterial | MeshBasicMaterial | MeshPhysicalMaterial;
-  if (mat.unlit || mat.shadingModel === 'unlit') {
+  if (useUnlit) {
     material = new MeshBasicMaterial(common);
+    material.toneMapped = false;
   } else if (usePhysical) {
     material = new MeshPhysicalMaterial({
       ...common,
@@ -252,16 +316,32 @@ export function materialAssetToThree(
     material.depthWrite = mat.opacity > 0.95 && mat.transmission < 0.05;
   }
 
+  const stockViewportMap =
+    !options.forGltfExport && canUseSharedStockPlaceholderMap(placeholderImage)
+      ? getPlaceholderLowPolyTerrainTexture()
+      : null;
   if (assets) {
-    bindMaterialTexture(material, 'map', mat.baseColourTextureId, mat, assets, options, 'srgb');
-    if (!mat.unlit && mat.shadingModel !== 'unlit') {
+    if (!stockViewportMap) {
+      bindMaterialTexture(material, 'map', mat.baseColourTextureId, mat, assets, options, 'srgb');
+    }
+    if (!useUnlit) {
       bindMaterialTexture(material, 'normalMap', mat.normalTextureId, mat, assets, options, 'linear');
       bindMaterialTexture(material, 'roughnessMap', mat.roughnessTextureId, mat, assets, options, 'linear');
       bindMaterialTexture(material, 'metalnessMap', mat.metallicTextureId, mat, assets, options, 'linear');
       bindMaterialTexture(material, 'emissiveMap', mat.emissiveTextureId, mat, assets, options, 'srgb');
     }
-    if (material.map && !options.forGltfExport) patchMaterialForAtlasTileRepeat(material);
+    if (material.map && !options.forGltfExport && !isStockPlaceholder) {
+      patchMaterialForAtlasTileRepeat(material);
+    }
   }
+  if (stockViewportMap) {
+    material.map = stockViewportMap;
+  }
+  if (!options.forGltfExport && isStockPlaceholder) {
+    material.side = DoubleSide;
+    material.toneMapped = false;
+  }
+  if (material.map) material.needsUpdate = true;
 
   return material;
 }
@@ -283,26 +363,26 @@ function bindMaterialTexture(
   const forGltf = !!options.forGltfExport;
   const pixels = forGltf
     ? flipImagePixelsVertically(image.pixels, image.width, image.height)
-    : image.pixels;
+    : rgbaTextureBytes(image.pixels);
   const texture = new DataTexture(pixels, image.width, image.height, RGBAFormat);
   texture.flipY = !forGltf;
+  texture.unpackAlignment = 1;
   const useSrgb = colourSpace === 'srgb' || asset.colourSpace === 'srgb';
   texture.colorSpace = useSrgb ? SRGBColorSpace : NoColorSpace;
   const filtering = mat.textureFiltering ?? asset.filtering;
   const wrapping = mat.textureWrapping ?? asset.wrapping;
+  const powerOfTwo = isPowerOfTwo(image.width) && isPowerOfTwo(image.height);
+  const allowMips = !forGltf && !!asset.generateMipmaps && powerOfTwo;
+  const allowRepeat = wrapping === 'repeat' && powerOfTwo;
   texture.magFilter = filtering === 'nearest' ? NearestFilter : LinearFilter;
   texture.minFilter =
-    filtering === 'nearest'
-      ? NearestFilter
-      : asset.generateMipmaps
-        ? LinearMipmapLinearFilter
-        : LinearFilter;
-  texture.wrapS = texture.wrapT = wrapping === 'repeat' ? RepeatWrapping : ClampToEdgeWrapping;
+    filtering === 'nearest' ? NearestFilter : allowMips ? LinearMipmapLinearFilter : LinearFilter;
+  texture.wrapS = texture.wrapT = allowRepeat ? RepeatWrapping : ClampToEdgeWrapping;
   texture.repeat.set(asset.repeatU ?? 1, asset.repeatV ?? 1);
   texture.offset.set(asset.offsetU ?? 0, asset.offsetV ?? 0);
   texture.center.set(0.5, 0.5);
   texture.rotation = ((asset.rotationDegrees ?? 0) * Math.PI) / 180;
-  texture.generateMipmaps = forGltf ? false : asset.generateMipmaps;
+  texture.generateMipmaps = allowMips;
   texture.needsUpdate = true;
   if (slot === 'map') material.map = texture;
   else if (slot === 'normalMap') {
@@ -319,7 +399,7 @@ function bindMaterialTexture(
 function disposeThreeMaterialMaps(material: Material): void {
   const maps = material as MeshStandardMaterial;
   for (const key of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap'] as const) {
-    maps[key]?.dispose();
+    disposeOwnedTexture(maps[key]);
   }
 }
 
@@ -412,6 +492,10 @@ export function createObjectRenderHandle(
   );
   threeMesh.name = mesh.name;
   threeMesh.renderOrder = 0;
+  // Let the viewport's studio lights produce the same depth cues users expect
+  // from a real-time engine scene view.
+  threeMesh.castShadow = true;
+  threeMesh.receiveShadow = true;
   threeMesh.userData.objectId = objectId;
   threeMesh.userData.meshId = mesh.id;
   threeMesh.userData.triangleMap = renderData.triangleMap;
@@ -518,7 +602,11 @@ export function applyMeshEvaluation(handle: ObjectRenderHandle, result: MeshEval
 }
 
 /** Update mesh + edge overlay positions without reallocating geometry. */
-export function updateRenderPositionsInPlace(handle: ObjectRenderHandle, mesh: EditableMesh): boolean {
+export function updateRenderPositionsInPlace(
+  handle: ObjectRenderHandle,
+  mesh: EditableMesh,
+  options: { live?: boolean } = {},
+): boolean {
   const posAttr = handle.mesh.geometry.getAttribute('position') as BufferAttribute | undefined;
   const uvAttr = handle.mesh.geometry.getAttribute('uv') as BufferAttribute | undefined;
   let tileAttr = handle.mesh.geometry.getAttribute('atlasTileRect') as BufferAttribute | undefined;
@@ -542,6 +630,14 @@ export function updateRenderPositionsInPlace(handle: ObjectRenderHandle, mesh: E
     }
   }
   markPartialUpdate(posAttr, positionStart, positionEnd);
+  if (options.live) {
+    if (positionEnd >= 0) {
+      handle.mesh.geometry.computeBoundingSphere();
+    }
+    updateEdgeOverlayPositions(handle, mesh);
+    handle.renderData.geometryVersion = mesh.geometryVersion;
+    return true;
+  }
   const layerId = mesh.defaultUvLayerId;
   let uvStart = Infinity;
   let uvEnd = -1;
@@ -573,36 +669,44 @@ export function updateRenderPositionsInPlace(handle: ObjectRenderHandle, mesh: E
   }
   markPartialUpdate(uvAttr, uvStart, uvEnd);
   markPartialUpdate(tileAttr, tileStart, tileEnd);
-  if (positionEnd >= 0) handle.mesh.geometry.computeBoundingSphere();
-
-  const edgeAttr = handle.edgeOverlay.geometry.getAttribute('position') as BufferAttribute | undefined;
-  if (edgeAttr) {
-    let i = 0;
-    let edgeStart = Infinity;
-    let edgeEnd = -1;
-    for (const edge of mesh.edges.values()) {
-      const pair = getEdgeVertices(mesh, edge.id);
-      if (!pair) continue;
-      const a = mesh.vertices.get(pair[0])!.position;
-      const b = mesh.vertices.get(pair[1])!.position;
-      if (i + 1 >= edgeAttr.count) break;
-      if (edgeAttr.getX(i) !== a.x || edgeAttr.getY(i) !== a.y || edgeAttr.getZ(i) !== a.z) {
-        edgeAttr.setXYZ(i, a.x, a.y, a.z);
-        edgeStart = Math.min(edgeStart, i * 3);
-        edgeEnd = Math.max(edgeEnd, i * 3 + 3);
-      }
-      if (edgeAttr.getX(i + 1) !== b.x || edgeAttr.getY(i + 1) !== b.y || edgeAttr.getZ(i + 1) !== b.z) {
-        edgeAttr.setXYZ(i + 1, b.x, b.y, b.z);
-        edgeStart = Math.min(edgeStart, (i + 1) * 3);
-        edgeEnd = Math.max(edgeEnd, (i + 1) * 3 + 3);
-      }
-      i += 2;
-    }
-    markPartialUpdate(edgeAttr, edgeStart, edgeEnd);
+  if (positionEnd >= 0) {
+    handle.mesh.geometry.computeVertexNormals();
+    const normAttr = handle.mesh.geometry.getAttribute('normal') as BufferAttribute | undefined;
+    if (normAttr) normAttr.needsUpdate = true;
+    handle.mesh.geometry.computeBoundingSphere();
   }
+
+  updateEdgeOverlayPositions(handle, mesh);
 
   handle.renderData.geometryVersion = mesh.geometryVersion;
   return true;
+}
+
+function updateEdgeOverlayPositions(handle: ObjectRenderHandle, mesh: EditableMesh): void {
+  const edgeAttr = handle.edgeOverlay.geometry.getAttribute('position') as BufferAttribute | undefined;
+  if (!edgeAttr) return;
+  let i = 0;
+  let edgeStart = Infinity;
+  let edgeEnd = -1;
+  for (const edge of mesh.edges.values()) {
+    const pair = getEdgeVertices(mesh, edge.id);
+    if (!pair) continue;
+    const a = mesh.vertices.get(pair[0])!.position;
+    const b = mesh.vertices.get(pair[1])!.position;
+    if (i + 1 >= edgeAttr.count) break;
+    if (edgeAttr.getX(i) !== a.x || edgeAttr.getY(i) !== a.y || edgeAttr.getZ(i) !== a.z) {
+      edgeAttr.setXYZ(i, a.x, a.y, a.z);
+      edgeStart = Math.min(edgeStart, i * 3);
+      edgeEnd = Math.max(edgeEnd, i * 3 + 3);
+    }
+    if (edgeAttr.getX(i + 1) !== b.x || edgeAttr.getY(i + 1) !== b.y || edgeAttr.getZ(i + 1) !== b.z) {
+      edgeAttr.setXYZ(i + 1, b.x, b.y, b.z);
+      edgeStart = Math.min(edgeStart, (i + 1) * 3);
+      edgeEnd = Math.max(edgeEnd, (i + 1) * 3 + 3);
+    }
+    i += 2;
+  }
+  markPartialUpdate(edgeAttr, edgeStart, edgeEnd);
 }
 
 function markPartialUpdate(attribute: BufferAttribute, start: number, end: number): void {

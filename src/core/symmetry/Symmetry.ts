@@ -170,9 +170,19 @@ export function applyLiveSymmetricVertexEdit(
   settings: SymmetrySettings,
 ): Set<VertexId> {
   const changed = new Set<VertexId>();
+  if (!settings.liveMirror) {
+    for (const [sourceId, after] of primaryAfter) {
+      const vertex = mesh.vertices.get(sourceId);
+      if (!vertex) continue;
+      vertex.position = { ...after };
+      changed.add(sourceId);
+    }
+    return changed;
+  }
+
   const operations = [
     { key: 'identity', apply: clonePoint },
-    ...(settings.liveMirror ? symmetryOperations(settings) : []),
+    ...symmetryOperations(settings),
   ];
   const index = new VertexSpatialIndex(mesh, settings.mergeTolerance);
   const accumulated = new Map<VertexId, { sum: Vec3; count: number }>();
@@ -198,6 +208,51 @@ export function applyLiveSymmetricVertexEdit(
     changed.add(id);
   }
   return changed;
+}
+
+/**
+ * Enforces symmetry by copying vertex positions from source half to target half across an axis.
+ */
+export function symmetrizeMesh(
+  mesh: EditableMesh,
+  axis: SymmetryAxis = 'x',
+  positiveToNegative = true,
+  tolerance = 0.05,
+): number {
+  const index = new VertexSpatialIndex(mesh, Math.max(0.01, tolerance * 4));
+  let modified = 0;
+
+  for (const vertex of mesh.vertices.values()) {
+    const val = vertex.position[axis];
+    // Snap center seam to zero if within tolerance
+    if (Math.abs(val) < tolerance * 0.5) {
+      if (vertex.position[axis] !== 0) {
+        vertex.position[axis] = 0;
+        modified++;
+      }
+      continue;
+    }
+
+    const isSource = positiveToNegative ? val > 0 : val < 0;
+    if (!isSource) continue;
+
+    // Reflected position target
+    const reflected: Vec3 = {
+      ...vertex.position,
+      [axis]: -val,
+    };
+
+    const targetId = index.nearest(reflected);
+    if (targetId && targetId !== vertex.id) {
+      const targetVertex = mesh.vertices.get(targetId);
+      if (targetVertex) {
+        targetVertex.position = reflected;
+        modified++;
+      }
+    }
+  }
+
+  return modified;
 }
 
 export function reflectPoint(point: Vec3, axes: readonly SymmetryAxis[]): Vec3 {
