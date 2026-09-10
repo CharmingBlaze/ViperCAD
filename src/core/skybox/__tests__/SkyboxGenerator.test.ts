@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { createEmptyDocument } from '@/core/document/ModelDocument';
 import {
   DEFAULT_SKY_PARAMS,
   SKY_PRESETS,
   generateSkyboxCubeMesh,
   generateSkysphereMesh,
+  getDocumentSkybox,
+  updateDocumentSkybox,
 } from '@/core/skybox/SkyboxGenerator';
 
 describe('SkyboxGenerator', () => {
@@ -29,5 +32,13 @@ describe('SkyboxGenerator', () => {
     expect(DEFAULT_SKY_PARAMS.sunElevation).toBeGreaterThan(0);
     expect(SKY_PRESETS.sunset.horizonColor).toBeDefined();
     expect(SKY_PRESETS.night.starIntensity).toBeGreaterThan(0.5);
+  });
+
+  it('stores skybox params on document settings', () => {
+    const doc = createEmptyDocument();
+    expect(getDocumentSkybox(doc).preset).toBe('sunny');
+    updateDocumentSkybox(doc, { preset: 'night', starIntensity: 0.9 });
+    expect(getDocumentSkybox(doc).preset).toBe('night');
+    expect(getDocumentSkybox(doc).starIntensity).toBe(0.9);
   });
 });

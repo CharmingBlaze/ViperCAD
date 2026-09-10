@@ -35,6 +35,7 @@ import { computeCornerNormal, computeFaceNormal } from '@/core/mesh/Normals';
 import { triangulateFace } from '@/core/mesh/Triangulation';
 import type { EditableMesh, FaceId, FaceCornerId, VertexId } from '@/core/mesh/types';
 import type { MeshEvaluationResult } from '@/renderer/workers/MeshEvaluationTypes';
+import { disposeTerrainSplatMaterial, syncTerrainSplatMaterials } from '@/renderer/TerrainSplatMaterial';
 
 export type PickTriangleMap = {
   /** render triangle index → logical face id */
@@ -71,6 +72,7 @@ export function editableMeshToRenderData(
   const positions: number[] = [];
   const normals: number[] = [];
   const uvs: number[] = [];
+  const colors: number[] = [];
   const atlasTileRects: number[] = [];
   const secondaryUvs: number[] = [];
   const indices: number[] = [];
@@ -116,6 +118,8 @@ export function editableMeshToRenderData(
         positions.push(pos.x, pos.y, pos.z);
         normals.push(n.x, n.y, n.z);
         uvs.push(uv.x, uv.y);
+        const splat = corner.vertexColour;
+        colors.push(splat?.x ?? 1, splat?.y ?? 0, splat?.z ?? 0);
         const tile = corner.atlasTile;
         atlasTileRects.push(
           tile ? tile.minU : 0,
@@ -151,6 +155,7 @@ export function editableMeshToRenderData(
   geometry.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
   geometry.setAttribute('normal', new BufferAttribute(new Float32Array(normals), 3));
   geometry.setAttribute('uv', new BufferAttribute(new Float32Array(uvs), 2));
+  geometry.setAttribute('color', new BufferAttribute(new Float32Array(colors), 3));
   geometry.setAttribute('atlasTileRect', new BufferAttribute(new Float32Array(atlasTileRects), 4));
   if (secondaryUvLayerId) {
     // Three.js maps `uv1` to glTF TEXCOORD_1 for lightmaps and engine UV2 workflows.
@@ -174,7 +179,11 @@ export function editableMeshToRenderData(
   };
 }
 
-export type RenderAssetResolver = { textures: Map<string, TextureAsset>; images: Map<string, ImageAsset> };
+export type RenderAssetResolver = {
+  textures: Map<string, TextureAsset>;
+  images: Map<string, ImageAsset>;
+  albedoPreview?: boolean;
+};
 
 export type MaterialToThreeOptions = {
   /**
@@ -401,6 +410,7 @@ function disposeThreeMaterialMaps(material: Material): void {
   for (const key of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap'] as const) {
     disposeOwnedTexture(maps[key]);
   }
+  disposeTerrainSplatMaterial(material);
 }
 
 /**
@@ -486,6 +496,7 @@ export function createObjectRenderHandle(
 ): ObjectRenderHandle {
   const renderData = editableMeshToRenderData(mesh);
   const threeMats = materials.map((material) => materialAssetToThree(material, assets));
+  syncTerrainSplatMaterials(threeMats, mesh, assets, { albedoPreview: assets?.albedoPreview === true });
   const threeMesh = new Mesh(
     renderData.geometry,
     threeMats.length === 1 ? threeMats[0]! : threeMats,
@@ -556,6 +567,7 @@ export function updateObjectRenderHandle(
       handle.materialSignature = signature;
     }
   }
+  syncTerrainSplatMaterials(handle.materials, mesh, assets, { albedoPreview: assets?.albedoPreview === true });
   if (
     handle.renderData.geometryVersion === mesh.geometryVersion &&
     handle.renderData.topologyVersion === mesh.topologyVersion
@@ -595,6 +607,7 @@ export function applyMeshEvaluation(handle: ObjectRenderHandle, result: MeshEval
   geometry.setAttribute('normal', new BufferAttribute(result.normals, 3));
   geometry.setAttribute('uv', new BufferAttribute(result.uvs, 2));
   geometry.setAttribute('atlasTileRect', new BufferAttribute(result.atlasTileRects, 4));
+  if (result.colors) geometry.setAttribute('color', new BufferAttribute(result.colors, 3));
   if (result.secondaryUvs) geometry.setAttribute('uv1', new BufferAttribute(result.secondaryUvs, 2));
   geometry.setIndex(new BufferAttribute(result.indices, 1));
   for (const group of result.materialGroups) geometry.addGroup(group.start, group.count, group.materialSlot);
@@ -617,12 +630,17 @@ export function updateRenderPositionsInPlace(
   const posAttr = handle.mesh.geometry.getAttribute('position') as BufferAttribute | undefined;
   const uvAttr = handle.mesh.geometry.getAttribute('uv') as BufferAttribute | undefined;
   let tileAttr = handle.mesh.geometry.getAttribute('atlasTileRect') as BufferAttribute | undefined;
+  let colorAttr = handle.mesh.geometry.getAttribute('color') as BufferAttribute | undefined;
   const ids = handle.renderData.renderVertexIds;
   const cornerIds = handle.renderData.renderCornerIds;
   if (!posAttr || !uvAttr || ids.length !== posAttr.count || cornerIds.length !== uvAttr.count) return false;
   if (!tileAttr || tileAttr.count !== uvAttr.count) {
     tileAttr = new BufferAttribute(new Float32Array(uvAttr.count * 4), 4);
     handle.mesh.geometry.setAttribute('atlasTileRect', tileAttr);
+  }
+  if (!colorAttr || colorAttr.count !== uvAttr.count) {
+    colorAttr = new BufferAttribute(new Float32Array(uvAttr.count * 3), 3);
+    handle.mesh.geometry.setAttribute('color', colorAttr);
   }
 
   let positionStart = Infinity;
@@ -650,6 +668,8 @@ export function updateRenderPositionsInPlace(
   let uvEnd = -1;
   let tileStart = Infinity;
   let tileEnd = -1;
+  let colorStart = Infinity;
+  let colorEnd = -1;
   for (let i = 0; i < cornerIds.length; i++) {
     const corner = mesh.faceCorners.get(cornerIds[i]!);
     if (!corner) return false;
@@ -673,9 +693,18 @@ export function updateRenderPositionsInPlace(
       tileStart = Math.min(tileStart, i * 4);
       tileEnd = Math.max(tileEnd, i * 4 + 4);
     }
+    const cr = corner.vertexColour?.x ?? 1;
+    const cg = corner.vertexColour?.y ?? 0;
+    const cb = corner.vertexColour?.z ?? 0;
+    if (colorAttr.getX(i) !== cr || colorAttr.getY(i) !== cg || colorAttr.getZ(i) !== cb) {
+      colorAttr.setXYZ(i, cr, cg, cb);
+      colorStart = Math.min(colorStart, i * 3);
+      colorEnd = Math.max(colorEnd, i * 3 + 3);
+    }
   }
   markPartialUpdate(uvAttr, uvStart, uvEnd);
   markPartialUpdate(tileAttr, tileStart, tileEnd);
+  markPartialUpdate(colorAttr, colorStart, colorEnd);
   if (positionEnd >= 0) {
     handle.mesh.geometry.computeVertexNormals();
     const normAttr = handle.mesh.geometry.getAttribute('normal') as BufferAttribute | undefined;

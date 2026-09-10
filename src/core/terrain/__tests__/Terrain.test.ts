@@ -8,8 +8,10 @@ import {
   applyTerrainTileRepeat,
   buildTerrainMesh,
   createTerrain,
+  resampleTerrain,
   terrainHeightRange,
 } from '@/core/terrain/Terrain';
+import { fillTerrainWithLayer, getTerrainLayerStack, splatWeightsFromColour } from '@/core/terrain/TerrainLayers';
 import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
 import type { ToolPointerInput } from '@/core/tools/Tool';
 
@@ -109,6 +111,38 @@ describe('terrain sculpting', () => {
     tool.update(pointer(0.5, 0), session.context());
     expect(tool.endStroke(session.context())).toBe(true);
     expect(terrainHeightRange(mesh).max).toBeGreaterThan(0);
+  });
+
+  it('paints a material layer and restores splat weights with undo', () => {
+    const session = new EditorSession();
+    const terrain = createTerrain(session, { size: 10, resolution: 8 });
+    const mesh = session.document.meshes.get(terrain.meshId)!;
+    const tool = session.tools.get('terrain-sculpt') as TerrainSculptTool;
+    tool.setMode('paint', session.context());
+    tool.activeLayerIndex = 2;
+    tool.setRadius(8, session.context());
+    tool.setStrength(1, session.context());
+    tool.begin(pointer(0, 0), session.context());
+    expect(tool.endStroke(session.context())).toBe(true);
+    const painted = [...mesh.faceCorners.values()].some((corner) => splatWeightsFromColour(corner.vertexColour)[2] > 0.4);
+    expect(painted).toBe(true);
+    expect(session.undo()).toBe(true);
+    for (const corner of mesh.faceCorners.values()) {
+      expect(splatWeightsFromColour(corner.vertexColour)[0]).toBeCloseTo(1, 4);
+    }
+  });
+
+  it('keeps layer metadata and splat weights when resampling', () => {
+    const session = new EditorSession();
+    const terrain = createTerrain(session, { size: 12, resolution: 4 });
+    const mesh = session.document.meshes.get(terrain.meshId)!;
+    fillTerrainWithLayer(mesh, 2);
+    expect(resampleTerrain(session, terrain.objectId, 8)).toBe(true);
+    const next = session.document.meshes.get(terrain.meshId)!;
+    expect(getTerrainLayerStack(next)[0]!.name).toBe('Grass');
+    expect(next.metadata?.terrainLayers).toContain('layer_rock');
+    const rock = [...next.faceCorners.values()].filter((corner) => splatWeightsFromColour(corner.vertexColour)[2] > 0.8);
+    expect(rock.length).toBeGreaterThan(0);
   });
 
   it('supports inverted raise strokes with Shift', () => {

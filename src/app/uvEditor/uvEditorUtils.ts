@@ -32,6 +32,30 @@ export const PIXEL_TOOL_HOTKEYS: Record<PixelToolId, string> = {
   ellipse: 'O',
   replace: 'Shift+R',
 };
+export const UV_EDIT_MODE_ICONS = {
+  face: 'uv_face_select',
+  point: 'uv_vertex_select',
+  island: 'uv_islands_select',
+} as const;
+
+export const UV_TRANSFORM_ICONS = {
+  move: 'tool_move',
+  scale: 'tool_scale',
+  rotate: 'tool_rotate',
+} as const;
+
+export const UNWRAP_MODE_ICONS = {
+  smart: 'mod_uvproject',
+  auto: 'auto',
+  angle: 'normals_face',
+  box: 'mesh_cube',
+  cubic: 'cube',
+  cylinder: 'mesh_cylinder',
+  sphere: 'mesh_uvsphere',
+  view: 'view3d',
+  planar: 'mesh_plane',
+} as const;
+
 export const PIXEL_TOOL_ICONS: Record<PixelToolId, string> = {
   pencil: 'greasepencil',
   eraser: 'x',
@@ -145,6 +169,24 @@ export function shiftShadeColor(
     clamp(b * factor + shiftB),
     a,
   ];
+}
+
+/** Paint tool from a key. UV mode keeps L (island) and R (rotate). */
+export function paintToolFromHotkey(
+  key: string,
+  shiftKey: boolean,
+  uvPointerActive: boolean,
+): PixelToolId | null {
+  const k = key.toLowerCase();
+  if (k === 'b') return 'pencil';
+  if (k === 'e') return 'eraser';
+  if (k === 'i') return 'eyedropper';
+  if (k === 'f') return 'fill';
+  if (k === 'o') return 'ellipse';
+  if (uvPointerActive && (k === 'l' || k === 'r')) return null;
+  if (k === 'l') return 'line';
+  if (k === 'r') return shiftKey ? 'replace' : 'rectangle';
+  return null;
 }
 
 export const DITHER_MODES = ['none', 'checker', 'bayer4'] as const;

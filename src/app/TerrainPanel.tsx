@@ -56,8 +56,23 @@ import {
 } from '@/core/terrain/TerrainFeatures';
 import { TerrainObjectTool, type TerrainObjectBrushMode } from '@/core/tools/TerrainObjectTool';
 import { activateTerrainWorkspaceTool } from '@/app/terrainWorkspace';
+import { openTerrainAlbedoPaint, openTerrainTilesetWorkspace } from '@/app/tilesetWorkspace';
 import { applyHydraulicErosion, applyThermalErosion } from '@/core/terrain/TerrainErosion';
 import { applyAutoBiomeColors } from '@/core/terrain/TerrainBiomes';
+import { autoPaintTerrainMesh } from '@/core/terrain/TerrainAutoPaint';
+import {
+  addTerrainLayer,
+  fillTerrainWithLayer,
+  getTerrainLayerStack,
+  MAX_SPLAT_LAYERS,
+  removeTerrainLayer,
+  restoreTerrainSplat,
+  snapshotTerrainSplat,
+  TERRAIN_LAYER_PRESETS,
+  updateTerrainLayer,
+} from '@/core/terrain/TerrainLayers';
+import { TerrainStructureTool, type TerrainStructureKind } from '@/core/tools/TerrainStructureTool';
+import type { BuildingStyle } from '@/core/level/CityGenerator';
 
 type Props = {
   session: EditorSession;
@@ -136,6 +151,7 @@ export function TerrainPanel({
   const tool = session.tools.get('terrain-sculpt') as TerrainSculptTool;
   const objectTool = session.tools.get('terrain-object') as TerrainObjectTool;
   const featureTool = session.tools.get('terrain-feature') as TerrainFeatureTool;
+  const structureTool = session.tools.get('terrain-structure') as TerrainStructureTool;
 
   useEffect(() => {
     if (focusTab) setActiveTab(focusTab);
@@ -290,6 +306,48 @@ export function TerrainPanel({
     onRefresh();
   };
 
+  const commitSplatEdit = (name: string, mutate: () => void) => {
+    if (!terrain) return;
+    const mesh = terrain.mesh;
+    const before = snapshotTerrainSplat(mesh);
+    mutate();
+    const after = snapshotTerrainSplat(mesh);
+    let applied = true;
+    session.history.execute({
+      name,
+      execute: () => {
+        if (applied) return;
+        restoreTerrainSplat(mesh, after);
+        session.document.dirty = true;
+        session.requestRedraw();
+        applied = true;
+      },
+      undo: () => {
+        restoreTerrainSplat(mesh, before);
+        session.document.dirty = true;
+        session.requestRedraw();
+        applied = false;
+      },
+    });
+    session.document.dirty = true;
+    session.requestRedraw();
+    onRefresh();
+  };
+
+  const armLayerPaint = (layerIndex: number) => {
+    if (!terrain) return;
+    tool.activeLayerIndex = layerIndex;
+    activateTerrainWorkspaceTool(session, 'paint');
+    onRefresh();
+  };
+
+  const prepareStructureTool = (kind: TerrainStructureKind) => {
+    if (!terrain) return;
+    structureTool.configure(kind, terrain.object.id, session.context());
+    activateTerrainWorkspaceTool(session, 'structure');
+    onRefresh();
+  };
+
   const saveTerrainCheckpoint = () => {
     if (!terrain) return;
     const checkpoint: TerrainCheckpoint = {
@@ -325,34 +383,12 @@ export function TerrainPanel({
   };
 
   const openPaint = () => {
-    if (!terrain) return;
-    session.tools.setActive('select', session.context());
-    session.selection.setMode('face');
-    session.selection.selectFaces([...terrain.mesh.faces.keys()], 'replace');
-    workspace.patchTexture({
-      uvPanelTab: 'paint',
-      uvPointerMode: false,
-      paintMode3D: true,
-      activeRightEditor: 'combined',
-    });
-    workspace.setShellMode('texture');
-    session.requestRedraw();
+    if (!openTerrainAlbedoPaint(session, workspace)) return;
     onRefresh();
   };
 
   const openTiles = () => {
-    if (!terrain) return;
-    session.tools.setActive('select', session.context());
-    session.selection.setMode('face');
-    session.selection.selectFaces([...terrain.mesh.faces.keys()], 'replace');
-    workspace.patchTexture({
-      uvPanelTab: 'tiles',
-      uvPointerMode: true,
-      paintMode3D: false,
-      activeRightEditor: 'combined',
-    });
-    workspace.setShellMode('texture');
-    session.requestRedraw();
+    if (!openTerrainTilesetWorkspace(session, workspace)) return;
     onRefresh();
   };
 
@@ -590,6 +626,252 @@ export function TerrainPanel({
                 Choose reusable models from the Outliner, then place or scatter linked
                 copies across the terrain. The library window holds presets and imports.
               </p>
+
+              <h3 className="uv-section-title">Structures</h3>
+              <div className="uv-btn-grid uv-btn-grid-3">
+                {([
+                  ['building', 'Building'],
+                  ['road_grid', 'Roads'],
+                  ['bridge', 'Bridge'],
+                  ['cave', 'Cave'],
+                  ['waterfall', 'Waterfall'],
+                ] as [TerrainStructureKind, string][]).map(([kind, label]) => (
+                  <button
+                    key={kind}
+                    type="button"
+                    className={`tool${session.tools.getActive() === structureTool && structureTool.kind === kind ? ' is-active' : ''}`}
+                    onClick={() => prepareStructureTool(kind)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {session.tools.getActive() === structureTool && structureTool.kind === 'building' && (
+                <>
+                  <label className="uv-field">
+                    <span>Style</span>
+                    <select
+                      className="uv-select"
+                      value={structureTool.buildingStyle}
+                      onChange={(event) => {
+                        structureTool.buildingStyle = event.target.value as BuildingStyle;
+                        structureTool.revision += 1;
+                        onRefresh();
+                      }}
+                    >
+                      <option value="skyscraper">Skyscraper</option>
+                      <option value="office">Office</option>
+                      <option value="residential">Residential</option>
+                      <option value="warehouse">Warehouse</option>
+                    </select>
+                  </label>
+                  <label className="uv-field">
+                    <span>Floors <b className="uv-field-value">{structureTool.buildingFloors}</b></span>
+                    <input
+                      className="uv-range"
+                      type="range"
+                      min={1}
+                      max={24}
+                      step={1}
+                      value={structureTool.buildingFloors}
+                      onChange={(event) => {
+                        structureTool.buildingFloors = Number(event.target.value);
+                        structureTool.revision += 1;
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                  <div className="uv-btn-grid uv-btn-grid-2">
+                    <label className="uv-field">
+                      <span>Width</span>
+                      <input
+                        className="uv-text"
+                        type="number"
+                        min={2}
+                        step={0.5}
+                        value={structureTool.buildingWidth}
+                        onChange={(event) => {
+                          structureTool.buildingWidth = Math.max(1, Number(event.target.value) || 1);
+                          onRefresh();
+                        }}
+                      />
+                    </label>
+                    <label className="uv-field">
+                      <span>Depth</span>
+                      <input
+                        className="uv-text"
+                        type="number"
+                        min={2}
+                        step={0.5}
+                        value={structureTool.buildingDepth}
+                        onChange={(event) => {
+                          structureTool.buildingDepth = Math.max(1, Number(event.target.value) || 1);
+                          onRefresh();
+                        }}
+                      />
+                    </label>
+                  </div>
+                </>
+              )}
+              {session.tools.getActive() === structureTool && structureTool.kind === 'road_grid' && (
+                <div className="uv-btn-grid uv-btn-grid-2">
+                  <label className="uv-field">
+                    <span>Blocks X</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={structureTool.gridX}
+                      onChange={(event) => {
+                        structureTool.gridX = Math.max(1, Number(event.target.value) || 1);
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                  <label className="uv-field">
+                    <span>Blocks Z</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={structureTool.gridZ}
+                      onChange={(event) => {
+                        structureTool.gridZ = Math.max(1, Number(event.target.value) || 1);
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                  <label className="uv-field">
+                    <span>Block size</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={4}
+                      step={1}
+                      value={structureTool.blockSize}
+                      onChange={(event) => {
+                        structureTool.blockSize = Math.max(2, Number(event.target.value) || 2);
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                  <label className="uv-field">
+                    <span>Road width</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={1}
+                      step={0.5}
+                      value={structureTool.roadWidth}
+                      onChange={(event) => {
+                        structureTool.roadWidth = Math.max(0.5, Number(event.target.value) || 0.5);
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                </div>
+              )}
+              {session.tools.getActive() === structureTool && structureTool.kind === 'bridge' && (
+                <div className="uv-btn-grid uv-btn-grid-2">
+                  <label className="uv-field">
+                    <span>Width</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={1}
+                      step={0.25}
+                      value={structureTool.bridgeWidth}
+                      onChange={(event) => {
+                        structureTool.bridgeWidth = Math.max(0.5, Number(event.target.value) || 0.5);
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                  <label className="uv-field">
+                    <span>Arch</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={structureTool.bridgeArchHeight}
+                      onChange={(event) => {
+                        structureTool.bridgeArchHeight = Math.max(0, Number(event.target.value) || 0);
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                </div>
+              )}
+              {session.tools.getActive() === structureTool && structureTool.kind === 'cave' && (
+                <div className="uv-btn-grid uv-btn-grid-2">
+                  <label className="uv-field">
+                    <span>Radius</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={0.5}
+                      step={0.25}
+                      value={structureTool.caveRadius}
+                      onChange={(event) => {
+                        structureTool.caveRadius = Math.max(0.5, Number(event.target.value) || 0.5);
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                  <label className="uv-field">
+                    <span>Length</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={2}
+                      step={0.5}
+                      value={structureTool.caveTunnelLength}
+                      onChange={(event) => {
+                        structureTool.caveTunnelLength = Math.max(1, Number(event.target.value) || 1);
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                </div>
+              )}
+              {session.tools.getActive() === structureTool && structureTool.kind === 'waterfall' && (
+                <div className="uv-btn-grid uv-btn-grid-2">
+                  <label className="uv-field">
+                    <span>Width</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={1}
+                      step={0.25}
+                      value={structureTool.waterfallWidth}
+                      onChange={(event) => {
+                        structureTool.waterfallWidth = Math.max(0.5, Number(event.target.value) || 0.5);
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                  <label className="uv-field">
+                    <span>Height</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={1}
+                      step={0.5}
+                      value={structureTool.waterfallHeight}
+                      onChange={(event) => {
+                        structureTool.waterfallHeight = Math.max(1, Number(event.target.value) || 1);
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                </div>
+              )}
+              <p className="uv-hint">
+                Click the terrain to place. Bridges need two clicks. Cave carves into the height field.
+              </p>
             </section>
 
             <section className="uv-section" hidden={activeTab !== 'sculpt'}>
@@ -659,11 +941,10 @@ export function TerrainPanel({
                   className="tool"
                   onClick={() => {
                     if (!terrain) return;
-                    applyHydraulicErosion(terrain.mesh, { iterations: 4, rainAmount: 0.08 });
-                    bumpPositions(terrain.mesh);
-                    session.document.dirty = true;
-                    session.requestRedraw();
-                    onRefresh();
+                    editAllHeights('Hydraulic erosion', (_values, _resolution) => {
+                      applyHydraulicErosion(terrain.mesh, { iterations: 4, rainAmount: 0.08 });
+                      return [...terrain.mesh.vertices.keys()].map((id) => terrain.mesh.vertices.get(id)!.position.y);
+                    });
                     pushToast('Hydraulic erosion applied', 'info');
                   }}
                 >
@@ -674,11 +955,10 @@ export function TerrainPanel({
                   className="tool"
                   onClick={() => {
                     if (!terrain) return;
-                    applyThermalErosion(terrain.mesh, { iterations: 3, talusAngle: 0.35 });
-                    bumpPositions(terrain.mesh);
-                    session.document.dirty = true;
-                    session.requestRedraw();
-                    onRefresh();
+                    editAllHeights('Thermal erosion', () => {
+                      applyThermalErosion(terrain.mesh, { iterations: 3, talusAngle: 0.35 });
+                      return [...terrain.mesh.vertices.keys()].map((id) => terrain.mesh.vertices.get(id)!.position.y);
+                    });
                     pushToast('Thermal erosion applied', 'info');
                   }}
                 >
@@ -697,13 +977,13 @@ export function TerrainPanel({
                       session.document.dirty = true;
                       session.requestRedraw();
                       onRefresh();
-                      pushToast('Auto-Biome colors painted!', 'info');
+                      pushToast('Image biome colors painted onto the surface texture', 'info');
                     } else {
                       pushToast('No surface texture image found on terrain', 'error');
                     }
                   }}
                 >
-                  Paint biomes
+                  Paint image biomes
                 </button>
               </div>
             </section>
@@ -949,7 +1229,166 @@ export function TerrainPanel({
             </section>
 
             <section className="uv-section" hidden={activeTab !== 'surface'}>
-              <h3 className="uv-section-title">Surface &amp; tiles</h3>
+              <h3 className="uv-section-title">Material layers</h3>
+              <p className="uv-hint">
+                Paint up to four layers in the viewport. Layer colors blend live. Image biomes (Sculpt tab) still paint the albedo texture separately.
+              </p>
+              {(() => {
+                const layers = getTerrainLayerStack(terrain.mesh);
+                const activeLayer = layers[tool.activeLayerIndex] ?? layers[0];
+                const isPaintActive = session.tools.getActive() === tool && tool.mode === 'paint';
+                return (
+                  <>
+                    <div className="terrain-layer-list">
+                      {layers.map((layer, index) => (
+                        <button
+                          key={layer.id}
+                          type="button"
+                          className={`terrain-layer-row${index === tool.activeLayerIndex ? ' is-active' : ''}`}
+                          onClick={() => armLayerPaint(index)}
+                        >
+                          <span className="terrain-layer-swatch" style={{ background: layer.color }} />
+                          <span className="terrain-layer-name">{layer.name}</span>
+                          <span className="terrain-layer-meta">
+                            {index < MAX_SPLAT_LAYERS ? `Blend ${index + 1}` : 'Color only'}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    {activeLayer && (
+                      <div className="uv-btn-grid uv-btn-grid-2">
+                        <label className="uv-field">
+                          <span>Layer color</span>
+                          <input
+                            className="uv-text"
+                            type="color"
+                            value={activeLayer.color}
+                            onChange={(event) => {
+                              updateTerrainLayer(terrain.mesh, activeLayer.id, { color: event.target.value });
+                              session.document.dirty = true;
+                              session.requestRedraw();
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Preset</span>
+                          <select
+                            className="uv-select"
+                            value={activeLayer.name}
+                            onChange={(event) => {
+                              const matched = TERRAIN_LAYER_PRESETS.find((preset) => preset.name === event.target.value);
+                              if (!matched) return;
+                              updateTerrainLayer(terrain.mesh, activeLayer.id, { ...matched });
+                              session.document.dirty = true;
+                              session.requestRedraw();
+                              onRefresh();
+                            }}
+                          >
+                            {TERRAIN_LAYER_PRESETS.map((preset) => (
+                              <option key={preset.name} value={preset.name}>{preset.name}</option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                    )}
+                    <label className="uv-field">
+                      <span>Brush radius <b className="uv-field-value">{tool.radius.toFixed(1)}</b></span>
+                      <input
+                        className="uv-range"
+                        type="range"
+                        min={0.25}
+                        max={25}
+                        step={0.25}
+                        value={tool.radius}
+                        onChange={(event) => {
+                          tool.setRadius(Number(event.target.value), session.context());
+                          onRefresh();
+                        }}
+                      />
+                    </label>
+                    <label className="uv-field">
+                      <span>Strength <b className="uv-field-value">{tool.strength.toFixed(2)}</b></span>
+                      <input
+                        className="uv-range"
+                        type="range"
+                        min={0.05}
+                        max={1}
+                        step={0.05}
+                        value={tool.strength}
+                        onChange={(event) => {
+                          tool.setStrength(Number(event.target.value), session.context());
+                          onRefresh();
+                        }}
+                      />
+                    </label>
+                    <div className="uv-btn-grid uv-btn-grid-2">
+                      <button
+                        type="button"
+                        className={`tool primary${isPaintActive ? ' is-active' : ''}`}
+                        onClick={() => armLayerPaint(tool.activeLayerIndex)}
+                      >
+                        {isPaintActive ? `Painting ${activeLayer?.name ?? 'layer'}` : `Paint ${activeLayer?.name ?? 'layer'}`}
+                      </button>
+                      <button
+                        type="button"
+                        className="tool"
+                        onClick={() => {
+                          commitSplatEdit(`Fill ${activeLayer?.name ?? 'layer'}`, () => {
+                            fillTerrainWithLayer(terrain.mesh, tool.activeLayerIndex);
+                          });
+                        }}
+                      >
+                        Fill terrain
+                      </button>
+                      <button
+                        type="button"
+                        className="tool"
+                        onClick={() => {
+                          addTerrainLayer(
+                            terrain.mesh,
+                            TERRAIN_LAYER_PRESETS[layers.length % TERRAIN_LAYER_PRESETS.length],
+                          );
+                          session.document.dirty = true;
+                          session.requestRedraw();
+                          onRefresh();
+                        }}
+                      >
+                        Add layer
+                      </button>
+                      <button
+                        type="button"
+                        className="tool"
+                        disabled={layers.length <= 1}
+                        onClick={() => {
+                          if (!activeLayer) return;
+                          removeTerrainLayer(terrain.mesh, activeLayer.id);
+                          tool.activeLayerIndex = 0;
+                          session.document.dirty = true;
+                          session.requestRedraw();
+                          onRefresh();
+                        }}
+                      >
+                        Remove layer
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      className="tool uv-btn-block"
+                      onClick={() => {
+                        commitSplatEdit('Auto-paint layers', () => {
+                          autoPaintTerrainMesh(terrain.mesh, { cliffMinAngleDeg: 35, snowMinHeight: 7.5 });
+                        });
+                        pushToast('Slope and height assigned to material layers', 'info');
+                      }}
+                    >
+                      Auto-paint layers from slope
+                    </button>
+                    <p className="uv-hint">LMB paints the selected layer · Shift erases · [ ] brush size</p>
+                  </>
+                );
+              })()}
+              <h3 className="uv-section-title">Albedo &amp; tiles</h3>
               <label className="uv-field">
                 <span>Texture repeat</span>
                 <input
@@ -970,10 +1409,10 @@ export function TerrainPanel({
                 />
               </label>
               <div className="uv-btn-grid uv-btn-grid-2">
-                <button type="button" className="tool primary" onClick={openPaint}>Paint terrain</button>
-                <button type="button" className="tool primary" onClick={openTiles}>Use 2D tiles</button>
+                <button type="button" className="tool" onClick={openPaint}>Paint albedo image</button>
+                <button type="button" className="tool" onClick={openTiles}>Use 2D tiles</button>
               </div>
-              <p className="uv-hint">Paint directly in 3D, edit the terrain material, or use an atlas and tile tools in UV / Pixel.</p>
+              <p className="uv-hint">Use 2D tiles opens the UV/Paint Tileset tools (import atlas, stamp faces, 3D tile draw). Albedo paint edits the surface image. Layer paint above is the live splat blend and stays in this workspace.</p>
             </section>
 
             {activeTab === 'surface' && <MaterialEditor session={session} compact />}

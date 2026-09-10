@@ -108,6 +108,8 @@ export type EditableMesh = {
   dirty: MeshDirtyFlags;
   /** Optional stable render triangulation preference for logical quads. */
   triangulationHints: Map<FaceId, '0-2' | '1-3'>;
+  /** Informal per-mesh records (terrain layers, tool tags). Survives save and undo. */
+  metadata?: Record<string, string>;
 };
 
 export type TopologyChangeResult = {

@@ -34,6 +34,15 @@ export type AtlasGridPreset = {
   padding: number;
 };
 
+export type TileDrawShape = 'single' | 'stroke' | 'line' | 'rectangle';
+export type AtlasPanelDock = 'float' | 'left' | 'right';
+export type AtlasRecentTile = {
+  x: number;
+  y: number;
+  columns: number;
+  rows: number;
+};
+
 export type UvCameraState = {
   /** Pan in editor CSS pixels (image origin offset). */
   panX: number;
@@ -121,6 +130,10 @@ export type TextureWorkspaceState = {
   atlasPaintMode: boolean;
   atlasAutoAdvance: boolean;
   atlasPlaneOrientation: 'floor' | 'wall-x' | 'wall-z';
+  /** World-unit offset along the construction-plane normal (Crocotile floor/wall height). */
+  atlasPlaneOffset: number;
+  /** Keep the last face-picked draw plane instead of resetting to an axis plane. */
+  atlasUseFacePlane: boolean;
   atlasPlaneSize: number;
   atlasMarginX: number;
   atlasMarginY: number;
@@ -141,13 +154,23 @@ export type TextureWorkspaceState = {
   atlasGridPresets: AtlasGridPreset[];
   activeAtlasGridPresetId: string;
   atlasDrawMode: 'paint' | 'erase' | 'replace' | 'pick' | 'fill';
-  atlasDrawShape: 'stroke' | 'rectangle';
+  atlasDrawShape: TileDrawShape;
   atlasAutoTile: boolean;
   atlasTileLayer: 'Geometry' | 'Decoration' | 'Collision' | 'Decal';
+  /** World-space size of one tile, independent of atlas pixel size. */
+  atlasWorldTileWidth: number;
+  atlasWorldTileHeight: number;
+  /** Lock Surface mode onto the current construction plane. */
+  atlasSurfaceLocked: boolean;
   atlasPanelOpen: boolean;
   atlasPanelMinimized: boolean;
+  atlasPanelDock: AtlasPanelDock;
+  atlasPanelPinned: boolean;
   atlasPanelX: number;
   atlasPanelY: number;
+  atlasRecentTiles: AtlasRecentTile[];
+  /** When true, dragging the atlas pans instead of starting a stamp. */
+  atlasNavigatorPan: boolean;
 };
 
 export function createDefaultTextureWorkspace(): TextureWorkspaceState {
@@ -209,13 +232,15 @@ export function createDefaultTextureWorkspace(): TextureWorkspaceState {
     atlasTileHeight: 16,
     atlasTileX: 0,
     atlasTileY: 0,
-    atlasPadding: 0,
+    atlasPadding: 0.5,
     atlasQuarterTurns: 0,
     atlasFlipU: false,
     atlasFlipV: false,
     atlasPaintMode: false,
     atlasAutoAdvance: false,
     atlasPlaneOrientation: 'wall-x',
+    atlasPlaneOffset: 0,
+    atlasUseFacePlane: false,
     atlasPlaneSize: 1,
     atlasMarginX: 0,
     atlasMarginY: 0,
@@ -247,10 +272,17 @@ export function createDefaultTextureWorkspace(): TextureWorkspaceState {
     atlasDrawShape: 'stroke',
     atlasAutoTile: false,
     atlasTileLayer: 'Geometry',
+    atlasWorldTileWidth: 1,
+    atlasWorldTileHeight: 1,
+    atlasSurfaceLocked: false,
     atlasPanelOpen: false,
     atlasPanelMinimized: false,
-    atlasPanelX: 360,
+    atlasPanelDock: 'right',
+    atlasPanelPinned: false,
+    atlasPanelX: 900,
     atlasPanelY: 88,
+    atlasRecentTiles: [],
+    atlasNavigatorPan: false,
   };
 }
 
@@ -294,6 +326,20 @@ export function loadTextureWorkspace(): TextureWorkspaceState {
       merged.uvAutoFrame3dSelection = false;
       merged.uvPrefsRev = 2;
     }
+    if (parsed.atlasDrawShape !== 'single' && parsed.atlasDrawShape !== 'stroke' && parsed.atlasDrawShape !== 'line' && parsed.atlasDrawShape !== 'rectangle') {
+      merged.atlasDrawShape = defaults.atlasDrawShape;
+    }
+    merged.atlasWorldTileWidth = Math.max(0.01, typeof parsed.atlasWorldTileWidth === 'number' ? parsed.atlasWorldTileWidth : parsed.atlasPlaneSize ?? defaults.atlasWorldTileWidth);
+    merged.atlasWorldTileHeight = Math.max(0.01, typeof parsed.atlasWorldTileHeight === 'number' ? parsed.atlasWorldTileHeight : parsed.atlasPlaneSize ?? defaults.atlasWorldTileHeight);
+    merged.atlasSurfaceLocked = parsed.atlasSurfaceLocked === true;
+    merged.atlasPanelDock = parsed.atlasPanelDock === 'left' || parsed.atlasPanelDock === 'float' || parsed.atlasPanelDock === 'right'
+      ? parsed.atlasPanelDock
+      : defaults.atlasPanelDock;
+    merged.atlasPanelPinned = parsed.atlasPanelPinned === true;
+    merged.atlasNavigatorPan = parsed.atlasNavigatorPan === true;
+    merged.atlasRecentTiles = Array.isArray(parsed.atlasRecentTiles)
+      ? parsed.atlasRecentTiles.filter((tile) => tile && Number.isFinite(tile.x) && Number.isFinite(tile.y)).slice(0, 8)
+      : [];
     if (!Array.isArray(parsed.gradientStops) || parsed.gradientStops.length < 2) {
       merged.gradientStops = [
         {

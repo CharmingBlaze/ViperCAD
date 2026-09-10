@@ -14,6 +14,11 @@ describe('terrain workspace tools', () => {
     expect(session.tools.getActive()?.id).toBe('terrain-feature');
     expect(activateTerrainWorkspaceTool(session, 'objects')).toBe(true);
     expect(session.tools.getActive()?.id).toBe('terrain-object');
+    expect(activateTerrainWorkspaceTool(session, 'structure')).toBe(true);
+    expect(session.tools.getActive()?.id).toBe('terrain-structure');
+    expect(activateTerrainWorkspaceTool(session, 'paint')).toBe(true);
+    expect(session.tools.getActive()?.id).toBe('terrain-sculpt');
+    expect((session.tools.getActive() as TerrainSculptTool).mode).toBe('paint');
   });
 
   it('grows the sculpt brush with ]', () => {

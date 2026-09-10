@@ -44,6 +44,22 @@ export function createUvLayer(mesh: EditableMesh, name: string): UvLayerId {
   return id;
 }
 
+export type SeamSnapshot = { id: string; seam: boolean }[];
+
+export function snapshotSeams(mesh: EditableMesh, edgeIds?: Iterable<string>): SeamSnapshot {
+  const ids = edgeIds ? [...edgeIds] : [...mesh.edges.keys()];
+  return ids.map((id) => ({ id, seam: mesh.edges.get(id)?.seam ?? false }));
+}
+
+export function applySeamSnapshot(mesh: EditableMesh, snapshot: SeamSnapshot): void {
+  for (const entry of snapshot) {
+    const edge = mesh.edges.get(entry.id);
+    if (edge) edge.seam = entry.seam;
+  }
+  mesh.geometryVersion += 1;
+  mesh.dirty.uvs = true;
+}
+
 export function markUvSeams(mesh: EditableMesh, edgeIds: string[], seam = true): void {
   for (const id of edgeIds) {
     const edge = mesh.edges.get(id);
@@ -84,8 +100,41 @@ export function clearAllUvSeams(mesh: EditableMesh): void {
   mesh.dirty.uvs = true;
 }
 
-/** Derive UV islands by traversing face adjacency across edges not marked as seams. */
-export function detectUvIslands(mesh: EditableMesh): UvIsland[] {
+type IslandCacheEntry = {
+  topologyVersion: number;
+  seamKey: string;
+  islands: UvIsland[];
+  byFace: Map<FaceId, UvIsland>;
+};
+
+const islandCache = new WeakMap<EditableMesh, IslandCacheEntry>();
+
+function seamCacheKey(mesh: EditableMesh): string {
+  const ids: string[] = [];
+  for (const edge of mesh.edges.values()) {
+    if (edge.seam) ids.push(edge.id);
+  }
+  ids.sort();
+  return ids.join(',');
+}
+
+function cachedIslands(mesh: EditableMesh): IslandCacheEntry {
+  const seamKey = seamCacheKey(mesh);
+  const cached = islandCache.get(mesh);
+  if (cached && cached.topologyVersion === mesh.topologyVersion && cached.seamKey === seamKey) {
+    return cached;
+  }
+  const islands = computeUvIslands(mesh);
+  const byFace = new Map<FaceId, UvIsland>();
+  for (const island of islands) {
+    for (const id of island.faceIds) byFace.set(id, island);
+  }
+  const entry = { topologyVersion: mesh.topologyVersion, seamKey, islands, byFace };
+  islandCache.set(mesh, entry);
+  return entry;
+}
+
+function computeUvIslands(mesh: EditableMesh): UvIsland[] {
   const remaining = new Set(mesh.faces.keys());
   const islands: UvIsland[] = [];
   while (remaining.size) {
@@ -111,6 +160,11 @@ export function detectUvIslands(mesh: EditableMesh): UvIsland[] {
     });
   }
   return islands;
+}
+
+/** Derive UV islands by traversing face adjacency across edges not marked as seams. */
+export function detectUvIslands(mesh: EditableMesh): UvIsland[] {
+  return cachedIslands(mesh).islands;
 }
 
 /**
@@ -552,13 +606,16 @@ export function unwrapUvs(
       break;
     case 'cylinder':
       unwrapUvCylinder(mesh, faces, layerId);
+      packSelectedUvIslands(mesh, faces, options.padding ?? 0.01, layerId);
       break;
     case 'sphere':
       unwrapUvSphere(mesh, faces, layerId);
+      packSelectedUvIslands(mesh, faces, options.padding ?? 0.01, layerId);
       break;
     case 'view':
       if (!options.view) throw new Error('View axes required for view unwrap');
       unwrapUvFromView(mesh, faces, options.view, layerId);
+      packSelectedUvIslands(mesh, faces, options.padding ?? 0.01, layerId);
       break;
     case 'planar':
       projectUvPlanar(mesh, faces, layerId);
@@ -594,7 +651,7 @@ export function packSelectedUvIslands(
 
 /** Island containing a face, or null. */
 export function islandForFace(mesh: EditableMesh, faceId: FaceId): UvIsland | null {
-  return detectUvIslands(mesh).find((island) => island.faceIds.includes(faceId)) ?? null;
+  return cachedIslands(mesh).byFace.get(faceId) ?? null;
 }
 
 /** Build view axes from a camera position/target/up snapshot. */

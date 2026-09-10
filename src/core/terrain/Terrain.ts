@@ -17,6 +17,12 @@ import {
   snapshotPlacedTransforms,
   terrainHeightAtLocalPoint,
 } from '@/core/terrain/TerrainProps';
+import {
+  DEFAULT_TERRAIN_LAYERS,
+  initializeTerrainSplatWeights,
+  setTerrainLayerStack,
+  splatColourAtLocalPoint,
+} from '@/core/terrain/TerrainLayers';
 
 const MAX_TERRAIN_RESOLUTION = 128;
 
@@ -79,6 +85,8 @@ export function createTerrain(session: EditorSession, options: TerrainOptions = 
   const resolution = Math.round(clamp(options.resolution ?? 32, 2, MAX_TERRAIN_RESOLUTION));
   const tileRepeat = Math.round(clamp(options.tileRepeat ?? 8, 1, 128));
   const mesh = buildTerrainMesh({ name, size, resolution });
+  setTerrainLayerStack(mesh, DEFAULT_TERRAIN_LAYERS);
+  initializeTerrainSplatWeights(mesh);
 
   const image = createImageAsset(document, `${name} Paint`, 256, 256, [104, 132, 82, 255]);
   const texture = createTextureAsset(document, image, `${name} Surface`);
@@ -207,6 +215,7 @@ export function resampleTerrain(
     resolution: nextResolution,
   });
   newMesh.id = oldMesh.id;
+  newMesh.metadata = { ...(oldMesh.metadata ?? {}) };
   for (const vertex of newMesh.vertices.values()) {
     vertex.position.y = terrainHeightAtLocalPoint(
       object,
@@ -214,6 +223,10 @@ export function resampleTerrain(
       vertex.position.x,
       vertex.position.z,
     );
+  }
+  for (const corner of newMesh.faceCorners.values()) {
+    const vertex = newMesh.vertices.get(corner.vertexId)!;
+    corner.vertexColour = splatColourAtLocalPoint(oldMesh, vertex.position.x, vertex.position.z);
   }
   applyTerrainTileRepeat(newMesh, tileRepeat);
   newMesh.topologyVersion = oldMesh.topologyVersion + 1;

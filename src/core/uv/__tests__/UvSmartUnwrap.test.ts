@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildBox } from '@/core/mesh/builders/BoxBuilder';
-import { markUvSeamsByAngle, clearAllUvSeams, unwrapUvSmart, detectUvIslands } from '@/core/uv/UvOperations';
+import { markUvSeamsByAngle, clearAllUvSeams, unwrapUvSmart, detectUvIslands, islandForFace } from '@/core/uv/UvOperations';
 
 describe('UvSmartUnwrap', () => {
   it('automatically marks seams on sharp 90-degree box edges', () => {
@@ -42,5 +42,22 @@ describe('UvSmartUnwrap', () => {
       expect(uv!.x).toBeGreaterThanOrEqual(0);
       expect(uv!.x).toBeLessThanOrEqual(1.05);
     }
+  });
+
+  it('reuses island lookup until topology or seams change', () => {
+    const mesh = buildBox({ width: 1, height: 1, depth: 1 });
+    const faceId = [...mesh.faces.keys()][0]!;
+    const first = islandForFace(mesh, faceId);
+    const again = islandForFace(mesh, faceId);
+    expect(first).toBe(again);
+    expect(first?.faceIds.length).toBeGreaterThan(1);
+
+    mesh.geometryVersion += 1;
+    expect(islandForFace(mesh, faceId)).toBe(first);
+
+    markUvSeamsByAngle(mesh, 45);
+    const afterSeams = islandForFace(mesh, faceId);
+    expect(afterSeams).not.toBe(first);
+    expect(afterSeams?.faceIds).toContain(faceId);
   });
 });

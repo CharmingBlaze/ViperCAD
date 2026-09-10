@@ -13,6 +13,8 @@ import {
   activateTerrainWorkspaceTool,
   adjustTerrainBrushSize,
 } from '@/app/terrainWorkspace';
+import { activateSculptBrush, adjustSculptBrushSize, SCULPT_BRUSH_HOTKEYS } from '@/app/sculptWorkspace';
+import { applyTileDrawHotkey } from '@/app/tilesetWorkspace';
 import { CreateDoodleTool } from '@/core/tools/CreateDoodleTool';
 import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
 import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
@@ -113,7 +115,12 @@ function beginModalTransform(
   }
   if (workspace.shellMode === 'terrain') {
     const toolId = session.tools.getActive()?.id;
-    if (toolId === 'terrain-sculpt' || toolId === 'terrain-object' || toolId === 'terrain-feature') {
+    if (
+      toolId === 'terrain-sculpt' ||
+      toolId === 'terrain-object' ||
+      toolId === 'terrain-feature' ||
+      toolId === 'terrain-structure'
+    ) {
       session.tools.setActive('select', session.context());
     }
   }
@@ -380,6 +387,12 @@ export function handleBlenderShortcut(
     return false;
   }
 
+  if (activeTool?.id === 'tile-draw' && applyTileDrawHotkey(session, workspace, e)) {
+    e.preventDefault();
+    invalidateViewport?.();
+    return true;
+  }
+
   // --- Fast Component Mode Switching: 1 (Vertex), 2 (Edge), 3 (Face) ---
   const meshEdit = workspace.shellMode === 'model' || workspace.shellMode === 'blockout';
   if (meshEdit && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
@@ -410,6 +423,19 @@ export function handleBlenderShortcut(
     if (handleBlenderSelectAll(e, ctx)) {
       e.preventDefault();
       return true;
+    }
+  }
+
+  // --- Sculpt brushes: letter shortcuts and [ ] size ---
+  if (workspace.shellMode === 'sculpt' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+    const brush = SCULPT_BRUSH_HOTKEYS[key.toLowerCase()];
+    if (brush) {
+      e.preventDefault();
+      return activateSculptBrush(session, brush);
+    }
+    if (key === '[' || key === ']') {
+      e.preventDefault();
+      return adjustSculptBrushSize(session, key === ']' ? 1.12 : 0.89);
     }
   }
 
@@ -510,6 +536,10 @@ export function handleBlenderShortcut(
     if (key === '3') {
       e.preventDefault();
       return activateTerrainWorkspaceTool(session, 'water');
+    }
+    if (key === '4') {
+      e.preventDefault();
+      return activateTerrainWorkspaceTool(session, 'structure');
     }
     if (key === '[' || key === ']') {
       e.preventDefault();

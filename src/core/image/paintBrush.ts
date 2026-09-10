@@ -31,6 +31,23 @@ function matchesRecolor(a: Rgba, b: Rgba, tol = 32): boolean {
   );
 }
 
+/** Texture-space mirrors of a paint pixel (includes the original). */
+export function mirroredPaintPixels(
+  width: number,
+  height: number,
+  point: { x: number; y: number },
+  mirrorX: boolean,
+  mirrorY: boolean,
+): { x: number; y: number }[] {
+  const points = [point];
+  if (mirrorX) points.push({ x: width - 1 - point.x, y: point.y });
+  if (mirrorY) points.push({ x: point.x, y: height - 1 - point.y });
+  if (mirrorX && mirrorY) {
+    points.push({ x: width - 1 - point.x, y: height - 1 - point.y });
+  }
+  return [...new Map(points.map((item) => [`${item.x},${item.y}`, item])).values()];
+}
+
 /** Stamp a brush centred on pixel (cx, cy). Records into an optional stroke. */
 export function stampBrush(
   image: ImageAsset,

@@ -1,6 +1,8 @@
-import type { EditableMesh } from '@/core/mesh/types';
-import { bumpPositions, faceCornerIds } from '@/core/mesh/EditableMesh';
+import type { EditableMesh, FaceCornerId, VertexId } from '@/core/mesh/types';
+import { bumpPositions } from '@/core/mesh/EditableMesh';
 import type { Vec3 } from '@/core/math/Vec3';
+
+export const MAX_SPLAT_LAYERS = 4;
 
 export type TerrainLayerSpec = {
   id: string;
@@ -13,6 +15,26 @@ export type TerrainLayerSpec = {
   visible: boolean;
 };
 
+export type TerrainLayerPreset = {
+  name: string;
+  color: string;
+  tiling: number;
+  roughness: number;
+  metallic: number;
+};
+
+export const TERRAIN_LAYER_PRESETS: TerrainLayerPreset[] = [
+  { name: 'Grass', color: '#4a7c59', tiling: 8, roughness: 0.8, metallic: 0.0 },
+  { name: 'Dirt / Soil', color: '#7a5a3a', tiling: 8, roughness: 0.9, metallic: 0.0 },
+  { name: 'Cliff Rock', color: '#686b73', tiling: 12, roughness: 0.7, metallic: 0.1 },
+  { name: 'Snow Peak', color: '#e8edf5', tiling: 6, roughness: 0.4, metallic: 0.0 },
+  { name: 'Beach Sand', color: '#d4b27d', tiling: 10, roughness: 0.85, metallic: 0.0 },
+  { name: 'Cobblestone', color: '#52525b', tiling: 16, roughness: 0.6, metallic: 0.1 },
+  { name: 'Asphalt', color: '#27272a', tiling: 14, roughness: 0.9, metallic: 0.0 },
+  { name: 'Volcanic Lava', color: '#ef4444', tiling: 8, roughness: 0.3, metallic: 0.2 },
+  { name: 'Wet Mud', color: '#453123', tiling: 8, roughness: 0.2, metallic: 0.1 },
+];
+
 export const DEFAULT_TERRAIN_LAYERS: TerrainLayerSpec[] = [
   { id: 'layer_grass', name: 'Grass', color: '#4a7c59', tiling: 8, roughness: 0.8, metallic: 0.0, visible: true },
   { id: 'layer_dirt', name: 'Dirt / Soil', color: '#7a5a3a', tiling: 8, roughness: 0.9, metallic: 0.0, visible: true },
@@ -20,12 +42,13 @@ export const DEFAULT_TERRAIN_LAYERS: TerrainLayerSpec[] = [
   { id: 'layer_snow', name: 'Snow Peak', color: '#e8edf5', tiling: 6, roughness: 0.4, metallic: 0.0, visible: true },
 ];
 
+export type SplatWeights = [number, number, number, number];
+
+const DEFAULT_SPLAT_COLOUR: Vec3 = { x: 1, y: 0, z: 0 };
+
 /** Retrieve or initialize terrain layer stack from mesh metadata. */
 export function getTerrainLayerStack(mesh: EditableMesh): TerrainLayerSpec[] {
-  const defaultLayer = mesh.defaultUvLayerId;
-  if (!defaultLayer) return DEFAULT_TERRAIN_LAYERS;
-
-  const rawJson = (mesh as unknown as { metadata?: Record<string, string> }).metadata?.terrainLayers;
+  const rawJson = mesh.metadata?.terrainLayers;
   if (rawJson) {
     try {
       const parsed = JSON.parse(rawJson);
@@ -39,12 +62,76 @@ export function getTerrainLayerStack(mesh: EditableMesh): TerrainLayerSpec[] {
   return DEFAULT_TERRAIN_LAYERS;
 }
 
+export function meshHasTerrainLayers(mesh: EditableMesh): boolean {
+  return typeof mesh.metadata?.terrainLayers === 'string' && mesh.metadata.terrainLayers.length > 2;
+}
+
 /** Store updated terrain layer stack into mesh metadata. */
 export function setTerrainLayerStack(mesh: EditableMesh, layers: TerrainLayerSpec[]): void {
-  const meta = (mesh as unknown as { metadata?: Record<string, string> }).metadata ?? {};
-  meta.terrainLayers = JSON.stringify(layers);
-  (mesh as unknown as { metadata?: Record<string, string> }).metadata = meta;
+  mesh.metadata = { ...(mesh.metadata ?? {}), terrainLayers: JSON.stringify(layers) };
   mesh.geometryVersion += 1;
+}
+
+/** Seed every face corner with full weight on layer 0 (Grass). */
+export function initializeTerrainSplatWeights(mesh: EditableMesh, layerIndex = 0): void {
+  const colour = colourFromSplatWeights(unitWeights(layerIndex));
+  for (const corner of mesh.faceCorners.values()) {
+    corner.vertexColour = { ...colour };
+  }
+  mesh.geometryVersion += 1;
+  mesh.dirty.uvs = true;
+}
+
+export function splatWeightsFromColour(colour: Vec3 | null | undefined): SplatWeights {
+  const r = clamp01(colour?.x ?? DEFAULT_SPLAT_COLOUR.x);
+  const g = clamp01(colour?.y ?? DEFAULT_SPLAT_COLOUR.y);
+  const b = clamp01(colour?.z ?? DEFAULT_SPLAT_COLOUR.z);
+  return normalizeWeights([r, g, b, Math.max(0, 1 - r - g - b)]);
+}
+
+export function colourFromSplatWeights(weights: SplatWeights): Vec3 {
+  const next = normalizeWeights(weights);
+  return { x: next[0], y: next[1], z: next[2] };
+}
+
+export function splatColourForCorner(mesh: EditableMesh, cornerId: FaceCornerId): Vec3 {
+  const corner = mesh.faceCorners.get(cornerId);
+  return corner?.vertexColour ? { ...corner.vertexColour } : { ...DEFAULT_SPLAT_COLOUR };
+}
+
+export function snapshotTerrainSplat(mesh: EditableMesh): Map<FaceCornerId, Vec3 | null> {
+  return new Map(
+    [...mesh.faceCorners].map(([id, corner]) => [
+      id,
+      corner.vertexColour ? { ...corner.vertexColour } : null,
+    ]),
+  );
+}
+
+export function restoreTerrainSplat(mesh: EditableMesh, snapshot: Map<FaceCornerId, Vec3 | null>): void {
+  for (const [id, colour] of snapshot) {
+    const corner = mesh.faceCorners.get(id);
+    if (!corner) continue;
+    corner.vertexColour = colour ? { ...colour } : null;
+  }
+  mesh.geometryVersion += 1;
+  mesh.dirty.uvs = true;
+}
+
+/** Sample splat colour from the nearest terrain vertex (used when resampling). */
+export function splatColourAtLocalPoint(mesh: EditableMesh, x: number, z: number): Vec3 {
+  const cornersOf = cornersByVertex(mesh);
+  let best = { ...DEFAULT_SPLAT_COLOUR };
+  let bestDist = Infinity;
+  for (const vertex of mesh.vertices.values()) {
+    const dist = Math.hypot(vertex.position.x - x, vertex.position.z - z);
+    if (dist >= bestDist) continue;
+    bestDist = dist;
+    const corners = cornersOf.get(vertex.id);
+    const colour = corners?.[0]?.vertexColour;
+    best = colour ? { ...colour } : { ...DEFAULT_SPLAT_COLOUR };
+  }
+  return best;
 }
 
 /** Appends a new texture layer to terrain stack. */
@@ -87,8 +174,6 @@ export function updateTerrainLayer(
   const current = getTerrainLayerStack(mesh);
   const updated = current.map((l) => (l.id === layerId ? { ...l, ...updates } : l));
   setTerrainLayerStack(mesh, updated);
-  bumpPositions(mesh);
-  mesh.dirty.uvs = true;
   return updated;
 }
 
@@ -110,8 +195,6 @@ export function moveTerrainLayer(
   current[targetIdx] = temp;
 
   setTerrainLayerStack(mesh, current);
-  bumpPositions(mesh);
-  mesh.dirty.uvs = true;
   return current;
 }
 
@@ -128,32 +211,19 @@ export function duplicateTerrainLayer(mesh: EditableMesh, layerId: string): Terr
   };
   const updated = [...current, clone];
   setTerrainLayerStack(mesh, updated);
-  bumpPositions(mesh);
-  mesh.dirty.uvs = true;
   return updated;
 }
 
-/** Flood fills the entire terrain mesh with active material layer. */
+/** Flood fills the entire terrain mesh with the active material layer. */
 export function fillTerrainWithLayer(mesh: EditableMesh, layerIndex: number): number {
   const layers = getTerrainLayerStack(mesh);
   if (layerIndex < 0 || layerIndex >= layers.length) return 0;
-  const layerId = mesh.defaultUvLayerId;
-  if (!layerId) return 0;
-
-  const uOffset = (layerIndex % 4) * 0.25;
-  const vOffset = Math.floor(layerIndex / 4) * 0.25;
+  const colour = colourFromSplatWeights(unitWeights(layerIndex));
   let painted = 0;
 
-  for (const face of mesh.faces.values()) {
-    for (const cid of faceCornerIds(mesh, face.id)) {
-      const corner = mesh.faceCorners.get(cid)!;
-      const uv = corner.uvs.get(layerId) ?? { x: 0, y: 0 };
-      corner.uvs.set(layerId, {
-        x: (uv.x % 0.25) + uOffset,
-        y: (uv.y % 0.25) + vOffset,
-      });
-      painted += 1;
-    }
+  for (const corner of mesh.faceCorners.values()) {
+    corner.vertexColour = { ...colour };
+    painted += 1;
   }
 
   if (painted > 0) {
@@ -170,38 +240,34 @@ export function paintTerrainLayerAtPosition(
   layerIndex: number,
   radius = 5,
   opacity = 0.5,
+  options: { invert?: boolean } = {},
 ): number {
-  let painted = 0;
   const layers = getTerrainLayerStack(mesh);
   if (layerIndex < 0 || layerIndex >= layers.length) return 0;
-  const layerId = mesh.defaultUvLayerId;
-  if (!layerId) return 0;
 
-  // Layer UV offset mapping
-  const uOffset = (layerIndex % 4) * 0.25;
-  const vOffset = Math.floor(layerIndex / 4) * 0.25;
+  const targetIndex = layerIndex % MAX_SPLAT_LAYERS;
+  const invert = !!options.invert;
+  const cornersOf = cornersByVertex(mesh);
+  let painted = 0;
 
   for (const vertex of mesh.vertices.values()) {
     const dist = Math.hypot(vertex.position.x - centerPos.x, vertex.position.z - centerPos.z);
     if (dist > radius) continue;
 
     const falloff = 1 - Math.min(1, dist / Math.max(0.1, radius));
-    const weight = falloff * opacity;
-    if (weight <= 0.01) continue;
+    const blend = falloff * opacity;
+    if (blend <= 0.01) continue;
 
-    // Assign painted layer UV coordinates to associated face corners
-    for (const face of mesh.faces.values()) {
-      for (const cornerId of faceCornerIds(mesh, face.id)) {
-        const corner = mesh.faceCorners.get(cornerId)!;
-        if (corner.vertexId === vertex.id) {
-          const uv = corner.uvs.get(layerId) ?? { x: 0, y: 0 };
-          corner.uvs.set(layerId, {
-            x: (uv.x % 0.25) + uOffset,
-            y: (uv.y % 0.25) + vOffset,
-          });
-          painted += 1;
-        }
-      }
+    const corners = cornersOf.get(vertex.id);
+    if (!corners?.length) continue;
+
+    for (const corner of corners) {
+      const current = splatWeightsFromColour(corner.vertexColour);
+      const next = invert
+        ? eraseLayerWeight(current, targetIndex, blend)
+        : mixTowardLayer(current, targetIndex, blend);
+      corner.vertexColour = colourFromSplatWeights(next);
+      painted += 1;
     }
   }
 
@@ -210,4 +276,54 @@ export function paintTerrainLayerAtPosition(
     mesh.dirty.uvs = true;
   }
   return painted;
+}
+
+function cornersByVertex(mesh: EditableMesh): Map<VertexId, { id: FaceCornerId; vertexColour: Vec3 | null }[]> {
+  const map = new Map<VertexId, { id: FaceCornerId; vertexColour: Vec3 | null }[]>();
+  for (const corner of mesh.faceCorners.values()) {
+    const list = map.get(corner.vertexId);
+    const entry = corner;
+    if (list) list.push(entry);
+    else map.set(corner.vertexId, [entry]);
+  }
+  return map;
+}
+
+function unitWeights(layerIndex: number): SplatWeights {
+  const weights: SplatWeights = [0, 0, 0, 0];
+  weights[layerIndex % MAX_SPLAT_LAYERS] = 1;
+  return weights;
+}
+
+function mixTowardLayer(current: SplatWeights, layerIndex: number, amount: number): SplatWeights {
+  const target = unitWeights(layerIndex);
+  const t = clamp01(amount);
+  return normalizeWeights([
+    current[0] + (target[0] - current[0]) * t,
+    current[1] + (target[1] - current[1]) * t,
+    current[2] + (target[2] - current[2]) * t,
+    current[3] + (target[3] - current[3]) * t,
+  ]);
+}
+
+function eraseLayerWeight(current: SplatWeights, layerIndex: number, amount: number): SplatWeights {
+  const next: SplatWeights = [...current];
+  next[layerIndex] = current[layerIndex] * (1 - clamp01(amount));
+  return normalizeWeights(next);
+}
+
+function normalizeWeights(weights: SplatWeights): SplatWeights {
+  const clamped: SplatWeights = [
+    Math.max(0, weights[0]),
+    Math.max(0, weights[1]),
+    Math.max(0, weights[2]),
+    Math.max(0, weights[3]),
+  ];
+  const sum = clamped[0] + clamped[1] + clamped[2] + clamped[3];
+  if (sum <= 1e-6) return [1, 0, 0, 0];
+  return [clamped[0] / sum, clamped[1] / sum, clamped[2] / sum, clamped[3] / sum];
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, Number(value) || 0));
 }

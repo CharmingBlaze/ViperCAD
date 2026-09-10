@@ -23,11 +23,20 @@ import { remeshUniform } from '@/core/sculpt/MeshRemesher';
 import { decimateMesh } from '@/core/sculpt/MeshDecimate';
 import { symmetrizeMesh } from '@/core/symmetry/Symmetry';
 import { pushToast } from '@/app/Toast';
-import { usePanelResizer } from '@/app/usePanelResizer';
+import { BlenderIcon } from '@/components/BlenderIcon';
+import { FloatingPanel } from '@/app/FloatingPanel';
+import { SCULPT_PANEL_POSITION_KEYS } from '@/app/sculptWorkspace';
 
 type Props = {
   session: EditorSession;
   onRefresh: () => void;
+  brushesOpen: boolean;
+  settingsOpen: boolean;
+  meshOpen: boolean;
+  layoutKey: number;
+  onToggleBrushes: () => void;
+  onToggleSettings: () => void;
+  onToggleMesh: () => void;
 };
 
 type BrushDef = {
@@ -91,55 +100,6 @@ function FalloffPreview({ kind }: { kind: SculptFalloff }) {
   return (
     <svg className="sculpt-falloff-preview" viewBox="0 0 16 16" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.4">
       <path d={paths[kind]} />
-    </svg>
-  );
-}
-
-function BrushPreview({ mode }: { mode: MeshBrushMode }) {
-  if (mode === 'inflate') {
-    return (
-      <svg viewBox="0 0 48 18" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.2">
-        <path d="M2 12h14" />
-        <path d="M28 12c3-7 9-7 12 0" />
-      </svg>
-    );
-  }
-  if (mode === 'pinch') {
-    return (
-      <svg viewBox="0 0 48 18" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.2">
-        <path d="M2 6h14M2 12h14" />
-        <path d="M28 5 34 9l6-4M28 13l6-4 6 4" />
-      </svg>
-    );
-  }
-  if (mode === 'flatten') {
-    return (
-      <svg viewBox="0 0 48 18" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.2">
-        <path d="M2 13 6 7l5 5 5-8" />
-        <path d="M28 11h16" />
-      </svg>
-    );
-  }
-  if (mode === 'clay') {
-    return (
-      <svg viewBox="0 0 48 18" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.2">
-        <path d="M2 13h14" />
-        <path d="M28 13h16M31 13V8h10v5" />
-      </svg>
-    );
-  }
-  if (mode === 'grab') {
-    return (
-      <svg viewBox="0 0 48 18" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.2">
-        <path d="M2 12h14" />
-        <path d="M28 14c4-9 10-9 14 0" />
-      </svg>
-    );
-  }
-  return (
-    <svg viewBox="0 0 48 18" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.2">
-      <path d="M2 12c3-5 7-5 10 0" />
-      <path d="M28 12c3-5 7-5 10 0" />
     </svg>
   );
 }
@@ -254,7 +214,17 @@ function BrushIcon({ mode }: { mode: MeshBrushMode }) {
   }
 }
 
-export function SculptPanel({ session, onRefresh }: Props) {
+export function SculptPanel({
+  session,
+  onRefresh,
+  brushesOpen,
+  settingsOpen,
+  meshOpen,
+  layoutKey,
+  onToggleBrushes,
+  onToggleSettings,
+  onToggleMesh,
+}: Props) {
   const tool = session.tools.get('mesh-sculpt') as MeshSculptTool;
   const objects = sculptableObjects(session.document);
   const activeId = session.selection.state.activeObjectId;
@@ -414,34 +384,347 @@ export function SculptPanel({ session, onRefresh }: Props) {
     ? BRUSHES
     : BRUSHES.filter((b) => b.category === activeCategory);
 
-  const resizer = usePanelResizer({
-    storageKey: 'vipercad.sidebar.width.sculpt',
-    defaultWidth: 240,
-    minWidth: 200,
-    maxWidth: 520,
-  });
+  const viewportW = typeof window === 'undefined' ? 1280 : window.innerWidth;
 
   return (
-    <aside
-      className={`sculpt-panel${resizer.isResizing ? ' is-resizing' : ''}`}
-      ref={resizer.containerRef}
-      aria-label="Sculpt tools"
-      style={{ width: resizer.width, flex: `0 0 ${resizer.width}px` }}
-    >
-      <div
-        className="panel-width-resizer"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize sculpt panel"
-        title="Drag to resize sculpt panel · Double-click resets (240px)"
-        {...resizer.resizerProps}
-      />
-      <header className="sculpt-panel-header">
-        <strong>Sculpt</strong>
-        <p>Shape and sculpt mesh surfaces.</p>
-      </header>
+    <div className="sculpt-workspace" aria-label="Sculpt workspace">
+      <div className="sculpt-float-dock" aria-label="Active sculpt brush">
+        <span className="sculpt-dock-status">
+          {activeBrush.label} · {tool.radius.toFixed(2)}
+        </span>
+      </div>
 
-      <div className="sculpt-panel-body">
+      {brushesOpen && (
+        <FloatingPanel
+          key={`brushes-${layoutKey}`}
+          title="Brushes"
+          storageKey={SCULPT_PANEL_POSITION_KEYS.brushes}
+          defaultPosition={{ x: 12, y: 88 }}
+          defaultSize={{ width: 196 }}
+          className="sculpt-float-panel sculpt-float-brushes"
+          onClose={onToggleBrushes}
+        >
+          <div className="sculpt-category-tabs" role="tablist" aria-label="Brush categories">
+            {CATEGORIES.map((cat) => (
+              <button
+                key={cat.id}
+                type="button"
+                role="tab"
+                aria-selected={activeCategory === cat.id}
+                className={`sculpt-category-tab${activeCategory === cat.id ? ' is-active' : ''}`}
+                onClick={() => setActiveCategory(cat.id)}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
+          <div className="sculpt-shelf-grid" role="group" aria-label="Sculpt brushes">
+            {filteredBrushes.map((brush) => {
+              const active = session.tools.getActive() === tool && tool.mode === brush.mode;
+              return (
+                <button
+                  key={brush.mode}
+                  type="button"
+                  className={`sculpt-shelf-btn${active ? ' is-active' : ''}`}
+                  aria-pressed={active}
+                  title={brush.tooltip}
+                  onClick={() => setBrush(brush.mode)}
+                >
+                  <span className="sculpt-brush-icon">
+                    <BrushIcon mode={brush.mode} />
+                  </span>
+                  <span>{brush.label}</span>
+                  <kbd>{brush.shortcut}</kbd>
+                </button>
+              );
+            })}
+          </div>
+        </FloatingPanel>
+      )}
+
+      {settingsOpen && (
+        <FloatingPanel
+          key={`settings-${layoutKey}`}
+          title="Brush"
+          storageKey={SCULPT_PANEL_POSITION_KEYS.settings}
+          defaultPosition={{ x: Math.max(12, viewportW - 300), y: 88 }}
+          defaultSize={{ width: 272 }}
+          className="sculpt-float-panel sculpt-float-settings"
+          onClose={onToggleSettings}
+        >
+          <div className="sculpt-section-head">
+            <span className="sculpt-section-label sculpt-section-label-hero">Brush</span>
+            <span className="sculpt-active-brush">{activeBrush.label}</span>
+          </div>
+          <p className="sculpt-brush-hint">{activeBrush.hint}</p>
+
+          <label className="sculpt-slider">
+            <span className="sculpt-slider-label">
+              Size
+              <b>{tool.radius.toFixed(2)}</b>
+              <button
+                type="button"
+                className={`sculpt-pressure-btn${tool.pressureRadius ? ' is-on' : ''}`}
+                title="Pressure affects size"
+                aria-pressed={tool.pressureRadius}
+                onClick={() => {
+                  tool.pressureRadius = !tool.pressureRadius;
+                  tool.revision += 1;
+                  onRefresh();
+                }}
+              >
+                <PressureIcon />
+              </button>
+            </span>
+            <input
+              className="sculpt-range"
+              aria-label="Brush size"
+              type="range"
+              min={0.05}
+              max={4}
+              step={0.05}
+              value={tool.radius}
+              onChange={(event) => {
+                tool.setRadius(Number(event.target.value), session.context());
+                onRefresh();
+              }}
+            />
+          </label>
+
+          <label className="sculpt-slider">
+            <span className="sculpt-slider-label">
+              Strength
+              <b>{tool.strength.toFixed(2)}</b>
+              <button
+                type="button"
+                className={`sculpt-pressure-btn${tool.pressureStrength ? ' is-on' : ''}`}
+                title="Pressure affects strength"
+                aria-pressed={tool.pressureStrength}
+                onClick={() => {
+                  tool.pressureStrength = !tool.pressureStrength;
+                  tool.revision += 1;
+                  onRefresh();
+                }}
+              >
+                <PressureIcon />
+              </button>
+            </span>
+            <input
+              className="sculpt-range"
+              aria-label="Brush strength"
+              type="range"
+              min={0.005}
+              max={0.5}
+              step={0.005}
+              value={tool.strength}
+              onChange={(event) => {
+                tool.setStrength(Number(event.target.value), session.context());
+                onRefresh();
+              }}
+            />
+          </label>
+
+          <div className="sculpt-recent" aria-label="Recent brushes">
+            <span className="sculpt-field-label">Recent</span>
+            <div className="sculpt-recent-row">
+              {recentBrushes.map((brush) => (
+                <button
+                  key={brush.mode}
+                  type="button"
+                  className={`sculpt-recent-chip${tool.mode === brush.mode ? ' is-active' : ''}`}
+                  onClick={() => setBrush(brush.mode)}
+                >
+                  {brush.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="sculpt-advanced-toggle"
+            aria-expanded={advancedOpen}
+            onClick={() => setAdvancedOpen((open) => !open)}
+          >
+            Advanced
+            <BlenderIcon name={advancedOpen ? 'tria_down' : 'tria_right'} size={10} />
+          </button>
+
+          {advancedOpen && (
+            <div className="sculpt-advanced">
+              <div className="sculpt-falloff">
+                <span className="sculpt-slider-label">
+                  Falloff
+                  <FalloffPreview kind={tool.falloff} />
+                </span>
+                <div className="sculpt-falloff-toggle" role="group" aria-label="Brush falloff">
+                  {(['smooth', 'linear', 'sharp', 'spherical', 'root', 'constant'] as SculptFalloff[]).map((falloff) => (
+                    <button
+                      key={falloff}
+                      type="button"
+                      className={tool.falloff === falloff ? 'is-active' : ''}
+                      aria-pressed={tool.falloff === falloff}
+                      onClick={() => {
+                        tool.falloff = falloff;
+                        tool.revision += 1;
+                        onRefresh();
+                      }}
+                    >
+                      {falloff[0]!.toUpperCase() + falloff.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="sculpt-slider">
+                <span className="sculpt-slider-label">
+                  Hardness
+                  <b>{Math.round(tool.hardness * 100)}%</b>
+                </span>
+                <input
+                  className="sculpt-range"
+                  aria-label="Brush hardness"
+                  type="range"
+                  min={0}
+                  max={0.9}
+                  step={0.05}
+                  value={tool.hardness}
+                  onChange={(event) => {
+                    tool.hardness = Number(event.target.value);
+                    tool.revision += 1;
+                    session.requestRedraw();
+                    onRefresh();
+                  }}
+                />
+              </label>
+              <label className="sculpt-slider">
+                <span className="sculpt-slider-label">
+                  Stroke spacing
+                  <b>{Math.round(tool.spacing * 100)}%</b>
+                </span>
+                <input
+                  className="sculpt-range"
+                  aria-label="Stroke spacing"
+                  type="range"
+                  min={0.05}
+                  max={0.5}
+                  step={0.01}
+                  value={tool.spacing}
+                  onChange={(event) => {
+                    tool.spacing = Number(event.target.value);
+                    tool.revision += 1;
+                    onRefresh();
+                  }}
+                />
+              </label>
+              {(tool.mode === 'clay' || tool.mode === 'inflate' || tool.mode === 'noise') && (
+                <label className="sculpt-slider">
+                  <span className="sculpt-slider-label">
+                    Build-up
+                    <b>{tool.buildUp.toFixed(2)}</b>
+                  </span>
+                  <input
+                    className="sculpt-range"
+                    aria-label="Brush build-up"
+                    type="range"
+                    min={0.2}
+                    max={2}
+                    step={0.05}
+                    value={tool.buildUp}
+                    onChange={(event) => {
+                      tool.buildUp = Number(event.target.value);
+                      tool.revision += 1;
+                      onRefresh();
+                    }}
+                  />
+                </label>
+              )}
+              {tool.mode === 'smooth' && (
+                <label className="sculpt-slider">
+                  <span className="sculpt-slider-label">
+                    Preserve volume
+                    <b>{Math.round(tool.preserveVolume * 100)}%</b>
+                  </span>
+                  <input
+                    className="sculpt-range"
+                    aria-label="Smooth preserve volume"
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={tool.preserveVolume}
+                    onChange={(event) => {
+                      tool.preserveVolume = Number(event.target.value);
+                      tool.revision += 1;
+                      onRefresh();
+                    }}
+                  />
+                </label>
+              )}
+              <div className="sculpt-toggle-grid">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={tool.frontFacesOnly}
+                    onChange={(event) => {
+                      tool.frontFacesOnly = event.target.checked;
+                      tool.revision += 1;
+                      onRefresh();
+                    }}
+                  />
+                  Front faces
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={tool.usePressure}
+                    onChange={(event) => {
+                      tool.usePressure = event.target.checked;
+                      tool.revision += 1;
+                      onRefresh();
+                    }}
+                  />
+                  Pen pressure
+                </label>
+              </div>
+              <label className="sculpt-checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={tool.stabilizer.enabled}
+                  onChange={(e) => {
+                    tool.stabilizer.enabled = e.target.checked;
+                    tool.revision += 1;
+                    onRefresh();
+                  }}
+                />
+                <span>Stabilizer</span>
+              </label>
+              {(tool.mode === 'flatten' || tool.mode === 'scrape') && (
+                <p className="sculpt-tip">Alt+click the surface to sample the reference plane.</p>
+              )}
+            </div>
+          )}
+
+          <footer className="sculpt-shortcuts">
+            <span><kbd>LMB</kbd> Sculpt</span>
+            <span><kbd>Shift</kbd> Smooth</span>
+            <span><kbd>Ctrl</kbd> Invert</span>
+            <span><kbd>Wheel</kbd> Size</span>
+            <span><kbd>[ ]</kbd> Size</span>
+          </footer>
+        </FloatingPanel>
+      )}
+
+      {meshOpen && (
+        <FloatingPanel
+          key={`mesh-${layoutKey}`}
+          title="Mesh"
+          storageKey={SCULPT_PANEL_POSITION_KEYS.mesh}
+          defaultPosition={{ x: Math.max(12, viewportW - 584), y: 88 }}
+          defaultSize={{ width: 272 }}
+          defaultMinimized={viewportW < 1280}
+          className="sculpt-float-panel sculpt-float-mesh"
+          onClose={onToggleMesh}
+        >
         <section className="sculpt-section sculpt-section-quiet">
           <div className="sculpt-section-head">
             <span className="sculpt-section-label">Mesh</span>
@@ -601,312 +884,8 @@ export function SculptPanel({ session, onRefresh }: Props) {
             </button>
           </div>
         </section>
-
-        <section className="sculpt-brush-section">
-          <div className="sculpt-brush-sticky">
-            <div className="sculpt-section-head">
-              <span className="sculpt-section-label sculpt-section-label-hero">Brush</span>
-              <span className="sculpt-active-brush">{activeBrush.label}</span>
-            </div>
-            <p className="sculpt-brush-hint">{activeBrush.hint}</p>
-
-            <label className="sculpt-slider">
-              <span className="sculpt-slider-label">
-                Size
-                <b>{tool.radius.toFixed(2)}</b>
-                <button
-                  type="button"
-                  className={`sculpt-pressure-btn${tool.pressureRadius ? ' is-on' : ''}`}
-                  title="Pressure affects size"
-                  aria-pressed={tool.pressureRadius}
-                  onClick={() => {
-                    tool.pressureRadius = !tool.pressureRadius;
-                    tool.revision += 1;
-                    onRefresh();
-                  }}
-                >
-                  <PressureIcon />
-                </button>
-              </span>
-              <input
-                className="sculpt-range"
-                aria-label="Brush size"
-                type="range"
-                min={0.05}
-                max={4}
-                step={0.05}
-                value={tool.radius}
-                onChange={(event) => {
-                  tool.setRadius(Number(event.target.value), session.context());
-                  onRefresh();
-                }}
-              />
-            </label>
-
-            <label className="sculpt-slider">
-              <span className="sculpt-slider-label">
-                Strength
-                <b>{tool.strength.toFixed(2)}</b>
-                <button
-                  type="button"
-                  className={`sculpt-pressure-btn${tool.pressureStrength ? ' is-on' : ''}`}
-                  title="Pressure affects strength"
-                  aria-pressed={tool.pressureStrength}
-                  onClick={() => {
-                    tool.pressureStrength = !tool.pressureStrength;
-                    tool.revision += 1;
-                    onRefresh();
-                  }}
-                >
-                  <PressureIcon />
-                </button>
-              </span>
-              <input
-                className="sculpt-range"
-                aria-label="Brush strength"
-                type="range"
-                min={0.005}
-                max={0.5}
-                step={0.005}
-                value={tool.strength}
-                onChange={(event) => {
-                  tool.setStrength(Number(event.target.value), session.context());
-                  onRefresh();
-                }}
-              />
-            </label>
-
-            <div className="sculpt-recent" aria-label="Recent brushes">
-              <span className="sculpt-field-label">Recent</span>
-              <div className="sculpt-recent-row">
-                {recentBrushes.map((brush) => (
-                  <button
-                    key={brush.mode}
-                    type="button"
-                    className={`sculpt-recent-chip${tool.mode === brush.mode ? ' is-active' : ''}`}
-                    onClick={() => setBrush(brush.mode)}
-                  >
-                    {brush.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="sculpt-category-tabs" role="tablist" aria-label="Brush categories">
-              {CATEGORIES.map((cat) => (
-                <button
-                  key={cat.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeCategory === cat.id}
-                  className={`sculpt-category-tab${activeCategory === cat.id ? ' is-active' : ''}`}
-                  onClick={() => setActiveCategory(cat.id)}
-                >
-                  {cat.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="sculpt-brush-grid" role="group" aria-label="Sculpt brushes">
-            {filteredBrushes.map((brush) => {
-              const active = session.tools.getActive() === tool && tool.mode === brush.mode;
-              return (
-                <button
-                  key={brush.mode}
-                  type="button"
-                  className={`sculpt-brush-btn${active ? ' is-active' : ''}`}
-                  aria-pressed={active}
-                  title={brush.tooltip}
-                  onClick={() => setBrush(brush.mode)}
-                >
-                  <span className="sculpt-brush-icon">
-                    <BrushIcon mode={brush.mode} />
-                  </span>
-                  <span>{brush.label}</span>
-                  <span className="sculpt-brush-preview" aria-hidden>
-                    <BrushPreview mode={brush.mode} />
-                    <em>{brush.shortcut}</em>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          <button
-            type="button"
-            className="sculpt-advanced-toggle"
-            aria-expanded={advancedOpen}
-            onClick={() => setAdvancedOpen((open) => !open)}
-          >
-            Advanced {advancedOpen ? '▾' : '▸'}
-          </button>
-
-          {advancedOpen && (
-            <div className="sculpt-advanced">
-              <div className="sculpt-falloff">
-                <span className="sculpt-slider-label">
-                  Falloff
-                  <FalloffPreview kind={tool.falloff} />
-                </span>
-                <div className="sculpt-falloff-toggle" role="group" aria-label="Brush falloff">
-                  {(['smooth', 'linear', 'sharp', 'spherical', 'root', 'constant'] as SculptFalloff[]).map((falloff) => (
-                    <button
-                      key={falloff}
-                      type="button"
-                      className={tool.falloff === falloff ? 'is-active' : ''}
-                      aria-pressed={tool.falloff === falloff}
-                      onClick={() => {
-                        tool.falloff = falloff;
-                        tool.revision += 1;
-                        onRefresh();
-                      }}
-                    >
-                      {falloff[0]!.toUpperCase() + falloff.slice(1)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <label className="sculpt-slider">
-                <span className="sculpt-slider-label">
-                  Hardness
-                  <b>{Math.round(tool.hardness * 100)}%</b>
-                </span>
-                <input
-                  className="sculpt-range"
-                  aria-label="Brush hardness"
-                  type="range"
-                  min={0}
-                  max={0.9}
-                  step={0.05}
-                  value={tool.hardness}
-                  onChange={(event) => {
-                    tool.hardness = Number(event.target.value);
-                    tool.revision += 1;
-                    session.requestRedraw();
-                    onRefresh();
-                  }}
-                />
-              </label>
-              <label className="sculpt-slider">
-                <span className="sculpt-slider-label">
-                  Stroke spacing
-                  <b>{Math.round(tool.spacing * 100)}%</b>
-                </span>
-                <input
-                  className="sculpt-range"
-                  aria-label="Stroke spacing"
-                  type="range"
-                  min={0.05}
-                  max={0.5}
-                  step={0.01}
-                  value={tool.spacing}
-                  onChange={(event) => {
-                    tool.spacing = Number(event.target.value);
-                    tool.revision += 1;
-                    onRefresh();
-                  }}
-                />
-              </label>
-              {(tool.mode === 'clay' || tool.mode === 'inflate' || tool.mode === 'noise') && (
-                <label className="sculpt-slider">
-                  <span className="sculpt-slider-label">
-                    Build-up
-                    <b>{tool.buildUp.toFixed(2)}</b>
-                  </span>
-                  <input
-                    className="sculpt-range"
-                    aria-label="Brush build-up"
-                    type="range"
-                    min={0.2}
-                    max={2}
-                    step={0.05}
-                    value={tool.buildUp}
-                    onChange={(event) => {
-                      tool.buildUp = Number(event.target.value);
-                      tool.revision += 1;
-                      onRefresh();
-                    }}
-                  />
-                </label>
-              )}
-              {tool.mode === 'smooth' && (
-                <label className="sculpt-slider">
-                  <span className="sculpt-slider-label">
-                    Preserve volume
-                    <b>{Math.round(tool.preserveVolume * 100)}%</b>
-                  </span>
-                  <input
-                    className="sculpt-range"
-                    aria-label="Smooth preserve volume"
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={tool.preserveVolume}
-                    onChange={(event) => {
-                      tool.preserveVolume = Number(event.target.value);
-                      tool.revision += 1;
-                      onRefresh();
-                    }}
-                  />
-                </label>
-              )}
-              <div className="sculpt-toggle-grid">
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={tool.frontFacesOnly}
-                    onChange={(event) => {
-                      tool.frontFacesOnly = event.target.checked;
-                      tool.revision += 1;
-                      onRefresh();
-                    }}
-                  />
-                  Front faces
-                </label>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={tool.usePressure}
-                    onChange={(event) => {
-                      tool.usePressure = event.target.checked;
-                      tool.revision += 1;
-                      onRefresh();
-                    }}
-                  />
-                  Pen pressure
-                </label>
-              </div>
-              <label className="sculpt-checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={tool.stabilizer.enabled}
-                  onChange={(e) => {
-                    tool.stabilizer.enabled = e.target.checked;
-                    tool.revision += 1;
-                    onRefresh();
-                  }}
-                />
-                <span>Stabilizer</span>
-              </label>
-              {(tool.mode === 'flatten' || tool.mode === 'scrape') && (
-                <p className="sculpt-tip">Alt+click the surface to sample the reference plane.</p>
-              )}
-            </div>
-          )}
-        </section>
-
-        <footer className="sculpt-shortcuts">
-          <span><kbd>LMB</kbd> Sculpt</span>
-          <span><kbd>Shift</kbd> Smooth</span>
-          <span><kbd>Ctrl</kbd> Invert</span>
-          <span><kbd>Wheel</kbd> Size</span>
-          <span><kbd>Ctrl+Wheel</kbd> Strength</span>
-          <span><kbd>Alt</kbd> Sample</span>
-          <span><kbd>RMB</kbd> Orbit</span>
-        </footer>
-      </div>
-    </aside>
+        </FloatingPanel>
+      )}
+    </div>
   );
 }

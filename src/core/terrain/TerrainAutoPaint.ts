@@ -1,6 +1,7 @@
 import type { EditableMesh } from '@/core/mesh/types';
 import { bumpPositions, faceCornerIds } from '@/core/mesh/EditableMesh';
 import { dotVec3, type Vec3 } from '@/core/math/Vec3';
+import { colourFromSplatWeights, type SplatWeights } from '@/core/terrain/TerrainLayers';
 
 export type TerrainTextureLayer = 'grass' | 'dirt' | 'rock' | 'sand' | 'snow' | 'asphalt' | 'cobblestone';
 
@@ -31,14 +32,11 @@ function faceNormal(mesh: EditableMesh, faceId: string): Vec3 {
   return len > 1e-6 ? { x: nx / len, y: ny / len, z: nz / len } : { x: 0, y: 1, z: 0 };
 }
 
-/** Automatically assigns texture layer coordinates based on slope angle and altitude. */
+/** Assigns splat-layer weights from slope and altitude. Visible in the viewport blend. */
 export function autoPaintTerrainMesh(
   mesh: EditableMesh,
   rules: AutoPaintRules = {},
 ): number {
-  const layerId = mesh.defaultUvLayerId;
-  if (!layerId) return 0;
-
   const flatMaxCos = Math.cos(((rules.flatMaxAngleDeg ?? 20) * Math.PI) / 180);
   const cliffMinCos = Math.cos(((rules.cliffMinAngleDeg ?? 38) * Math.PI) / 180);
   const snowY = rules.snowMinHeight ?? 7.5;
@@ -46,12 +44,10 @@ export function autoPaintTerrainMesh(
 
   let painted = 0;
 
-  // Layer UV offsets on atlas: Grass=(0,0), Dirt=(0.25,0), Rock=(0.5,0), Snow=(0.75,0), Sand=(0,0.5)
   for (const face of mesh.faces.values()) {
     const normal = faceNormal(mesh, face.id);
     const upDot = dotVec3(normal, { x: 0, y: 1, z: 0 });
 
-    // Calculate average face Y altitude
     let avgY = 0;
     const cornerIds = faceCornerIds(mesh, face.id);
     for (const cid of cornerIds) {
@@ -61,44 +57,25 @@ export function autoPaintTerrainMesh(
     }
     avgY /= Math.max(1, cornerIds.length);
 
-    let layerOffsetU = 0;
-    let layerOffsetV = 0;
+    // Default stack: 0 grass, 1 dirt, 2 rock, 3 snow. Beach uses dirt.
+    let layerIndex = 0;
+    if (avgY >= snowY && upDot >= flatMaxCos) layerIndex = 3;
+    else if (upDot < cliffMinCos) layerIndex = 2;
+    else if (avgY <= beachY && upDot >= flatMaxCos) layerIndex = 1;
+    else if (upDot < flatMaxCos) layerIndex = 1;
 
-    if (avgY >= snowY && upDot >= flatMaxCos) {
-      // Mountain Peak -> Snow
-      layerOffsetU = 0.75;
-      layerOffsetV = 0;
-    } else if (upDot < cliffMinCos) {
-      // Steep Cliff -> Rock
-      layerOffsetU = 0.5;
-      layerOffsetV = 0;
-    } else if (avgY <= beachY && upDot >= flatMaxCos) {
-      // Low Coastline -> Sand
-      layerOffsetU = 0;
-      layerOffsetV = 0.5;
-    } else if (upDot < flatMaxCos) {
-      // Slope -> Dirt
-      layerOffsetU = 0.25;
-      layerOffsetV = 0;
-    } else {
-      // Flat Ground -> Grass
-      layerOffsetU = 0;
-      layerOffsetV = 0;
-    }
-
+    const weights: SplatWeights = [0, 0, 0, 0];
+    weights[layerIndex] = 1;
+    const colour = colourFromSplatWeights(weights);
     for (const cid of cornerIds) {
-      const corner = mesh.faceCorners.get(cid)!;
-      const uv = corner.uvs.get(layerId) ?? { x: 0, y: 0 };
-      corner.uvs.set(layerId, {
-        x: (uv.x % 0.25) + layerOffsetU,
-        y: (uv.y % 0.25) + layerOffsetV,
-      });
+      mesh.faceCorners.get(cid)!.vertexColour = { ...colour };
     }
     painted += 1;
   }
 
-  bumpPositions(mesh);
-  mesh.geometryVersion += 1;
-  mesh.dirty.uvs = true;
+  if (painted > 0) {
+    bumpPositions(mesh);
+    mesh.dirty.uvs = true;
+  }
   return painted;
 }

@@ -31,8 +31,8 @@ import {
   setActivePaintLayer,
 } from '@/core/image/PaintLayers';
 import { resolveActiveTexture } from '@/core/texture/resolveActiveTexture';
-import { boundsOfUvs, cornersForFaces, resolveUvLayerId, snapshotUvs } from '@/core/uv/UvEdit';
-import { markUvSeamsByAngle, clearAllUvSeams, type UvUnwrapMode } from '@/core/uv/UvOperations';
+import { boundsOfUvs, cornersForFaces, resolveUvLayerId, snapshotUvs, type UvAlignMode } from '@/core/uv/UvEdit';
+import { type UvUnwrapMode } from '@/core/uv/UvOperations';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';
 import type { UvDiagnostics } from '@/core/uv/UvDiagnostics';
 import type {
@@ -48,7 +48,21 @@ import {
   PIXEL_TOOL_LABELS,
   PIXEL_TOOLS,
   shiftShadeColor,
+  UNWRAP_MODE_ICONS,
 } from '@/app/uvEditor/uvEditorUtils';
+import { beginInteractivePushPull } from '@/app/PushPullHotkey';
+import {
+  ATLAS_TILE_SIZE_PRESETS,
+  clampAtlasStamp,
+  hideTilesetPopup,
+  nudgeTileDrawPlane,
+  rememberAtlasStamp,
+  setAtlasTileSize,
+  setTileDrawMode,
+  showTilesetPopup,
+  snapTileDrawToSelection,
+  toggleTilesetPopup,
+} from '@/app/tilesetWorkspace';
 
 export type UvEditorSidePanelProps = {
   session: EditorSession;
@@ -73,6 +87,12 @@ export type UvEditorSidePanelProps = {
   onRotateToEdge: () => void;
   onFlipFaces: () => void;
   onToggleSeams: (seam: boolean) => void;
+  onAutoSeams: () => void;
+  onClearSeams: () => void;
+  onAlign: (mode: UvAlignMode) => void;
+  onFlatten: (mode: UvAlignMode) => void;
+  onDistribute: (axis: 'u' | 'v') => void;
+  onPixelSnap: () => void;
   onFrame: () => void;
   onArmUv: (patch?: {
     uvEditMode?: UvEditMode;
@@ -82,6 +102,13 @@ export type UvEditorSidePanelProps = {
   }) => void;
   onRefresh?: () => void;
   embedded?: boolean;
+  onApplyAtlasTile?: () => void;
+  onCreateAtlasPlane?: () => void;
+  onCreateAtlasGrid?: () => void;
+  onPickAtlasTile?: () => void;
+  onToggleTileDraw?: () => void;
+  onEraseAtlasFaces?: () => void;
+  onFillAtlasConnected?: () => void;
 };
 
 const TABS: { id: UvPanelTab; label: string }[] = [
@@ -120,10 +147,23 @@ export function UvEditorSidePanel({
   onRotateToEdge,
   onFlipFaces,
   onToggleSeams,
+  onAutoSeams,
+  onClearSeams,
+  onAlign,
+  onFlatten,
+  onDistribute,
+  onPixelSnap,
   onFrame,
   onArmUv,
   onRefresh,
   embedded = false,
+  onApplyAtlasTile,
+  onCreateAtlasPlane,
+  onCreateAtlasGrid,
+  onPickAtlasTile,
+  onToggleTileDraw,
+  onEraseAtlasFaces,
+  onFillAtlasConnected,
 }: UvEditorSidePanelProps) {
   const tex = workspace.texture;
   const tab = tex.uvPanelTab;
@@ -153,11 +193,19 @@ export function UvEditorSidePanel({
   ]);
 
   const setTab = (next: UvPanelTab) => {
-    workspace.patchTexture({ uvPanelTab: next, ...(next === 'tiles' ? { atlasPanelOpen: true } : {}) });
+    workspace.patchTexture({
+      uvPanelTab: next,
+    });
+    if (next === 'tiles') {
+      showTilesetPopup(workspace);
+    } else {
+      hideTilesetPopup(workspace);
+    }
     if (next === 'paint') {
       workspace.patchTexture({
         uvPointerMode: false,
         paintMode3D: tex.paintMode3D,
+        atlasPaintMode: false,
         activeRightEditor: tex.activeRightEditor === 'uv' ? 'combined' : tex.activeRightEditor,
       });
     } else if (next === 'edit' || next === 'tiles') {
@@ -166,10 +214,12 @@ export function UvEditorSidePanel({
   };
 
   const setWorkspaceMode = (mode: RightEditorMode) => {
+    const nextTab = mode === 'pixel' ? 'paint' : mode === 'uv' ? 'edit' : tex.uvPanelTab;
     workspace.patchTexture({
       activeRightEditor: mode,
       uvPointerMode: mode === 'uv' ? true : mode === 'pixel' ? false : tex.uvPointerMode,
-      uvPanelTab: mode === 'pixel' ? 'paint' : mode === 'uv' ? 'edit' : tex.uvPanelTab,
+      uvPanelTab: nextTab,
+      ...(nextTab !== 'tiles' ? { atlasPanelOpen: false, atlasPaintMode: false } : {}),
     });
   };
 
@@ -273,7 +323,7 @@ export function UvEditorSidePanel({
       </header>
 
       <nav className="uv-panel-tabs" aria-label="Inspector tabs">
-        {TABS.map((t) => (
+        {(tab === 'tiles' ? TABS : TABS.filter((t) => t.id !== 'tiles')).map((t) => (
           <button
             key={t.id}
             type="button"
@@ -302,13 +352,21 @@ export function UvEditorSidePanel({
               >
                 Edit selected 3D face
               </button>
-              <label className="uv-check">
-                <input
-                  type="checkbox"
-                  checked={tex.uvSelectionSync !== 'off'}
-                  onChange={(event) => workspace.patchTexture({ uvSelectionSync: event.target.checked ? 'face' : 'off' })}
-                />
-                Follow 3D face selection
+              <label className="uv-field">
+                <span>3D → UV sync</span>
+                <select
+                  className="uv-select"
+                  value={tex.uvSelectionSync === 'component' ? 'face' : tex.uvSelectionSync}
+                  onChange={(event) =>
+                    workspace.patchTexture({
+                      uvSelectionSync: event.target.value as 'off' | 'face' | 'island',
+                    })
+                  }
+                >
+                  <option value="off">Off</option>
+                  <option value="face">Selected faces</option>
+                  <option value="island">Whole island</option>
+                </select>
               </label>
               <label className="uv-check">
                 <input
@@ -412,83 +470,43 @@ export function UvEditorSidePanel({
               <button
                 type="button"
                 className="tool primary uv-btn-block"
-                style={{ marginBottom: '0.4rem', fontWeight: 600 }}
-                title="Smart Conformal Unwrap: Auto seam sharp edges & pack islands"
+                style={{ marginBottom: '0.4rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                title="Planar unwrap per island, then pack into 0–1"
                 onClick={() => onUnwrap('smart')}
               >
-                ⚡ Smart Unwrap & Pack
+                <BlenderIcon name="mod_uvproject" size={14} />
+                Smart Unwrap & Pack
               </button>
               <div className="uv-btn-grid uv-btn-grid-3">
-                <button
-                  type="button"
-                  className="tool"
-                  title="Per-face Auto UV · keeps world size, then packs"
-                  onClick={() => onUnwrap('auto')}
-                >
-                  Auto
-                </button>
-                <button
-                  type="button"
-                  className="tool"
-                  title="Angle-based unwrap · keeps smooth faces together and splits sharp turns"
-                  onClick={() => onUnwrap('angle')}
-                >
-                  Angle
-                </button>
-                <button
-                  type="button"
-                  className="tool"
-                  title="Box UV · Minecraft-style cube net"
-                  onClick={() => onUnwrap('box')}
-                >
-                  Box
-                </button>
-                <button
-                  type="button"
-                  className="tool"
-                  title="Cubic · project by face normal onto ±X/Y/Z"
-                  onClick={() => onUnwrap('cubic')}
-                >
-                  Cubic
-                </button>
-                <button
-                  type="button"
-                  className="tool"
-                  title="Cylindrical unwrap around longest axis"
-                  onClick={() => onUnwrap('cylinder')}
-                >
-                  Cylinder
-                </button>
-                <button
-                  type="button"
-                  className="tool"
-                  title="Spherical lat/long unwrap"
-                  onClick={() => onUnwrap('sphere')}
-                >
-                  Sphere
-                </button>
-                <button
-                  type="button"
-                  className="tool"
-                  title="Project from active 3D view"
-                  onClick={() => onUnwrap('view')}
-                >
-                  View
-                </button>
-              </div>
-              <div className="uv-btn-grid uv-btn-grid-3">
-                <button
-                  type="button"
-                  className="tool"
-                  title="Simple planar project per face"
-                  onClick={() => onUnwrap('planar')}
-                >
-                  Planar
-                </button>
+                {(
+                  [
+                    ['auto', 'Auto', 'Per-face Auto UV · keeps world size, then packs'],
+                    ['angle', 'Angle', 'Angle-based unwrap · keeps smooth faces together and splits sharp turns'],
+                    ['box', 'Box', 'Box UV · Minecraft-style cube net'],
+                    ['cubic', 'Cubic', 'Cubic · project by face normal onto ±X/Y/Z'],
+                    ['cylinder', 'Cylinder', 'Cylindrical unwrap around longest axis'],
+                    ['sphere', 'Sphere', 'Spherical lat/long unwrap'],
+                    ['view', 'View', 'Project from active 3D view'],
+                    ['planar', 'Planar', 'Simple planar project per face'],
+                  ] as const
+                ).map(([mode, label, title]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className="tool"
+                    title={title}
+                    onClick={() => onUnwrap(mode)}
+                  >
+                    <BlenderIcon name={UNWRAP_MODE_ICONS[mode]} size={13} />
+                    {label}
+                  </button>
+                ))}
                 <button type="button" className="tool" onClick={onPack}>
+                  <BlenderIcon name="package" size={13} />
                   Pack
                 </button>
                 <button type="button" className="tool" disabled={!hasUvSelection} onClick={onNormalize}>
+                  <BlenderIcon name="zoom_selected" size={13} />
                   Fit
                 </button>
               </div>
@@ -497,37 +515,80 @@ export function UvEditorSidePanel({
                   type="button"
                   className="tool"
                   title="Auto-mark seams on sharp edges > 45°"
-                  onClick={() => {
-                    const objectId = session.selection.state.activeObjectId;
-                    const obj = objectId ? session.document.objects.get(objectId) : null;
-                    const mesh = obj?.meshId ? session.document.meshes.get(obj.meshId) : null;
-                    if (mesh) {
-                      markUvSeamsByAngle(mesh, 45);
-                      session.requestRedraw();
-                    }
-                  }}
+                  onClick={onAutoSeams}
                 >
+                  <BlenderIcon name="mod_edgesplit" size={13} />
                   Auto Seams (45°)
                 </button>
                 <button
                   type="button"
                   className="tool"
                   title="Remove all seams"
-                  onClick={() => {
-                    const objectId = session.selection.state.activeObjectId;
-                    const obj = objectId ? session.document.objects.get(objectId) : null;
-                    const mesh = obj?.meshId ? session.document.meshes.get(obj.meshId) : null;
-                    if (mesh) {
-                      clearAllUvSeams(mesh);
-                      session.requestRedraw();
-                    }
-                  }}
+                  onClick={onClearSeams}
                 >
+                  <BlenderIcon name="x" size={13} />
                   Clear All Seams
                 </button>
               </div>
               <p className="uv-hint">
-                Select faces in either view, then unwrap. Angle keeps smooth faces together and cuts at 66° turns; Box ≈ entity net. Smart Unwrap auto-detects seams on sharp edges and packs island charts cleanly.
+                Select faces in either view, then unwrap. Smart Unwrap projects each island and packs it — it is not a conformal LSCM solve. Angle cuts at 66°; Box ≈ entity net. Cylinder, Sphere, and View also pack so new charts do not sit on existing UVs.
+              </p>
+            </section>
+
+            <section className="uv-section">
+              <h3 className="uv-section-title">Align</h3>
+              <div className="uv-btn-grid uv-btn-grid-3">
+                <button type="button" className="tool" disabled={!hasUvSelection} onClick={() => onAlign('left')} title="Move selection to U=0">
+                  <BlenderIcon name="align_left" size={13} />
+                  Left
+                </button>
+                <button type="button" className="tool" disabled={!hasUvSelection} onClick={() => onAlign('center-u')} title="Center on U=0.5">
+                  <BlenderIcon name="align_center" size={13} />
+                  Center U
+                </button>
+                <button type="button" className="tool" disabled={!hasUvSelection} onClick={() => onAlign('right')} title="Move selection to U=1">
+                  <BlenderIcon name="align_right" size={13} />
+                  Right
+                </button>
+                <button type="button" className="tool" disabled={!hasUvSelection} onClick={() => onAlign('bottom')} title="Move selection to V=0">
+                  <BlenderIcon name="align_bottom" size={13} />
+                  Bottom
+                </button>
+                <button type="button" className="tool" disabled={!hasUvSelection} onClick={() => onAlign('center-v')} title="Center on V=0.5">
+                  <BlenderIcon name="align_middle" size={13} />
+                  Center V
+                </button>
+                <button type="button" className="tool" disabled={!hasUvSelection} onClick={() => onAlign('top')} title="Move selection to V=1">
+                  <BlenderIcon name="align_top" size={13} />
+                  Top
+                </button>
+              </div>
+              <div className="uv-btn-grid uv-btn-grid-2" style={{ marginTop: '0.35rem' }}>
+                <button type="button" className="tool" disabled={!hasUvSelection} onClick={() => onFlatten('left')} title="Flatten selected corners onto one U">
+                  Flatten U
+                </button>
+                <button type="button" className="tool" disabled={!hasUvSelection} onClick={() => onFlatten('bottom')} title="Flatten selected corners onto one V">
+                  Flatten V
+                </button>
+                <button type="button" className="tool" disabled={!hasUvSelection} onClick={() => onDistribute('u')} title="Space selected corners evenly in U">
+                  Distribute U
+                </button>
+                <button type="button" className="tool" disabled={!hasUvSelection} onClick={() => onDistribute('v')} title="Space selected corners evenly in V">
+                  Distribute V
+                </button>
+              </div>
+              <button
+                type="button"
+                className="tool uv-btn-block"
+                style={{ marginTop: '0.35rem', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                disabled={!hasUvSelection}
+                onClick={onPixelSnap}
+              >
+                <BlenderIcon name="snap_increment" size={13} />
+                Snap to pixels
+              </button>
+              <p className="uv-hint">
+                Align moves the island inside 0–1. Flatten pins corners to one axis. Distribute spaces them evenly.
               </p>
             </section>
 
@@ -643,7 +704,7 @@ export function UvEditorSidePanel({
                   title="Frame the selected UVs"
                   onClick={onFrame}
                 >
-                  <BlenderIcon name="view_selected" size={15} />
+                  <BlenderIcon name="zoom_selected" size={15} />
                   <span>Frame</span>
                 </button>
               </div>
@@ -709,6 +770,16 @@ export function UvEditorSidePanel({
                   <BlenderIcon name="mod_mirror" size={13} />
                   Y
                 </button>
+                <button
+                  type="button"
+                  className={`uv-chip${tex.pixelGridSnap ? ' is-active' : ''}`}
+                  aria-pressed={tex.pixelGridSnap}
+                  title="Snap paint picks to whole pixels"
+                  onClick={() => workspace.patchTexture({ pixelGridSnap: !tex.pixelGridSnap })}
+                >
+                  <BlenderIcon name="snap_on" size={13} />
+                  Snap
+                </button>
               </div>
               <p className="uv-hint">
                 {tex.pixelTool === 'fill'
@@ -719,7 +790,7 @@ export function UvEditorSidePanel({
                       ? 'Drag on the canvas · RMB uses background'
                       : tex.pixelTool === 'replace'
                         ? 'Click a colour to replace it · RMB uses background'
-                        : 'LMB foreground · RMB background · Alt picks 3D background'}
+                        : 'Left click paints. Right click uses background.'}
               </p>
               {(tex.pixelTool === 'fill' || tex.pixelTool === 'replace') && (
                 <div className="paint-fill-options">
@@ -747,9 +818,10 @@ export function UvEditorSidePanel({
               )}
             </section>
 
-            <section className="uv-section uv-paint-section">
-              <div className="uv-section-header-row">
-                <h3 className="uv-section-title">Colour & Shading</h3>
+            <section className="uv-section uv-paint-section uv-colour-section">
+              <h3 className="uv-section-title">Colour</h3>
+              <label className="uv-colour-field">
+                <span>Palette</span>
                 <select
                   className="uv-palette-select"
                   value={activePalette.id}
@@ -767,12 +839,12 @@ export function UvEditorSidePanel({
                     </optgroup>
                   ))}
                 </select>
-              </div>
+              </label>
 
-              <div className="uv-paint-colors">
-                <label className="uv-paint-swatch" title="Foreground colour">
+              <div className="uv-colour-slots">
+                <label className="uv-colour-slot" title="Foreground colour">
                   <span
-                    className="uv-paint-swatch-chip"
+                    className="uv-colour-slot-chip"
                     style={{ backgroundColor: rgbaToHex(tex.foreground) }}
                   />
                   <input
@@ -784,70 +856,14 @@ export function UvEditorSidePanel({
                       })
                     }
                   />
-                  <span className="uv-paint-swatch-meta">
-                    <strong>FG</strong>
-                    <em>{rgbaToHex(tex.foreground)}</em>
+                  <span className="uv-colour-slot-meta">
+                    <strong>Foreground</strong>
+                    <em>{rgbaToHex(tex.foreground).toUpperCase()}</em>
                   </span>
                 </label>
-                <div className="uv-paint-color-actions">
-                  <button
-                    type="button"
-                    className="uv-icon-btn"
-                    title="Swap foreground and background (X)"
-                    aria-label="Swap colours"
-                    onClick={() =>
-                      workspace.patchTexture({
-                        foreground: tex.background,
-                        background: tex.foreground,
-                      })
-                    }
-                  >
-                    <BlenderIcon name="arrow_leftright" size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    className="uv-icon-btn"
-                    title="Shade darker / cooler ([)"
-                    aria-label="Shade darker"
-                    onClick={() =>
-                      workspace.patchTexture({
-                        foreground: shiftShadeColor(tex.foreground, 'darker'),
-                      })
-                    }
-                  >
-                    <BlenderIcon name="sort_down" size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    className="uv-icon-btn"
-                    title="Shade lighter / warmer (])"
-                    aria-label="Shade lighter"
-                    onClick={() =>
-                      workspace.patchTexture({
-                        foreground: shiftShadeColor(tex.foreground, 'lighter'),
-                      })
-                    }
-                  >
-                    <BlenderIcon name="sort_up" size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    className="uv-icon-btn"
-                    title="Reset to black and white (D)"
-                    aria-label="Reset colours"
-                    onClick={() =>
-                      workspace.patchTexture({
-                        foreground: [0, 0, 0, 255],
-                        background: [255, 255, 255, 255],
-                      })
-                    }
-                  >
-                    <BlenderIcon name="file_refresh" size={14} />
-                  </button>
-                </div>
-                <label className="uv-paint-swatch" title="Background colour">
+                <label className="uv-colour-slot" title="Background colour">
                   <span
-                    className="uv-paint-swatch-chip"
+                    className="uv-colour-slot-chip"
                     style={{
                       backgroundColor: rgbaToHex([tex.background[0], tex.background[1], tex.background[2], 255]),
                     }}
@@ -861,11 +877,68 @@ export function UvEditorSidePanel({
                       })
                     }
                   />
-                  <span className="uv-paint-swatch-meta">
-                    <strong>BG</strong>
-                    <em>{rgbaToHex([tex.background[0], tex.background[1], tex.background[2], 255])}</em>
+                  <span className="uv-colour-slot-meta">
+                    <strong>Background</strong>
+                    <em>{rgbaToHex([tex.background[0], tex.background[1], tex.background[2], 255]).toUpperCase()}</em>
                   </span>
                 </label>
+              </div>
+
+              <div className="uv-colour-actions" role="group" aria-label="Colour actions">
+                <button
+                  type="button"
+                  className="uv-icon-btn"
+                  title="Swap foreground and background (X)"
+                  aria-label="Swap colours"
+                  onClick={() =>
+                    workspace.patchTexture({
+                      foreground: tex.background,
+                      background: tex.foreground,
+                    })
+                  }
+                >
+                  <BlenderIcon name="arrow_leftright" size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="uv-icon-btn"
+                  title="Shade darker ([)"
+                  aria-label="Shade darker"
+                  onClick={() =>
+                    workspace.patchTexture({
+                      foreground: shiftShadeColor(tex.foreground, 'darker'),
+                    })
+                  }
+                >
+                  <BlenderIcon name="sort_down" size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="uv-icon-btn"
+                  title="Shade lighter (])"
+                  aria-label="Shade lighter"
+                  onClick={() =>
+                    workspace.patchTexture({
+                      foreground: shiftShadeColor(tex.foreground, 'lighter'),
+                    })
+                  }
+                >
+                  <BlenderIcon name="sort_up" size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="uv-icon-btn"
+                  title="Reset to black and white (D)"
+                  aria-label="Reset colours"
+                  onClick={() =>
+                    workspace.patchTexture({
+                      foreground: [0, 0, 0, 255],
+                      background: [255, 255, 255, 255],
+                    })
+                  }
+                >
+                  <BlenderIcon name="file_refresh" size={14} />
+                </button>
               </div>
 
               <div className="uv-palette-grid" role="group" aria-label="Colour palette">
@@ -881,7 +954,7 @@ export function UvEditorSidePanel({
                       type="button"
                       className={`uv-palette-cell${isFg ? ' is-fg' : ''}${isBg ? ' is-bg' : ''}`}
                       style={{ backgroundColor: colour }}
-                      title={`${colour} · LMB foreground · RMB background${activePalette.custom ? ' · Shift+click remove' : ''}`}
+                      title={`${colour.toUpperCase()} · LMB foreground · RMB background${activePalette.custom ? ' · Shift+click remove' : ''}`}
                       aria-label={`${colour} (LMB: FG, RMB: BG)`}
                       onClick={(event) => {
                         if (event.shiftKey && activePalette.custom && activePalette.colors.length > 1) {
@@ -905,10 +978,11 @@ export function UvEditorSidePanel({
                   );
                 })}
               </div>
+              <p className="uv-hint">Left click sets foreground. Right click sets background.</p>
               <div className="uv-palette-actions">
                 <button
                   type="button"
-                  className="tool"
+                  className="uv-colour-btn"
                   onClick={() => {
                     const created = createCustomPalette(
                       `${activePalette.name} copy`,
@@ -920,7 +994,8 @@ export function UvEditorSidePanel({
                     });
                   }}
                 >
-                  New
+                  <BlenderIcon name="add" size={12} />
+                  New palette
                 </button>
                 {activePalette.custom && (
                   <>
@@ -934,7 +1009,7 @@ export function UvEditorSidePanel({
                     />
                     <button
                       type="button"
-                      className="tool"
+                      className="uv-colour-btn"
                       title="Add foreground colour"
                       onClick={() => {
                         const hex = clampPaletteColor(rgbaToHex(tex.foreground));
@@ -945,11 +1020,12 @@ export function UvEditorSidePanel({
                         });
                       }}
                     >
-                      Add FG
+                      <BlenderIcon name="plus" size={12} />
+                      Add
                     </button>
                     <button
                       type="button"
-                      className="tool"
+                      className="uv-colour-btn"
                       onClick={() => {
                         const remaining = tex.customPalettes.filter((palette) => palette.id !== activePalette.id);
                         workspace.patchTexture({
@@ -958,13 +1034,14 @@ export function UvEditorSidePanel({
                         });
                       }}
                     >
+                      <BlenderIcon name="x" size={12} />
                       Delete
                     </button>
                   </>
                 )}
               </div>
               {activePalette.custom && (
-                <p className="uv-hint">Add FG to grow the palette. Shift-click a swatch to remove it.</p>
+                <p className="uv-hint">Add the current foreground, or Shift-click a swatch to remove it.</p>
               )}
             </section>
 
@@ -1288,13 +1365,43 @@ export function UvEditorSidePanel({
         )}
 
         {tab === 'tiles' && (
-          <section className="uv-section tile-panel-launcher">
-            <h3 className="uv-section-title">Tile Palette</h3>
-            <p className="uv-hint">The atlas board and 3D tile tools now open in a movable window so they stay visible while you work.</p>
-            <button type="button" className="tool primary uv-btn-block" onClick={() => workspace.patchTexture({ atlasPanelOpen: true, atlasPanelMinimized: false })}>
-              {tex.atlasPanelOpen ? 'Show Tile Palette' : 'Open Tile Palette'}
-            </button>
-          </section>
+          <>
+            <section className="uv-section tile-panel-launcher">
+              <h3 className="uv-section-title">Tileset</h3>
+              <p className="uv-hint">
+                {session.tools.getActive()?.id === 'tile-draw'
+                  ? 'Build is active in the 3D view. Pick a tile in the palette, then draw on the work plane.'
+                  : tex.atlasPaintMode
+                    ? 'Paint is active. Click faces in the 3D view to stamp the selected tile.'
+                    : 'Build draws tiles on a work plane. Paint stamps tiles onto existing faces.'}
+              </p>
+              <div className="uv-btn-grid">
+                <button
+                  type="button"
+                  className={`tool${tex.atlasPanelOpen ? ' is-active' : ''}`}
+                  onClick={() => toggleTilesetPopup(workspace)}
+                  aria-pressed={tex.atlasPanelOpen}
+                >
+                  {tex.atlasPanelOpen ? 'Hide palette' : 'Show palette'}
+                </button>
+              </div>
+            </section>
+            {onApplyAtlasTile && onCreateAtlasPlane && onCreateAtlasGrid && onPickAtlasTile && onToggleTileDraw && onEraseAtlasFaces && onFillAtlasConnected && (
+              <AtlasTilePanel
+                session={session}
+                workspace={workspace}
+                hasUvSelection={hasUvSelection}
+                onApply={onApplyAtlasTile}
+                onCreatePlane={onCreateAtlasPlane}
+                onCreateGrid={onCreateAtlasGrid}
+                onPickTile={onPickAtlasTile}
+                onToggleDraw={onToggleTileDraw}
+                onEraseFaces={onEraseAtlasFaces}
+                onFillConnected={onFillAtlasConnected}
+                variant={tex.atlasPanelOpen ? 'settings' : 'full'}
+              />
+            )}
+          </>
         )}
 
         {tab === 'material' && <MaterialEditor session={session} workspace={workspace} compact />}
@@ -1351,6 +1458,14 @@ export function UvEditorSidePanel({
                 />
                 Snap UV moves to pixels
               </label>
+              <label className="uv-check">
+                <input
+                  type="checkbox"
+                  checked={tex.pixelGridSnap}
+                  onChange={(e) => workspace.patchTexture({ pixelGridSnap: e.target.checked })}
+                />
+                Snap paint to pixels
+              </label>
               <label className="uv-field">
                 <span>UV diagnostics</span>
                 <select
@@ -1402,6 +1517,7 @@ export type AtlasTilePanelProps = {
   onToggleDraw: () => void;
   onEraseFaces: () => void;
   onFillConnected: () => void;
+  variant?: 'full' | 'palette' | 'settings';
 };
 
 export function AtlasTilePanel({
@@ -1415,15 +1531,23 @@ export function AtlasTilePanel({
   onToggleDraw,
   onEraseFaces,
   onFillConnected,
+  variant = 'full',
 }: AtlasTilePanelProps) {
+  const compact = variant === 'palette';
+  const settingsOnly = variant === 'settings';
+  const showNavigator = !settingsOnly;
+  const showInspectorTools = !compact;
+  const tex = workspace.texture;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const atlasViewportRef = useRef<HTMLDivElement>(null);
   const atlasPan = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
   const [atlasView, setAtlasView] = useState({ zoom: 1, panX: 8, panY: 8 });
-  const [atlasPanMode, setAtlasPanMode] = useState(false);
+  const atlasPanMode = tex.atlasNavigatorPan;
+  const [hoverTile, setHoverTile] = useState<{ x: number; y: number } | null>(null);
+  const stampDrag = useRef<{ x: number; y: number } | null>(null);
+  const atlasPointer = useRef<{ pointerId: number; startX: number; startY: number; tile: { x: number; y: number } | null; panning: boolean; stamping: boolean } | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [importNote, setImportNote] = useState<string | null>(null);
-  const tex = workspace.texture;
   const image = tex.activeImageId ? session.document.images.get(tex.activeImageId) : null;
   const tileWidth = Math.min(image?.width ?? tex.atlasTileWidth, tex.atlasTileWidth);
   const tileHeight = Math.min(image?.height ?? tex.atlasTileHeight, tex.atlasTileHeight);
@@ -1453,6 +1577,7 @@ export function AtlasTilePanel({
       atlasTileX: preset.offsetX,
       atlasTileY: preset.offsetY,
     });
+    if (image) clampAtlasStamp(workspace, image);
   };
   const presetFromCurrent = (id: string, name: string) => ({
     id,
@@ -1483,15 +1608,20 @@ export function AtlasTilePanel({
     for (let y = offsetY; y <= image.height; y += stepY) {
       context.beginPath(); context.moveTo(0, y); context.lineTo(image.width, y); context.stroke();
     }
-    context.strokeStyle = '#ff9b38';
-    context.lineWidth = Math.max(1, 2 / Math.max(1, image.width / 256));
+    if (hoverTile) {
+      context.strokeStyle = 'rgba(220, 228, 236, 0.85)';
+      context.lineWidth = Math.max(0.75, 1 / Math.max(1, image.width / 256));
+      context.strokeRect(hoverTile.x + context.lineWidth / 2, hoverTile.y + context.lineWidth / 2, tileWidth - context.lineWidth, tileHeight - context.lineWidth);
+    }
+    context.strokeStyle = '#2787e8';
+    context.lineWidth = Math.max(2, 2 / Math.max(1, image.width / 256));
     context.strokeRect(
       tex.atlasTileX + context.lineWidth / 2,
       tex.atlasTileY + context.lineWidth / 2,
       tileWidth * tex.atlasSelectionColumns + marginX * (tex.atlasSelectionColumns - 1) - context.lineWidth,
       tileHeight * tex.atlasSelectionRows + marginY * (tex.atlasSelectionRows - 1) - context.lineWidth,
     );
-  }, [image, marginX, marginY, offsetX, offsetY, stepX, stepY, tex.atlasSelectionColumns, tex.atlasSelectionRows, tex.atlasTileX, tex.atlasTileY, tileHeight, tileWidth]);
+  }, [hoverTile, image, marginX, marginY, offsetX, offsetY, stepX, stepY, tex.atlasSelectionColumns, tex.atlasSelectionRows, tex.atlasTileX, tex.atlasTileY, tileHeight, tileWidth]);
 
   const fitAtlas = () => {
     const viewport = atlasViewportRef.current;
@@ -1503,6 +1633,10 @@ export function AtlasTilePanel({
       panY: (viewport.clientHeight - image.height * zoom) / 2,
     });
   };
+
+  useEffect(() => {
+    if (image) clampAtlasStamp(workspace, image);
+  }, [image?.id, image?.width, image?.height, tex.atlasTileWidth, tex.atlasTileHeight, tex.atlasMarginX, tex.atlasMarginY, tex.atlasOffsetX, tex.atlasOffsetY, workspace]);
 
   useEffect(() => {
     if (!image) return;
@@ -1554,18 +1688,38 @@ export function AtlasTilePanel({
     return () => viewport.removeEventListener('wheel', consumeWheel);
   }, [image?.id]);
 
-  const selectTile = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!image) return;
+  const tileAtPointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!image) return null;
     const rect = event.currentTarget.getBoundingClientRect();
     const px = (event.clientX - rect.left - atlasView.panX) / atlasView.zoom;
     const py = (event.clientY - rect.top - atlasView.panY) / atlasView.zoom;
-    if (px < 0 || py < 0 || px >= image.width || py >= image.height) return;
+    if (px < 0 || py < 0 || px >= image.width || py >= image.height) return null;
+    return {
+      x: Math.min(image.width - tileWidth, Math.max(offsetX, offsetX + Math.floor(Math.max(0, px - offsetX) / stepX) * stepX)),
+      y: Math.min(image.height - tileHeight, Math.max(offsetY, offsetY + Math.floor(Math.max(0, py - offsetY) / stepY) * stepY)),
+    };
+  };
+
+  const applyStampRect = (start: { x: number; y: number }, end: { x: number; y: number }) => {
+    const minX = Math.min(start.x, end.x);
+    const minY = Math.min(start.y, end.y);
+    const maxX = Math.max(start.x, end.x);
+    const maxY = Math.max(start.y, end.y);
     workspace.patchTexture({
-      atlasTileX: Math.min(image.width - tileWidth, Math.max(offsetX, offsetX + Math.floor(Math.max(0, px - offsetX) / stepX) * stepX)),
-      atlasTileY: Math.min(image.height - tileHeight, Math.max(offsetY, offsetY + Math.floor(Math.max(0, py - offsetY) / stepY) * stepY)),
+      atlasTileX: minX,
+      atlasTileY: minY,
+      atlasSelectionColumns: Math.max(1, Math.round((maxX - minX) / Math.max(1, stepX)) + 1),
+      atlasSelectionRows: Math.max(1, Math.round((maxY - minY) / Math.max(1, stepY)) + 1),
       uvPanelTab: 'tiles',
       uvPointerMode: true,
     });
+  };
+
+  const selectTile = (event: React.PointerEvent<HTMLDivElement>) => {
+    const tile = tileAtPointer(event);
+    if (!tile) return;
+    applyStampRect(tile, tile);
+    rememberAtlasStamp(workspace);
     event.currentTarget.focus();
   };
 
@@ -1633,10 +1787,239 @@ export function AtlasTilePanel({
     }
   };
 
+  const patchTileSize = (width: number, height = width) => {
+    setAtlasTileSize(workspace, image, width, height);
+  };
+
+  const tileSizeControls = (
+    <>
+      <div className="uv-btn-grid uv-btn-grid-4" role="group" aria-label="Tile size presets">
+        {ATLAS_TILE_SIZE_PRESETS.map((size) => (
+          <button
+            key={size}
+            type="button"
+            className={`tool${tex.atlasTileWidth === size && tex.atlasTileHeight === size ? ' is-active' : ''}`}
+            onClick={() => patchTileSize(size)}
+          >
+            {size}
+          </button>
+        ))}
+      </div>
+      <div className="uv-btn-grid uv-btn-grid-2">
+        <label className="uv-field">
+          <span>Tile W</span>
+          <input
+            className="uv-text"
+            type="number"
+            min={1}
+            max={image?.width ?? 4096}
+            value={tex.atlasTileWidth}
+            onChange={(event) => patchTileSize(Number(event.target.value), tex.atlasTileHeight)}
+          />
+        </label>
+        <label className="uv-field">
+          <span>Tile H</span>
+          <input
+            className="uv-text"
+            type="number"
+            min={1}
+            max={image?.height ?? 4096}
+            value={tex.atlasTileHeight}
+            onChange={(event) => patchTileSize(tex.atlasTileWidth, Number(event.target.value))}
+          />
+        </label>
+      </div>
+    </>
+  );
+
   return (
     <>
+      {showNavigator && (
       <section className="uv-section">
-        <h3 className="uv-section-title">Sprite Atlas</h3>
+        <h3 className="uv-section-title">{compact ? 'Tiles' : 'Sprite Atlas'}</h3>
+        <button type="button" className="tool primary uv-btn-block" disabled={importBusy} onClick={chooseAtlasImage}>
+          {importBusy ? 'Importing…' : image ? 'Replace atlas image…' : 'Import atlas image…'}
+        </button>
+        {importNote && <p className="uv-meta">{importNote}</p>}
+        {image ? (
+          <div className="atlas-navigator">
+            <div className="atlas-navigator-toolbar">
+              <button type="button" className={`tool${atlasPanMode ? ' is-active' : ''}`} onClick={() => workspace.patchTexture({ atlasNavigatorPan: !tex.atlasNavigatorPan })}>Pan</button>
+              <button type="button" className="tool" onClick={() => zoomAtlasCentre(1 / 1.25)}>−</button>
+              <span>{Math.round(atlasView.zoom * 100)}%</span>
+              <button type="button" className="tool" onClick={() => zoomAtlasCentre(1.25)}>+</button>
+              <button type="button" className="tool" onClick={() => setAtlasView((view) => ({ zoom: 1, panX: view.panX, panY: view.panY }))}>1:1</button>
+              <button type="button" className="tool" onClick={fitAtlas}>Fit</button>
+            </div>
+            <div
+              ref={atlasViewportRef}
+              className={`atlas-viewport${atlasPanMode ? ' is-panning' : ''}`}
+              tabIndex={0}
+              onPointerDown={(event) => {
+                const wantsPan = event.button === 1 || (event.button === 0 && (event.altKey || atlasPanMode));
+                const tile = tileAtPointer(event);
+                event.currentTarget.setPointerCapture(event.pointerId);
+                if (wantsPan) {
+                  event.preventDefault();
+                  atlasPan.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: atlasView.panX, panY: atlasView.panY };
+                  atlasPointer.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, tile, panning: true, stamping: false };
+                  return;
+                }
+                if (event.button !== 0) return;
+                atlasPointer.current = {
+                  pointerId: event.pointerId,
+                  startX: event.clientX,
+                  startY: event.clientY,
+                  tile,
+                  panning: false,
+                  stamping: event.shiftKey,
+                };
+                if (event.shiftKey && tile) {
+                  stampDrag.current = tile;
+                  applyStampRect(tile, tile);
+                }
+              }}
+              onPointerMove={(event) => {
+                const hovered = tileAtPointer(event);
+                setHoverTile(hovered);
+                const pan = atlasPan.current;
+                if (pan && pan.pointerId === event.pointerId) {
+                  setAtlasView((view) => ({ ...view, panX: pan.panX + event.clientX - pan.startX, panY: pan.panY + event.clientY - pan.startY }));
+                  return;
+                }
+                const pointer = atlasPointer.current;
+                if (!pointer || pointer.pointerId !== event.pointerId || !(event.buttons & 1)) return;
+                const moved = Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) > 4;
+                if (pointer.stamping) {
+                  if (pointer.tile && hovered) applyStampRect(pointer.tile, hovered);
+                  return;
+                }
+                if (!pointer.panning && moved) {
+                  pointer.panning = true;
+                  atlasPan.current = { pointerId: event.pointerId, startX: pointer.startX, startY: pointer.startY, panX: atlasView.panX, panY: atlasView.panY };
+                  setAtlasView((view) => ({ ...view, panX: view.panX + event.clientX - pointer.startX, panY: view.panY + event.clientY - pointer.startY }));
+                  return;
+                }
+              }}
+              onPointerUp={(event) => {
+                const pointer = atlasPointer.current;
+                if (pointer && pointer.pointerId === event.pointerId && !pointer.panning && !pointer.stamping) {
+                  selectTile(event);
+                }
+                if (pointer?.stamping) rememberAtlasStamp(workspace);
+                if (atlasPan.current?.pointerId === event.pointerId) atlasPan.current = null;
+                atlasPointer.current = null;
+                stampDrag.current = null;
+              }}
+              onPointerLeave={() => { setHoverTile(null); }}
+              onPointerCancel={() => { atlasPan.current = null; atlasPointer.current = null; stampDrag.current = null; }}
+              onDoubleClick={(event) => { if (!atlasPanMode && !event.altKey) onApply(); }}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowLeft') moveTile(-1, 0);
+              else if (event.key === 'ArrowRight') moveTile(1, 0);
+              else if (event.key === 'ArrowUp') moveTile(0, -1);
+              else if (event.key === 'ArrowDown') moveTile(0, 1);
+              else if (event.key === 'Enter') onApply();
+              else if (event.key === '0') fitAtlas();
+              else if (event.key === '+' || event.key === '=') zoomAtlasCentre(1.25);
+              else if (event.key === '-') zoomAtlasCentre(1 / 1.25);
+              else return;
+              event.preventDefault();
+            }}
+              title="Drag pan · click tile · Shift+drag stamp · wheel zoom · MMB / Alt+drag pan"
+            >
+              <canvas
+                ref={canvasRef}
+                className="atlas-tile-canvas"
+                style={{ transform: `translate(${atlasView.panX}px, ${atlasView.panY}px) scale(${atlasView.zoom})` }}
+              />
+            </div>
+          </div>
+        ) : <p className="uv-meta">Import an image to use as the sprite atlas, or add a texture via the Material tab.</p>}
+        <p className="uv-meta">
+          {image ? `${columns} × ${rows} tiles · selected ${Math.floor((tex.atlasTileX - offsetX) / stepX) + 1}, ${Math.floor((tex.atlasTileY - offsetY) / stepY) + 1}${compact ? '' : ' · wheel zoom · MMB / Alt drag pan'}` : 'No atlas'}
+        </p>
+        {image && (
+          <div className="tile-stamp-preview" aria-label="Selected tile">
+            <canvas
+              className="tile-stamp-preview-canvas"
+              width={Math.max(1, tileWidth * tex.atlasSelectionColumns)}
+              height={Math.max(1, tileHeight * tex.atlasSelectionRows)}
+              ref={(node) => {
+                if (!node || !image) return;
+                const context = node.getContext('2d');
+                if (!context) return;
+                context.imageSmoothingEnabled = false;
+                context.clearRect(0, 0, node.width, node.height);
+                context.putImageData(
+                  new ImageData(new Uint8ClampedArray(image.pixels), image.width, image.height),
+                  -tex.atlasTileX,
+                  -tex.atlasTileY,
+                );
+              }}
+            />
+            <div>
+              <strong>Selected</strong>
+              <span>
+                Tile {Math.floor((tex.atlasTileX - offsetX) / stepX)}, {Math.floor((tex.atlasTileY - offsetY) / stepY)}
+              </span>
+              <span>
+                {tex.atlasSelectionColumns > 1 || tex.atlasSelectionRows > 1
+                  ? `${tex.atlasSelectionColumns} × ${tex.atlasSelectionRows} tiles · ${tileWidth * tex.atlasSelectionColumns} × ${tileHeight * tex.atlasSelectionRows} px`
+                  : `${tileWidth} × ${tileHeight}`}
+              </span>
+            </div>
+          </div>
+        )}
+        {tex.atlasRecentTiles.length > 0 && (
+          <div className="tile-recent" aria-label="Recent tiles">
+            <span>Recent</span>
+            <div>
+              {tex.atlasRecentTiles.map((tile) => (
+                <button
+                  key={`${tile.x}:${tile.y}:${tile.columns}x${tile.rows}`}
+                  type="button"
+                  className={`tile-recent-btn${tile.x === tex.atlasTileX && tile.y === tex.atlasTileY ? ' is-active' : ''}`}
+                  title={`${tile.x}, ${tile.y}`}
+                  onClick={() => workspace.patchTexture({
+                    atlasTileX: tile.x,
+                    atlasTileY: tile.y,
+                    atlasSelectionColumns: tile.columns,
+                    atlasSelectionRows: tile.rows,
+                  })}
+                >
+                  {tile.columns}×{tile.rows}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+      )}
+      {compact && (
+        <section className="uv-section tile-palette-tools">
+          {tileSizeControls}
+          {image && (
+            <button type="button" className="tool uv-btn-block" onClick={() => patchTileSize(image.width, image.height)}>
+              One tile · {image.width}×{image.height}
+            </button>
+          )}
+          <div className="uv-btn-grid uv-btn-grid-2">
+            <label className="uv-field"><span>Margin X</span><input className="uv-text" type="number" min={0} value={tex.atlasMarginX} onChange={(event) => workspace.patchTexture({ atlasMarginX: Math.max(0, Number(event.target.value)) })} /></label>
+            <label className="uv-field"><span>Margin Y</span><input className="uv-text" type="number" min={0} value={tex.atlasMarginY} onChange={(event) => workspace.patchTexture({ atlasMarginY: Math.max(0, Number(event.target.value)) })} /></label>
+          </div>
+          <div className="uv-btn-grid uv-btn-grid-3">
+            <button type="button" className="tool" onClick={() => workspace.patchTexture({ atlasQuarterTurns: ((tex.atlasQuarterTurns + 3) % 4) as 0 | 1 | 2 | 3 })}>Rotate</button>
+            <button type="button" className={`tool${tex.atlasFlipU ? ' is-active' : ''}`} onClick={() => workspace.patchTexture({ atlasFlipU: !tex.atlasFlipU })}>Flip U</button>
+            <button type="button" className={`tool${tex.atlasFlipV ? ' is-active' : ''}`} onClick={() => workspace.patchTexture({ atlasFlipV: !tex.atlasFlipV })}>Flip V</button>
+          </div>
+          <label className="uv-field"><span>Layer</span><select className="uv-select" value={tex.atlasTileLayer} onChange={(event) => workspace.patchTexture({ atlasTileLayer: event.target.value as 'Geometry' | 'Decoration' | 'Collision' | 'Decal' })}><option value="Geometry">Geometry</option><option value="Decoration">Decoration</option><option value="Decal">Decal</option><option value="Collision">Collision</option></select></label>
+          <label className="uv-check"><input type="checkbox" checked={tex.atlasAutoTile} onChange={(event) => workspace.patchTexture({ atlasAutoTile: event.target.checked })} />Autotile 4 × 4</label>
+        </section>
+      )}
+      {showInspectorTools && <>
+      <section className="uv-section">
+        <h3 className="uv-section-title">Tile Grid</h3>
         <label className="uv-field">
           <span>Grid preset</span>
           <select className="uv-select" value={tex.activeAtlasGridPresetId} onChange={(event) => applyGridPreset(event.target.value)}>
@@ -1670,76 +2053,12 @@ export function AtlasTilePanel({
             applyGridPreset(remaining[0]!.id);
           }}>Delete</button>
         </div>
-        <button type="button" className="tool primary uv-btn-block" disabled={importBusy} onClick={chooseAtlasImage}>
-          {importBusy ? 'Importing…' : image ? 'Replace atlas image…' : 'Import atlas image…'}
-        </button>
-        {importNote && <p className="uv-meta">{importNote}</p>}
-        {image ? (
-          <div className="atlas-navigator">
-            <div className="atlas-navigator-toolbar">
-              <button type="button" className={`tool${atlasPanMode ? ' is-active' : ''}`} onClick={() => setAtlasPanMode((value) => !value)}>Pan</button>
-              <button type="button" className="tool" onClick={() => zoomAtlasCentre(1 / 1.25)}>−</button>
-              <span>{Math.round(atlasView.zoom * 100)}%</span>
-              <button type="button" className="tool" onClick={() => zoomAtlasCentre(1.25)}>+</button>
-              <button type="button" className="tool" onClick={() => setAtlasView((view) => ({ zoom: 1, panX: view.panX, panY: view.panY }))}>1:1</button>
-              <button type="button" className="tool" onClick={fitAtlas}>Fit</button>
-            </div>
-            <div
-              ref={atlasViewportRef}
-              className={`atlas-viewport${atlasPanMode ? ' is-panning' : ''}`}
-              tabIndex={0}
-              onPointerDown={(event) => {
-                const wantsPan = event.button === 1 || (event.button === 0 && (event.altKey || atlasPanMode));
-                if (!wantsPan) {
-                  if (event.button === 0) selectTile(event);
-                  return;
-                }
-                event.preventDefault();
-                event.currentTarget.setPointerCapture(event.pointerId);
-                atlasPan.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: atlasView.panX, panY: atlasView.panY };
-              }}
-              onPointerMove={(event) => {
-                const pan = atlasPan.current;
-                if (!pan || pan.pointerId !== event.pointerId) return;
-                setAtlasView((view) => ({ ...view, panX: pan.panX + event.clientX - pan.startX, panY: pan.panY + event.clientY - pan.startY }));
-              }}
-              onPointerUp={(event) => {
-                if (atlasPan.current?.pointerId === event.pointerId) atlasPan.current = null;
-              }}
-              onPointerCancel={() => { atlasPan.current = null; }}
-              onDoubleClick={(event) => { if (!atlasPanMode && !event.altKey) onApply(); }}
-            onKeyDown={(event) => {
-              if (event.key === 'ArrowLeft') moveTile(-1, 0);
-              else if (event.key === 'ArrowRight') moveTile(1, 0);
-              else if (event.key === 'ArrowUp') moveTile(0, -1);
-              else if (event.key === 'ArrowDown') moveTile(0, 1);
-              else if (event.key === 'Enter') onApply();
-              else if (event.key === '0') fitAtlas();
-              else if (event.key === '+' || event.key === '=') zoomAtlasCentre(1.25);
-              else if (event.key === '-') zoomAtlasCentre(1 / 1.25);
-              else return;
-              event.preventDefault();
-            }}
-              title="Wheel zoom · MMB / Alt+drag pan · click tile · double-click apply"
-            >
-              <canvas
-                ref={canvasRef}
-                className="atlas-tile-canvas"
-                style={{ transform: `translate(${atlasView.panX}px, ${atlasView.panY}px) scale(${atlasView.zoom})` }}
-              />
-            </div>
-          </div>
-        ) : <p className="uv-meta">Import an image to use as the sprite atlas, or add a texture via the Material tab.</p>}
-        <p className="uv-meta">
-          {image ? `${columns} × ${rows} tiles · selected ${Math.floor((tex.atlasTileX - offsetX) / stepX) + 1}, ${Math.floor((tex.atlasTileY - offsetY) / stepY) + 1} · wheel zoom · MMB / Alt drag pan` : 'No atlas'}
-        </p>
-      </section>
-      <section className="uv-section">
-        <h3 className="uv-section-title">Tile Grid</h3>
-        <div className="uv-btn-grid uv-btn-grid-2">
-          <label className="uv-field"><span>Tile width</span><input className="uv-text" type="number" min={1} max={image?.width ?? 4096} value={tex.atlasTileWidth} onChange={(event) => workspace.patchTexture({ atlasTileWidth: Math.min(image?.width ?? 4096, Math.max(1, Math.round(Number(event.target.value)))) })} /></label>
-          <label className="uv-field"><span>Tile height</span><input className="uv-text" type="number" min={1} max={image?.height ?? 4096} value={tex.atlasTileHeight} onChange={(event) => workspace.patchTexture({ atlasTileHeight: Math.min(image?.height ?? 4096, Math.max(1, Math.round(Number(event.target.value)))) })} /></label>
-        </div>
+        {tileSizeControls}
+        {image && (
+          <button type="button" className="tool uv-btn-block" onClick={() => patchTileSize(image.width, image.height)}>
+            One tile · {image.width}×{image.height}
+          </button>
+        )}
         <div className="uv-btn-grid uv-btn-grid-2">
           <label className="uv-field"><span>Selection wide</span><input className="uv-text" type="number" min={1} max={32} value={tex.atlasSelectionColumns} onChange={(event) => workspace.patchTexture({ atlasSelectionColumns: Math.max(1, Math.round(Number(event.target.value))) })} /></label>
           <label className="uv-field"><span>Selection high</span><input className="uv-text" type="number" min={1} max={32} value={tex.atlasSelectionRows} onChange={(event) => workspace.patchTexture({ atlasSelectionRows: Math.max(1, Math.round(Number(event.target.value))) })} /></label>
@@ -1771,11 +2090,22 @@ export function AtlasTilePanel({
       <section className="uv-section">
         <h3 className="uv-section-title">Tile Geometry</h3>
         <div className="uv-btn-grid uv-btn-grid-3">
-          {(['paint', 'erase', 'replace', 'pick', 'fill'] as const).map((mode) => <button key={mode} type="button" className={`tool${tex.atlasDrawMode === mode ? ' is-active' : ''}`} onClick={() => workspace.patchTexture({ atlasDrawMode: mode })}>{mode[0]!.toUpperCase() + mode.slice(1)}</button>)}
+          {(['paint', 'erase', 'replace', 'pick', 'fill'] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              className={`tool${tex.atlasDrawMode === mode ? ' is-active' : ''}`}
+              onClick={() => setTileDrawMode(session, workspace, mode)}
+            >
+              {mode[0]!.toUpperCase() + mode.slice(1)}
+            </button>
+          ))}
         </div>
         <div className="uv-btn-grid uv-btn-grid-2">
-          <button type="button" className={`tool${tex.atlasDrawShape === 'stroke' ? ' is-active' : ''}`} onClick={() => workspace.patchTexture({ atlasDrawShape: 'stroke' })}>Stroke shape</button>
-          <button type="button" className={`tool${tex.atlasDrawShape === 'rectangle' ? ' is-active' : ''}`} onClick={() => workspace.patchTexture({ atlasDrawShape: 'rectangle' })}>Rectangle shape</button>
+          <button type="button" className={`tool${tex.atlasDrawShape === 'single' ? ' is-active' : ''}`} onClick={() => workspace.patchTexture({ atlasDrawShape: 'single' })}>Single</button>
+          <button type="button" className={`tool${tex.atlasDrawShape === 'stroke' ? ' is-active' : ''}`} onClick={() => workspace.patchTexture({ atlasDrawShape: 'stroke' })}>Stroke</button>
+          <button type="button" className={`tool${tex.atlasDrawShape === 'line' ? ' is-active' : ''}`} onClick={() => workspace.patchTexture({ atlasDrawShape: 'line' })}>Line</button>
+          <button type="button" className={`tool${tex.atlasDrawShape === 'rectangle' ? ' is-active' : ''}`} onClick={() => workspace.patchTexture({ atlasDrawShape: 'rectangle' })}>Rectangle</button>
         </div>
         <label className="uv-check"><input type="checkbox" checked={tex.atlasAutoTile} onChange={(event) => workspace.patchTexture({ atlasAutoTile: event.target.checked })} />Autotile from 4 × 4 rule block</label>
         {tex.atlasAutoTile && <p className="uv-hint">Select the top-left tile of a 4 × 4 ruleset. Viper chooses all 16 edge, corner, junction, and centre states as neighbours change.</p>}
@@ -1783,9 +2113,69 @@ export function AtlasTilePanel({
         <button type="button" className={`tool primary uv-btn-block${tileDrawActive ? ' is-active' : ''}`} disabled={!image || !activeMaterial} onClick={onToggleDraw}>{tileDrawActive ? 'Stop 3D Tile Draw' : 'Start 3D Tile Draw'}</button>
         <label className="uv-check"><input type="checkbox" checked={tex.atlasUsePixelDensity} onChange={(event) => workspace.patchTexture({ atlasUsePixelDensity: event.target.checked })} />Use pixels-per-unit scale</label>
         <div className="uv-btn-grid uv-btn-grid-2">
-          <label className="uv-field"><span>{tex.atlasUsePixelDensity ? 'Pixels / unit' : 'Cell size'}</span><input className="uv-text" type="number" min={0.01} step={tex.atlasUsePixelDensity ? 1 : 0.25} value={tex.atlasUsePixelDensity ? tex.atlasPixelsPerUnit : tex.atlasPlaneSize} onChange={(event) => tex.atlasUsePixelDensity ? workspace.patchTexture({ atlasPixelsPerUnit: Math.max(1, Number(event.target.value)) }) : workspace.patchTexture({ atlasPlaneSize: Math.max(0.01, Number(event.target.value)) })} /></label>
-          <label className="uv-field"><span>Plane</span><select className="uv-select" value={tex.atlasPlaneOrientation} onChange={(event) => workspace.patchTexture({ atlasPlaneOrientation: event.target.value as 'floor' | 'wall-x' | 'wall-z' })}><option value="wall-x">Front wall</option><option value="wall-z">Side wall</option><option value="floor">Floor</option></select></label>
+          <label className="uv-field"><span>{tex.atlasUsePixelDensity ? 'Pixels / unit' : 'World tile W'}</span><input className="uv-text" type="number" min={0.01} step={tex.atlasUsePixelDensity ? 1 : 0.25} value={tex.atlasUsePixelDensity ? tex.atlasPixelsPerUnit : tex.atlasWorldTileWidth} onChange={(event) => tex.atlasUsePixelDensity ? workspace.patchTexture({ atlasPixelsPerUnit: Math.max(1, Number(event.target.value)) }) : workspace.patchTexture({ atlasWorldTileWidth: Math.max(0.01, Number(event.target.value)), atlasPlaneSize: Math.max(0.01, Number(event.target.value)) })} /></label>
+          {!tex.atlasUsePixelDensity && (
+            <label className="uv-field"><span>World tile H</span><input className="uv-text" type="number" min={0.01} step={0.25} value={tex.atlasWorldTileHeight} onChange={(event) => workspace.patchTexture({ atlasWorldTileHeight: Math.max(0.01, Number(event.target.value)) })} /></label>
+          )}
+          <label className="uv-field">
+            <span>Plane</span>
+            <select
+              className="uv-select"
+              value={tex.atlasPlaneOrientation}
+              onChange={(event) => workspace.patchTexture({
+                atlasPlaneOrientation: event.target.value as 'floor' | 'wall-x' | 'wall-z',
+                atlasUseFacePlane: false,
+              })}
+            >
+              <option value="floor">Floor</option>
+              <option value="wall-x">Front wall</option>
+              <option value="wall-z">Side wall</option>
+            </select>
+          </label>
         </div>
+        <div className="uv-btn-grid uv-btn-grid-3">
+          <label className="uv-field">
+            <span>Plane height</span>
+            <input
+              className="uv-text"
+              type="number"
+              step={0.25}
+              value={Number(tex.atlasPlaneOffset.toFixed(3))}
+              onChange={(event) => workspace.patchTexture({
+                atlasPlaneOffset: Number(event.target.value) || 0,
+                atlasUseFacePlane: false,
+              })}
+            />
+          </label>
+          <button type="button" className="tool" onClick={() => nudgeTileDrawPlane(session, workspace, -1)} title="Move plane back one tile ([)">− Tile</button>
+          <button type="button" className="tool" onClick={() => nudgeTileDrawPlane(session, workspace, 1)} title="Move plane forward one tile (])">+ Tile</button>
+        </div>
+        <button
+          type="button"
+          className={`tool uv-btn-block${tex.atlasUseFacePlane ? ' is-active' : ''}`}
+          disabled={!session.selection.state.activeFaceId}
+          onClick={() => snapTileDrawToSelection(session, workspace)}
+        >
+          {tex.atlasUseFacePlane ? 'Drawing on surface' : 'Use selected surface as plane'}
+        </button>
+        <button
+          type="button"
+          className="tool uv-btn-block"
+          disabled={!session.selection.state.activeObjectId}
+          onClick={() => {
+            const objectId = session.selection.state.activeObjectId;
+            const object = objectId ? session.document.objects.get(objectId) : null;
+            const mesh = object?.meshId ? session.document.meshes.get(object.meshId) : null;
+            if (object?.metadata.tileLayer && mesh) {
+              session.selection.setMode('face');
+              session.selection.selectFaces([...mesh.faces.keys()], 'replace');
+            }
+            beginInteractivePushPull(session, workspace);
+          }}
+        >
+          Extrude tiles (Push/Pull)
+        </button>
+        <p className="uv-hint">Build: B draw · X delete · R replace · F fill · 1–4 plane · L lock surface · Q/E rotate · Alt pick tile · Shift+Wheel depth.</p>
         <button type="button" className="tool uv-btn-block" disabled={!image} onClick={onCreatePlane}>Create Tile Plane</button>
         <div className="uv-btn-grid uv-btn-grid-2">
           <label className="uv-field"><span>Grid columns</span><input className="uv-text" type="number" min={1} max={256} value={tex.atlasFillColumns} onChange={(event) => workspace.patchTexture({ atlasFillColumns: Math.max(1, Math.round(Number(event.target.value))) })} /></label>
@@ -1822,6 +2212,7 @@ export function AtlasTilePanel({
         </button>
         <p className="uv-hint">Creates a tiled mesh using the active material and Repeat U/V. Ready to move, rotate, extrude, or duplicate.</p>
       </section>
+      </>}
     </>
   );
 }

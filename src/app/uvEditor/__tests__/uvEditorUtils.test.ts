@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { UV_ZOOM_MAX, UV_ZOOM_MIN, zoomCameraAt } from '@/app/uvEditor/uvEditorUtils';
+import { paintToolFromHotkey, UV_ZOOM_MAX, UV_ZOOM_MIN, zoomCameraAt } from '@/app/uvEditor/uvEditorUtils';
 
 describe('zoomCameraAt', () => {
   it('keeps the cursor world point fixed while zooming continuously', () => {
@@ -19,5 +19,22 @@ describe('zoomCameraAt', () => {
     expect(zoomCameraAt(cam, 10, 10, 0.97).zoom).toBeCloseTo(0.97);
     expect(zoomCameraAt(cam, 10, 10, 0.0001).zoom).toBe(UV_ZOOM_MIN);
     expect(zoomCameraAt({ ...cam, zoom: 200 }, 10, 10, 8).zoom).toBe(UV_ZOOM_MAX);
+  });
+});
+
+describe('paintToolFromHotkey', () => {
+  it('switches to brush tools from UV mode without stealing G/S/R/L', () => {
+    expect(paintToolFromHotkey('b', false, true)).toBe('pencil');
+    expect(paintToolFromHotkey('e', false, true)).toBe('eraser');
+    expect(paintToolFromHotkey('f', false, true)).toBe('fill');
+    expect(paintToolFromHotkey('r', false, true)).toBeNull();
+    expect(paintToolFromHotkey('l', false, true)).toBeNull();
+  });
+
+  it('uses paint keys when not editing UVs', () => {
+    expect(paintToolFromHotkey('r', false, false)).toBe('rectangle');
+    expect(paintToolFromHotkey('r', true, false)).toBe('replace');
+    expect(paintToolFromHotkey('l', false, false)).toBe('line');
+    expect(paintToolFromHotkey('o', false, false)).toBe('ellipse');
   });
 });

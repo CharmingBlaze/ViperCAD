@@ -5,6 +5,7 @@ export type MeshEvaluationResult = {
   normals: Float32Array;
   uvs: Float32Array;
   atlasTileRects: Float32Array;
+  colors: Float32Array | null;
   secondaryUvs: Float32Array | null;
   indices: Uint32Array;
   triangleMap: Array<{

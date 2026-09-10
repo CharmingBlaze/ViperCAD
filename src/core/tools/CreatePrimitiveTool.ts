@@ -25,7 +25,7 @@ export class CreatePrimitiveTool implements Tool {
   parameters: PrimitiveParameters = defaultPrimitiveParameters('box');
   state: PrimitivePreviewState = this.emptyState('box');
   continuous = false;
-  /** True only after the user picks a primitive type (cards or Type dropdown). */
+  /** True only after the user picks a primitive type from the inspector grid. */
   kindChosen = false;
   private hoverOrigin: Vec3 | null = null;
   private hoverPlane: ConstructionPlane | null = null;

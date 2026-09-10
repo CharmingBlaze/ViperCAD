@@ -82,6 +82,7 @@ import { KnifeTool } from '@/core/tools/KnifeTool';
 import { LoopCutTool } from '@/core/tools/LoopCutTool';
 import { PushPullTool } from '@/core/tools/PushPullTool';
 import { TileDrawTool } from '@/core/tools/TileDrawTool';
+import { nudgeTileDrawPlane } from '@/app/tilesetWorkspace';
 import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
 import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
 import { raycastSculptTarget } from '@/core/sculpt/MeshSculptTarget';
@@ -116,8 +117,9 @@ import { applyPaintTarget, clonePaintTarget } from '@/core/image/PaintLayers';
 import { PixelStrokeRecorder } from '@/core/image/PixelStroke';
 import {
   brushColourForTool,
+  mirroredPaintPixels,
+  stampBrush,
   stampBrushLine,
-  stampBrushUv,
 } from '@/core/image/paintBrush';
 import {
   resolveImageForFace,
@@ -229,6 +231,7 @@ export class ViewportEngine {
   private sceneSynchronizer = new ViewportSceneSynchronizer({
     handles: this.handles,
     getSession: () => this.session,
+    getWorkspace: () => this.workspace,
     isAttached: () => this.attached,
     onApplied: () => {
       this.syncOverlays();
@@ -1467,6 +1470,15 @@ export class ViewportEngine {
       return;
     }
     if (id && tool instanceof TileDrawTool) {
+      const tex = this.workspace.texture;
+      if (tex.atlasUseFacePlane && !tex.atlasSurfaceLocked && !tool.state.drawing) {
+        const facePlane = this.faceConstructionPlane(e, id);
+        if (facePlane) {
+          this.session!.constructionPlane = facePlane.plane;
+          this.session!.constructionPlaneId = facePlane.id;
+          tool.syncWorkPlane(this.session!.constructionPlane, this.session!.context());
+        }
+      }
       tool.update(this.pointerInput(e, id), this.session!.context());
       this.invalidate();
       return;
@@ -1888,9 +1900,20 @@ export class ViewportEngine {
       e.preventDefault();
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
       this.rebindActiveControls();
-      this.workspace.input.begin('tool');
-      this.syncOrbitEnabled();
       tool.begin(this.pointerInput(e, id), this.session!.context());
+      if (tool.state.drawing) {
+        this.workspace.input.begin('tool');
+        this.syncOrbitEnabled();
+      }
+      if (e.altKey && !tool.state.pickedTile) {
+        const facePlane = this.faceConstructionPlane(e, id);
+        if (facePlane) {
+          this.session!.constructionPlane = facePlane.plane;
+          this.session!.constructionPlaneId = facePlane.id;
+          this.workspace.patchTexture({ atlasUseFacePlane: true });
+          tool.syncWorkPlane(this.session!.constructionPlane, this.session!.context());
+        }
+      }
       this.invalidate();
       return;
     }
@@ -2108,8 +2131,8 @@ export class ViewportEngine {
       this.invalidate();
       return;
     }
-    if (doodle instanceof TileDrawTool && doodle.state.drawing && e.button === 0) {
-      doodle.confirm(this.session.context());
+    if (doodle instanceof TileDrawTool && e.button === 0) {
+      if (doodle.state.drawing) doodle.confirm(this.session.context());
       this.workspace.input.end('tool');
       this.syncOrbitEnabled();
       this.invalidate();
@@ -2631,10 +2654,19 @@ export class ViewportEngine {
     if (tool === 'fill') {
       const p = uvToPixel(hit.image, hit.uv);
       const before = clonePaintTarget(hit.image);
-      const count = floodFill(hit.image, p.x, p.y, colour, {
-        tolerance: tex.fillTolerance,
-        contiguous: tex.fillContiguous,
-      });
+      let count = 0;
+      for (const target of mirroredPaintPixels(
+        hit.image.width,
+        hit.image.height,
+        p,
+        tex.paintMirrorX,
+        tex.paintMirrorY,
+      )) {
+        count += floodFill(hit.image, target.x, target.y, colour, {
+          tolerance: tex.fillTolerance,
+          contiguous: tex.fillContiguous,
+        });
+      }
       if (count) {
         const after = clonePaintTarget(hit.image);
         let applied = true;
@@ -2668,20 +2700,45 @@ export class ViewportEngine {
     }
 
     const pixel = uvToPixel(hit.image, hit.uv);
-    if (this.lastPaintPixel && this.lastPaintPixel.imageId === hit.image.id) {
-      stampBrushLine(
-        hit.image,
-        this.lastPaintPixel.x,
-        this.lastPaintPixel.y,
-        pixel.x,
-        pixel.y,
-        tex.brushSize,
-        colour,
-        this.paintStroke,
-        shape,
-      );
+    const dither = tex.ditherMode;
+    const recolor = tex.recolorOnlyBg ? tex.background : null;
+    const previous = this.lastPaintPixel;
+    const mirrored = (point: { x: number; y: number }) =>
+      mirroredPaintPixels(hit.image.width, hit.image.height, point, tex.paintMirrorX, tex.paintMirrorY);
+    if (previous && previous.imageId === hit.image.id) {
+      const fromMirrors = mirrored(previous);
+      const toMirrors = mirrored(pixel);
+      for (let index = 0; index < Math.min(fromMirrors.length, toMirrors.length); index++) {
+        const from = fromMirrors[index]!;
+        const to = toMirrors[index]!;
+        stampBrushLine(
+          hit.image,
+          from.x,
+          from.y,
+          to.x,
+          to.y,
+          tex.brushSize,
+          colour,
+          this.paintStroke,
+          shape,
+          dither,
+          recolor,
+        );
+      }
     } else {
-      stampBrushUv(hit.image, hit.uv, tex.brushSize, colour, this.paintStroke, shape);
+      for (const target of mirrored(pixel)) {
+        stampBrush(
+          hit.image,
+          target.x,
+          target.y,
+          tex.brushSize,
+          colour,
+          this.paintStroke,
+          shape,
+          dither,
+          recolor,
+        );
+      }
     }
     this.lastPaintPixel = { x: pixel.x, y: pixel.y, imageId: hit.image.id };
     this.session.requestRedraw();
@@ -4052,8 +4109,21 @@ export class ViewportEngine {
   }
 
   private onWheel = (e: WheelEvent): void => {
-    const cameraChord = e.shiftKey || e.ctrlKey || e.metaKey;
     const tool = this.session?.tools.getActive();
+    if (
+      e.shiftKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      tool instanceof TileDrawTool &&
+      this.session &&
+      this.workspace
+    ) {
+      e.preventDefault();
+      nudgeTileDrawPlane(this.session, this.workspace, e.deltaY < 0 ? 1 : -1);
+      this.invalidate();
+      return;
+    }
+    const cameraChord = e.shiftKey || e.ctrlKey || e.metaKey;
     if (
       !cameraChord &&
       tool instanceof BlockoutVectorTool &&
@@ -4968,7 +5038,26 @@ export class ViewportEngine {
       }
     } else if (tool instanceof TileDrawTool) {
       if (this.primitivePreview.revision !== tool.state.revision) {
-        this.primitivePreview.update(tool.getPreviewMesh(), null, tool.state.revision);
+        const material = tool.config.materialId
+          ? session.document.materials.get(tool.config.materialId)
+          : null;
+        const overlay = tool.getOverlayInfo();
+        this.primitivePreview.update(
+          tool.getPreviewMesh(),
+          null,
+          tool.state.revision,
+          material
+            ? {
+                material,
+                assets: {
+                  textures: session.document.textures,
+                  images: session.document.images,
+                },
+                opacity: 0.62,
+                tint: overlay?.valid === false ? 'invalid' : overlay?.occupied ? 'occupied' : 'normal',
+              }
+            : undefined,
+        );
       }
       this.tileDrawOverlay.update(tool.getOverlayInfo(), tool.state.revision);
     } else if (this.primitivePreview.group.visible) {

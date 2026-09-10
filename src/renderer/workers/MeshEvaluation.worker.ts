@@ -13,6 +13,7 @@ self.onmessage = (event: MessageEvent<{ id: number; mesh: EditableMesh }>) => {
       normals: geometry.getAttribute('normal').array as Float32Array,
       uvs: geometry.getAttribute('uv').array as Float32Array,
       atlasTileRects: geometry.getAttribute('atlasTileRect').array as Float32Array,
+      colors: geometry.getAttribute('color')?.array as Float32Array | undefined ?? null,
       secondaryUvs: geometry.getAttribute('uv1')?.array as Float32Array | undefined ?? null,
       indices: new Uint32Array(geometry.index?.array ?? []),
       triangleMap: evaluated.triangleMap,
@@ -29,6 +30,7 @@ self.onmessage = (event: MessageEvent<{ id: number; mesh: EditableMesh }>) => {
       result.atlasTileRects.buffer,
       result.indices.buffer,
     ];
+    if (result.colors) transfers.push(result.colors.buffer);
     if (result.secondaryUvs) transfers.push(result.secondaryUvs.buffer);
     self.postMessage({ id, result }, { transfer: transfers });
   } catch (error) {

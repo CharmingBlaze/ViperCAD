@@ -14,6 +14,8 @@ import {
 export type PrimitivePreviewAppearance = {
   material: MaterialAsset;
   assets: RenderAssetResolver;
+  opacity?: number;
+  tint?: 'normal' | 'invalid' | 'occupied';
 };
 
 /** One temporary preview group rendered by every viewport camera. */
@@ -79,9 +81,12 @@ export class PrimitivePreviewHandle {
     if (appearance) {
       surface.side = DoubleSide;
       surface.transparent = true;
-      surface.opacity = 0.92;
+      surface.opacity = appearance.opacity ?? 0.62;
       surface.depthWrite = false;
       surface.toneMapped = false;
+      if (appearance.tint && appearance.tint !== 'normal' && 'color' in surface && surface.color instanceof Color) {
+        surface.color.setHex(appearance.tint === 'invalid' ? 0xff5f67 : 0xffc14d);
+      }
       this.surfaceMaterial = surface;
     }
     this.ghost = new Mesh(render.geometry, surface);

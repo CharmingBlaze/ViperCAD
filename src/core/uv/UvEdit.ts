@@ -809,7 +809,37 @@ export function cameraToFrameUvBounds(
 
 export type UvAlignMode = 'left' | 'right' | 'center-u' | 'top' | 'bottom' | 'center-v';
 
-/** Align selected UV corners to their min/max/center boundary. */
+/**
+ * Translate the selection so its bounding box sits on the 0–1 UV square.
+ * Left/right/top/bottom snap that edge to 0 or 1; center modes snap the midpoint to 0.5.
+ * Island shape is preserved — use {@link alignUvs} to flatten corners onto one axis.
+ */
+export function translateUvsToAlign(
+  mesh: EditableMesh,
+  cornerIds: Iterable<FaceCornerId>,
+  layerId: UvLayerId,
+  mode: UvAlignMode,
+): void {
+  const corners = [...cornerIds];
+  if (!corners.length) return;
+  const snapshot = snapshotUvs(mesh, corners, layerId);
+  const bounds = boundsOfUvs(snapshot);
+  if (!bounds) return;
+
+  let dx = 0;
+  let dy = 0;
+  if (mode === 'left') dx = 0 - bounds.min.x;
+  else if (mode === 'right') dx = 1 - bounds.max.x;
+  else if (mode === 'center-u') dx = 0.5 - bounds.center.x;
+  else if (mode === 'top') dy = 1 - bounds.max.y;
+  else if (mode === 'bottom') dy = 0 - bounds.min.y;
+  else if (mode === 'center-v') dy = 0.5 - bounds.center.y;
+
+  if (Math.abs(dx) < 1e-12 && Math.abs(dy) < 1e-12) return;
+  translateUvsFromSnapshot(mesh, snapshot, layerId, { x: dx, y: dy });
+}
+
+/** Flatten selected UV corners onto the selection's min/max/center axis. */
 export function alignUvs(
   mesh: EditableMesh,
   cornerIds: Iterable<FaceCornerId>,

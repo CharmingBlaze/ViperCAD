@@ -52,6 +52,7 @@ describe('3D tile draw tool', () => {
     tool.update(pointer(2.2, 3.2), session.context());
     expect(tool.state.hoverCell).toMatchObject({ column: 2, row: 3 });
     expect(tool.getOverlayInfo()).not.toBeNull();
+    expect(tool.getPreviewMesh()?.faces.size).toBeGreaterThan(0);
     tool.begin(pointer(2.2, 3.2), session.context());
     tool.confirm(session.context());
     tool.update(pointer(4.2, 5.2), session.context());
@@ -155,5 +156,55 @@ describe('3D tile draw tool', () => {
     session.undo();
     cells = JSON.parse(object.metadata.tileDrawCells!) as { column: number; tileX: number; tileY: number }[];
     expect(cells).toHaveLength(3);
+  });
+
+  it('places one stamp in single shape and ignores drag', () => {
+    const session = new EditorSession();
+    session.constructionPlane = WORLD_XZ_PLANE;
+    const tool = session.tools.get('tile-draw') as TileDrawTool;
+    tool.setConfig({ mode: 'paint', shape: 'single', cellWidth: 1, cellHeight: 1 }, session.context());
+    session.tools.setActive('tile-draw', session.context());
+    tool.begin(pointer(0.2, 0.2), session.context());
+    tool.update(pointer(3.2, 2.2), session.context());
+    tool.confirm(session.context());
+    const object = [...session.document.objects.values()][0]!;
+    expect(getMeshStats(session.document.meshes.get(object.meshId!)!).faces).toBe(1);
+  });
+
+  it('line shape fills only the cells between start and end', () => {
+    const session = new EditorSession();
+    session.constructionPlane = WORLD_XZ_PLANE;
+    const tool = session.tools.get('tile-draw') as TileDrawTool;
+    tool.setConfig({ mode: 'paint', shape: 'line', cellWidth: 1, cellHeight: 1 }, session.context());
+    session.tools.setActive('tile-draw', session.context());
+    tool.begin(pointer(0.2, 0.2), session.context());
+    tool.update(pointer(3.2, 0.2), session.context());
+    tool.confirm(session.context());
+    const object = [...session.document.objects.values()][0]!;
+    expect(getMeshStats(session.document.meshes.get(object.meshId!)!).faces).toBe(4);
+    session.undo();
+    expect(session.document.objects.size).toBe(0);
+  });
+
+  it('eyedrops an existing cell with Alt while staying in paint mode', () => {
+    const session = new EditorSession();
+    session.constructionPlane = WORLD_XZ_PLANE;
+    const tool = session.tools.get('tile-draw') as TileDrawTool;
+    tool.setConfig({
+      mode: 'paint',
+      shape: 'stroke',
+      cellWidth: 1,
+      cellHeight: 1,
+      tileX: 16,
+      tileY: 0,
+    }, session.context());
+    session.tools.setActive('tile-draw', session.context());
+    tool.begin(pointer(0.2, 0.2), session.context());
+    tool.confirm(session.context());
+
+    tool.setConfig({ mode: 'paint', tileX: 0, tileY: 0 }, session.context());
+    tool.begin({ ...pointer(0.2, 0.2), altKey: true }, session.context());
+    expect(tool.config.mode).toBe('paint');
+    expect(tool.consumePickedTile()).toMatchObject({ tileX: 16, tileY: 0 });
   });
 });

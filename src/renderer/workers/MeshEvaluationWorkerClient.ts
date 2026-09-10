@@ -40,6 +40,7 @@ function evaluateOnMainThread(mesh: EditableMesh): MeshEvaluationResult {
     normals: geometry.getAttribute('normal').array as Float32Array,
     uvs: geometry.getAttribute('uv').array as Float32Array,
     atlasTileRects: geometry.getAttribute('atlasTileRect').array as Float32Array,
+    colors: geometry.getAttribute('color')?.array as Float32Array | undefined ?? null,
     secondaryUvs: geometry.getAttribute('uv1')?.array as Float32Array | undefined ?? null,
     indices: new Uint32Array(geometry.index?.array ?? []),
     triangleMap: evaluated.triangleMap,

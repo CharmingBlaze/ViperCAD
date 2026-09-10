@@ -8,9 +8,10 @@ import { buildAtlasTileCells, type AtlasTileCell } from '@/core/uv/AtlasUv';
 import type { ModellingContext, Tool, ToolPointerInput } from './Tool';
 
 export type TileDrawMode = 'paint' | 'erase' | 'replace' | 'pick' | 'fill';
+export type TileDrawShape = 'single' | 'stroke' | 'line' | 'rectangle';
 export type TileDrawConfig = {
   mode: TileDrawMode;
-  shape: 'stroke' | 'rectangle';
+  shape: TileDrawShape;
   autoTile: boolean;
   materialId: MaterialId | null;
   imageName: string;
@@ -71,6 +72,7 @@ export class TileDrawTool implements Tool {
   activate(context: ModellingContext): void {
     this.cancel(context);
     this.plane = { ...context.constructionPlane };
+    this.rememberOccupied(context);
     this.touch(context);
   }
   deactivate(context: ModellingContext): void { this.cancel(context); }
@@ -80,7 +82,7 @@ export class TileDrawTool implements Tool {
     this.plane = { ...context.constructionPlane };
     const cell = this.cellFromInput(input);
     if (!cell) return;
-    if (this.config.mode === 'pick') {
+    if (input.altKey || this.config.mode === 'pick') {
       const target = this.findTarget(context);
       const record = target
         ? parseCells(target.object.metadata.tileDrawCells).find((item) => item.column === cell.column && item.row === cell.row) ?? null
@@ -102,8 +104,11 @@ export class TileDrawTool implements Tool {
     this.startCell = cell;
     this.lastCell = cell;
     this.cells.clear();
+    this.rememberOccupied(context);
     if (this.config.mode === 'fill') {
       for (const filled of this.floodCells(context, cell)) this.addCell(filled);
+    } else if (this.config.shape === 'single') {
+      this.addStamp(cell);
     } else {
       this.addCell(cell);
     }
@@ -113,16 +118,21 @@ export class TileDrawTool implements Tool {
   update(input: ToolPointerInput, context: ModellingContext): void {
     const cell = this.cellFromInput(input);
     this.state.hoverCell = cell;
+    this.rememberOccupied(context);
     if (!cell) return this.touch(context);
     if (!this.state.drawing) return this.touch(context);
-    if (this.config.mode === 'fill') return;
-    if (this.config.shape === 'rectangle' && this.startCell) {
+    if (this.config.mode === 'fill' || this.config.shape === 'single') return;
+    if ((this.config.shape === 'rectangle' || this.config.shape === 'line') && this.startCell) {
       this.cells.clear();
-      const minX = Math.min(this.startCell.column, cell.column);
-      const maxX = Math.max(this.startCell.column, cell.column);
-      const minY = Math.min(this.startCell.row, cell.row);
-      const maxY = Math.max(this.startCell.row, cell.row);
-      for (let row = minY; row <= maxY; row++) for (let column = minX; column <= maxX; column++) this.addCell({ column, row });
+      if (this.config.shape === 'line') {
+        for (const next of gridLine(this.startCell, cell)) this.addCell(next);
+      } else {
+        const minX = Math.min(this.startCell.column, cell.column);
+        const maxX = Math.max(this.startCell.column, cell.column);
+        const minY = Math.min(this.startCell.row, cell.row);
+        const maxY = Math.max(this.startCell.row, cell.row);
+        for (let row = minY; row <= maxY; row++) for (let column = minX; column <= maxX; column++) this.addCell({ column, row });
+      }
     } else if (this.lastCell) {
       for (const next of gridLine(this.lastCell, cell)) this.addCell(next);
     }
@@ -157,16 +167,27 @@ export class TileDrawTool implements Tool {
 
   syncWorkPlane(plane: ConstructionPlane, context: ModellingContext): void {
     this.plane = { ...plane };
+    this.rememberOccupied(context);
     this.touch(context);
   }
 
   getOverlayInfo() {
     if (!this.plane) return null;
+    const hoverCells = this.state.drawing
+      ? [...this.cells.values()]
+      : this.state.hoverCell
+        ? this.stampCells(this.state.hoverCell)
+        : [];
     return {
       origin: this.tileOrigin(),
       axisU: this.plane.xAxis,
       axisV: this.plane.yAxis,
       hoverCell: this.state.hoverCell,
+      hoverCells,
+      occupied: this.hoverOccupied(),
+      valid: !!this.state.hoverCell,
+      stampColumns: this.config.selectionColumns,
+      stampRows: this.config.selectionRows,
       cellWidth: this.config.cellWidth,
       cellHeight: this.config.cellHeight,
       layer: this.config.layer,
@@ -175,10 +196,16 @@ export class TileDrawTool implements Tool {
   }
 
   getPreviewMesh(): EditableMesh | null {
-    if (!this.plane || !this.cells.size) return null;
+    if (!this.plane) return null;
+    const source = this.state.drawing
+      ? [...this.cells.values()]
+      : this.state.hoverCell && this.config.mode !== 'erase'
+        ? this.stampCells(this.state.hoverCell)
+        : [];
+    if (!source.length) return null;
     const cells = this.config.autoTile
-      ? this.applyAutoTiles([...this.cells.values()].map((cell, index) => this.paintRecord(cell, index)))
-      : [...this.cells.values()];
+      ? this.applyAutoTiles(source.map((cell, index) => this.paintRecord(cell, index)))
+      : source.map((cell, index) => this.paintRecord(cell, index));
     return buildAtlasTileCells({
       cells, origin: this.tileOrigin(),
       axisU: this.plane.xAxis, axisV: this.plane.yAxis,
@@ -351,6 +378,36 @@ export class TileDrawTool implements Tool {
     return addVec3(this.plane!.origin, scaleVec3(this.plane!.normal, offset));
   }
   private addCell(cell: AtlasTileCell): void { this.cells.set(`${cell.column},${cell.row}`, cell); }
+  private stampCells(origin: AtlasTileCell): AtlasTileCell[] {
+    const cells: AtlasTileCell[] = [];
+    for (let row = 0; row < Math.max(1, this.config.selectionRows); row++) {
+      for (let column = 0; column < Math.max(1, this.config.selectionColumns); column++) {
+        cells.push({ column: origin.column + column, row: origin.row + row });
+      }
+    }
+    return cells;
+  }
+  private addStamp(origin: AtlasTileCell): void {
+    for (const cell of this.stampCells(origin)) this.addCell(cell);
+  }
+  private occupiedKeys(context?: ModellingContext): Set<string> {
+    if (context) {
+      const target = this.findTarget(context);
+      return new Set((target ? parseCells(target.object.metadata.tileDrawCells) : []).map((cell) => `${cell.column},${cell.row}`));
+    }
+    return this.cachedOccupied ?? new Set();
+  }
+  private cachedOccupied: Set<string> | null = null;
+  rememberOccupied(context: ModellingContext): void {
+    this.cachedOccupied = this.occupiedKeys(context);
+  }
+  private hoverOccupied(): boolean {
+    const hover = this.state.hoverCell;
+    if (!hover) return false;
+    const occupied = this.cachedOccupied;
+    if (!occupied?.size) return false;
+    return this.stampCells(hover).some((cell) => occupied.has(`${cell.column},${cell.row}`));
+  }
   private clearStroke(context: ModellingContext, keepPlane = false): void {
     this.state.drawing = false; this.state.hoverCell = null; this.cells.clear();
     this.startCell = null; this.lastCell = null;

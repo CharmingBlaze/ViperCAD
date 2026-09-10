@@ -5,6 +5,7 @@ import { applyPaintTarget, clonePaintTarget, getPaintPixel, getPaintTarget } fro
 import { PixelStrokeRecorder } from '@/core/image/PixelStroke';
 import {
   brushColourForTool,
+  mirroredPaintPixels,
   stampBrush,
   stampBrushLine,
 } from '@/core/image/paintBrush';
@@ -39,15 +40,21 @@ import {
   UV_GIZMO_PX,
   uvGizmoCursor,
   alignUvs,
+  distributeUvs,
   snapUvsToPixelGrid,
+  translateUvsToAlign,
   weldSelectedUvs,
   type UvAlignMode,
   type UvGizmoHandle,
   type UvSnapshot,
 } from '@/core/uv/UvEdit';
 import {
+  applySeamSnapshot,
+  clearAllUvSeams,
   islandForFace,
   markUvSeams,
+  markUvSeamsByAngle,
+  snapshotSeams,
   unwrapUvs,
   viewAxesFromCamera,
   type UvUnwrapMode,
@@ -74,7 +81,15 @@ import { buildPlane } from '@/core/mesh/builders/PlaneBuilder';
 import { importImageFile } from '@/core/image/ImageImport';
 import { commitMeshObject, createMaterial, getObjectMaterialId } from '@/core/document/ModelDocument';
 import { TileDrawTool } from '@/core/tools/TileDrawTool';
-import { WORLD_XY_PLANE, WORLD_XZ_PLANE, WORLD_YZ_PLANE } from '@/core/snap/SnapEngine';
+import {
+  applyTileDrawHotkey,
+  applyTileDrawToolConfig,
+  rememberAtlasStamp,
+  shouldKeepWorkspaceTileset,
+  shouldShowTilesetPanel,
+  toggleTilesetPopup,
+  toggleTileDrawTool,
+} from '@/app/tilesetWorkspace';
 import { commitDeleteSelection } from '@/core/editor/DeleteSelection';
 import {
   applyAtlasTileSnapshot,
@@ -90,9 +105,13 @@ import { ensureEditableUvs } from '@/core/uv/EnsurePaintableUvs';
 import type { ImageAsset } from '@/core/document/types';
 import {
   hexToRgba,
+  paintToolFromHotkey,
   PIXEL_TOOL_HOTKEYS,
+  PIXEL_TOOL_ICONS,
   PIXEL_TOOL_LABELS,
   PIXEL_TOOLS,
+  UV_EDIT_MODE_ICONS,
+  UV_TRANSFORM_ICONS,
   resolveSelectedCorners,
   rgbaToHex,
   shiftShadeColor,
@@ -200,12 +219,22 @@ export function UvPixelEditor({ session, workspace }: Props) {
   const selectedFaceKey = [...session.selection.state.selectedFaceIds].sort().join('|');
   const activeUvLayerId = tex.activeUvLayerId;
   const ctxInfo = resolveActiveTexture(session.document, session.selection.state);
-  const image = ctxInfo.imageId ? session.document.images.get(ctxInfo.imageId) : null;
+  const keepTileset = shouldKeepWorkspaceTileset(session, workspace);
+  const image = (keepTileset && tex.activeImageId
+    ? session.document.images.get(tex.activeImageId)
+    : null) ?? (ctxInfo.imageId ? session.document.images.get(ctxInfo.imageId) : null);
+  const tilesetMaterialId = keepTileset ? (tex.activeMaterialId ?? ctxInfo.materialId) : ctxInfo.materialId;
   const uvPointerActive =
     tex.activeRightEditor === 'uv' ||
     (tex.activeRightEditor === 'combined' && tex.uvPointerMode);
 
   useEffect(() => {
+    if (shouldKeepWorkspaceTileset(session, workspace)) {
+      if (ctxInfo.uvLayerId && tex.activeUvLayerId !== ctxInfo.uvLayerId) {
+        workspace.patchTexture({ activeUvLayerId: ctxInfo.uvLayerId });
+      }
+      return;
+    }
     if (
       tex.activeImageId !== ctxInfo.imageId ||
       tex.activeMaterialId !== ctxInfo.materialId ||
@@ -219,7 +248,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
         activeUvLayerId: ctxInfo.uvLayerId,
       });
     }
-  }, [ctxInfo.imageId, ctxInfo.materialId, ctxInfo.textureId, ctxInfo.uvLayerId, tex, workspace]);
+  }, [ctxInfo.imageId, ctxInfo.materialId, ctxInfo.textureId, ctxInfo.uvLayerId, session, tex, workspace]);
 
   const activeMesh = useCallback(() => {
     const objectId = session.selection.state.activeObjectId;
@@ -293,9 +322,11 @@ export function UvPixelEditor({ session, workspace }: Props) {
 
   const armUv = (patch: Partial<typeof tex> = {}) => {
     session.selection.setMode('face');
+    const leavingTiles = patch.uvPanelTab !== undefined && patch.uvPanelTab !== 'tiles';
     workspace.patchTexture({
       uvPointerMode: true,
       activeRightEditor: tex.activeRightEditor === 'pixel' ? 'uv' : tex.activeRightEditor,
+      ...(leavingTiles ? { atlasPanelOpen: false, atlasPaintMode: false } : {}),
       ...patch,
     });
   };
@@ -356,9 +387,16 @@ export function UvPixelEditor({ session, workspace }: Props) {
     const cam = editorCamera(workspace.texture);
     const sx = clientX - rect.left;
     const sy = clientY - rect.top;
-    const px = Math.floor((sx - cam.panX) / cam.zoom);
-    const py = Math.floor((sy - cam.panY) / cam.zoom);
-    if (px < 0 || py < 0 || px >= image.width || py >= image.height) return null;
+    const rawX = (sx - cam.panX) / cam.zoom;
+    const rawY = (sy - cam.panY) / cam.zoom;
+    if (rawX < 0 || rawY < 0 || rawX >= image.width || rawY >= image.height) return null;
+    const snap = workspace.texture.pixelGridSnap;
+    const px = snap
+      ? Math.max(0, Math.min(image.width - 1, Math.round(rawX)))
+      : Math.floor(rawX);
+    const py = snap
+      ? Math.max(0, Math.min(image.height - 1, Math.round(rawY)))
+      : Math.floor(rawY);
     return { x: px, y: py };
   };
 
@@ -377,15 +415,14 @@ export function UvPixelEditor({ session, workspace }: Props) {
     const shape = workspace.texture.brushShape;
     if (!stroke.current.isActive) stroke.current.begin(image);
     const previous = lastPaintPixel.current;
-    const mirrored = (point: { x: number; y: number }) => {
-      const points = [point];
-      if (workspace.texture.paintMirrorX) points.push({ x: image.width - 1 - point.x, y: point.y });
-      if (workspace.texture.paintMirrorY) points.push({ x: point.x, y: image.height - 1 - point.y });
-      if (workspace.texture.paintMirrorX && workspace.texture.paintMirrorY) {
-        points.push({ x: image.width - 1 - point.x, y: image.height - 1 - point.y });
-      }
-      return [...new Map(points.map((item) => [`${item.x},${item.y}`, item])).values()];
-    };
+    const mirrored = (point: { x: number; y: number }) =>
+      mirroredPaintPixels(
+        image.width,
+        image.height,
+        point,
+        workspace.texture.paintMirrorX,
+        workspace.texture.paintMirrorY,
+      );
     const dither = workspace.texture.ditherMode;
     const recolor = workspace.texture.recolorOnlyBg ? workspace.texture.background : null;
     if (!previous) {
@@ -414,22 +451,24 @@ export function UvPixelEditor({ session, workspace }: Props) {
       x: tex.paintMirrorX ? image.width - 1 - point.x : point.x,
       y: tex.paintMirrorY ? image.height - 1 - point.y : point.y,
     });
+    const dither = tex.ditherMode;
+    const recolor = tex.recolorOnlyBg ? tex.background : null;
     const drawLine = (from: { x: number; y: number }, to: { x: number; y: number }) => {
-      stampBrushLine(image, from.x, from.y, to.x, to.y, size, colour, stroke.current, tex.brushShape);
+      stampBrushLine(image, from.x, from.y, to.x, to.y, size, colour, stroke.current, tex.brushShape, dither, recolor);
       if (tex.paintMirrorX) {
         const a = { x: image.width - 1 - from.x, y: from.y };
         const b = { x: image.width - 1 - to.x, y: to.y };
-        stampBrushLine(image, a.x, a.y, b.x, b.y, size, colour, stroke.current, tex.brushShape);
+        stampBrushLine(image, a.x, a.y, b.x, b.y, size, colour, stroke.current, tex.brushShape, dither, recolor);
       }
       if (tex.paintMirrorY) {
         const a = { x: from.x, y: image.height - 1 - from.y };
         const b = { x: to.x, y: image.height - 1 - to.y };
-        stampBrushLine(image, a.x, a.y, b.x, b.y, size, colour, stroke.current, tex.brushShape);
+        stampBrushLine(image, a.x, a.y, b.x, b.y, size, colour, stroke.current, tex.brushShape, dither, recolor);
       }
       if (tex.paintMirrorX && tex.paintMirrorY) {
         const a = mirrorPoint(from);
         const b = mirrorPoint(to);
-        stampBrushLine(image, a.x, a.y, b.x, b.y, size, colour, stroke.current, tex.brushShape);
+        stampBrushLine(image, a.x, a.y, b.x, b.y, size, colour, stroke.current, tex.brushShape, dither, recolor);
       }
     };
     if (tex.pixelTool === 'line') {
@@ -1199,7 +1238,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
   ]);
 
   const createAtlasTilePlane = () => {
-    if (!image || !ctxInfo.materialId) return;
+    if (!image || !tilesetMaterialId) return;
     const tileWidth = Math.min(image.width, tex.atlasTileWidth);
     const tileHeight = Math.min(image.height, tex.atlasTileHeight);
     const regionWidth = tileWidth * tex.atlasSelectionColumns + tex.atlasMarginX * (tex.atlasSelectionColumns - 1);
@@ -1251,7 +1290,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
         repeatU === 1 && repeatV === 1
           ? `Tile_${Math.floor(tex.atlasTileX / tileWidth)}_${Math.floor(tex.atlasTileY / tileHeight)}`
           : `Tile_${Math.floor(tex.atlasTileX / tileWidth)}_${Math.floor(tex.atlasTileY / tileHeight)}_${repeatU}x${repeatV}`,
-      materialId: ctxInfo.materialId,
+      materialId: tilesetMaterialId,
     });
     const object = session.document.objects.get(committed.objectId)!;
     object.metadata.atlasTile = `${tex.atlasTileX},${tex.atlasTileY},${tileWidth},${tileHeight}`;
@@ -1265,7 +1304,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
   };
 
   const createAtlasGrid = () => {
-    if (!image || !ctxInfo.materialId) return;
+    if (!image || !tilesetMaterialId) return;
     const mesh = buildAtlasTileGrid({
       columns: tex.atlasFillColumns,
       rows: tex.atlasFillRows,
@@ -1297,7 +1336,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
     });
     const committed = commitMeshObject(session.document, mesh, {
       name: `TileGrid_${tex.atlasFillColumns}x${tex.atlasFillRows}`,
-      materialId: ctxInfo.materialId,
+      materialId: tilesetMaterialId,
     });
     const object = session.document.objects.get(committed.objectId)!;
     object.metadata.atlasGrid = `${tex.atlasFillColumns}x${tex.atlasFillRows}`;
@@ -1350,98 +1389,13 @@ export function UvPixelEditor({ session, workspace }: Props) {
   };
 
   const toggleTileDraw = () => {
-    const current = session.tools.getActive();
-    if (current?.id === 'tile-draw') {
-      session.tools.setActive('select', session.context());
-      session.requestRedraw();
-      refresh();
-      return;
-    }
-    if (!image || !ctxInfo.materialId) return;
-    const tool = session.tools.get('tile-draw') as TileDrawTool;
-    const pixelsPerUnit = Math.max(1, tex.atlasPixelsPerUnit);
-    tool.setConfig({
-      mode: tex.atlasDrawMode,
-      shape: tex.atlasDrawShape,
-      autoTile: tex.atlasAutoTile,
-      materialId: ctxInfo.materialId,
-      imageName: image.name,
-      imageWidth: image.width,
-      imageHeight: image.height,
-      tileX: tex.atlasTileX,
-      tileY: tex.atlasTileY,
-      tileWidth: tex.atlasTileWidth,
-      tileHeight: tex.atlasTileHeight,
-      marginX: tex.atlasMarginX,
-      marginY: tex.atlasMarginY,
-      selectionColumns: tex.atlasSelectionColumns,
-      selectionRows: tex.atlasSelectionRows,
-      padding: tex.atlasPadding,
-      quarterTurns: tex.atlasQuarterTurns,
-      flipU: tex.atlasFlipU,
-      flipV: tex.atlasFlipV,
-      cellWidth: tex.atlasUsePixelDensity ? tex.atlasTileWidth / pixelsPerUnit : tex.atlasPlaneSize,
-      cellHeight: tex.atlasUsePixelDensity ? tex.atlasTileHeight / pixelsPerUnit : tex.atlasPlaneSize,
-      pattern: tex.atlasFillPattern,
-      randomSeed: tex.atlasRandomSeed,
-      layer: tex.atlasTileLayer,
-    }, session.context());
-    if (tex.atlasPlaneOrientation === 'floor') {
-      session.constructionPlane = WORLD_XZ_PLANE;
-      session.constructionPlaneId = 'top';
-    } else if (tex.atlasPlaneOrientation === 'wall-x') {
-      session.constructionPlane = WORLD_XY_PLANE;
-      session.constructionPlaneId = 'front';
-    } else {
-      session.constructionPlane = WORLD_YZ_PLANE;
-      session.constructionPlaneId = 'right';
-    }
-    workspace.patchTexture({ paintMode3D: false, atlasPaintMode: false, uvPointerMode: true });
-    session.tools.setActive('tile-draw', session.context());
-    session.requestRedraw();
+    toggleTileDrawTool(session, workspace);
     refresh();
   };
 
   useEffect(() => {
-    if (session.tools.getActive()?.id !== 'tile-draw' || !image || !ctxInfo.materialId) return;
-    const pixelsPerUnit = Math.max(1, tex.atlasPixelsPerUnit);
-    (session.tools.get('tile-draw') as TileDrawTool).setConfig({
-      mode: tex.atlasDrawMode,
-      shape: tex.atlasDrawShape,
-      autoTile: tex.atlasAutoTile,
-      materialId: ctxInfo.materialId,
-      imageName: image.name,
-      imageWidth: image.width,
-      imageHeight: image.height,
-      tileX: tex.atlasTileX,
-      tileY: tex.atlasTileY,
-      tileWidth: tex.atlasTileWidth,
-      tileHeight: tex.atlasTileHeight,
-      marginX: tex.atlasMarginX,
-      marginY: tex.atlasMarginY,
-      selectionColumns: tex.atlasSelectionColumns,
-      selectionRows: tex.atlasSelectionRows,
-      padding: tex.atlasPadding,
-      quarterTurns: tex.atlasQuarterTurns,
-      flipU: tex.atlasFlipU,
-      flipV: tex.atlasFlipV,
-      cellWidth: tex.atlasUsePixelDensity ? tex.atlasTileWidth / pixelsPerUnit : tex.atlasPlaneSize,
-      cellHeight: tex.atlasUsePixelDensity ? tex.atlasTileHeight / pixelsPerUnit : tex.atlasPlaneSize,
-      pattern: tex.atlasFillPattern,
-      randomSeed: tex.atlasRandomSeed,
-      layer: tex.atlasTileLayer,
-    }, session.context());
-    if (tex.atlasPlaneOrientation === 'floor') {
-      session.constructionPlane = WORLD_XZ_PLANE;
-      session.constructionPlaneId = 'top';
-    } else if (tex.atlasPlaneOrientation === 'wall-x') {
-      session.constructionPlane = WORLD_XY_PLANE;
-      session.constructionPlaneId = 'front';
-    } else {
-      session.constructionPlane = WORLD_YZ_PLANE;
-      session.constructionPlaneId = 'right';
-    }
-    (session.tools.get('tile-draw') as TileDrawTool).syncWorkPlane(session.constructionPlane, session.context());
+    if (session.tools.getActive()?.id !== 'tile-draw') return;
+    applyTileDrawToolConfig(session, workspace);
     // Live tile-board changes update the active 3D draw tool.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -1465,6 +1419,9 @@ export function UvPixelEditor({ session, workspace }: Props) {
     tex.atlasUsePixelDensity,
     tex.atlasPixelsPerUnit,
     tex.atlasPlaneSize,
+    tex.atlasWorldTileWidth,
+    tex.atlasWorldTileHeight,
+    tex.atlasSurfaceLocked,
     tex.atlasFillPattern,
     tex.atlasRandomSeed,
     tex.atlasTileLayer,
@@ -1484,6 +1441,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
       atlasDrawMode: 'paint',
       uvPanelTab: 'tiles',
     });
+    rememberAtlasStamp(workspace);
   }, [tileDrawActive, tileDrawRevision, tileDrawTool, workspace]);
 
   useEffect(() => {
@@ -1571,38 +1529,55 @@ export function UvPixelEditor({ session, workspace }: Props) {
     refresh();
   };
 
-  const toggleSeams = (seam: boolean) => {
+  const commitSeamEdit = (name: string, apply: () => void) => {
     const ctx = activeMesh();
     if (!ctx) return;
-    const edgeIds = [...session.selection.state.selectedEdgeIds];
-    if (!edgeIds.length) return;
-    const beforeSeams = edgeIds.map((id) => ({
-      id,
-      seam: ctx.mesh.edges.get(id)?.seam ?? false,
-    }));
-    markUvSeams(ctx.mesh, edgeIds, seam);
+    const before = snapshotSeams(ctx.mesh);
+    apply();
+    const after = snapshotSeams(ctx.mesh);
     let applied = true;
     session.history.execute({
-      name: seam ? 'Mark UV Seams' : 'Clear UV Seams',
+      name,
       execute: () => {
         if (applied) return;
-        markUvSeams(ctx.mesh, edgeIds, seam);
+        applySeamSnapshot(ctx.mesh, after);
         applied = true;
         session.requestRedraw();
       },
       undo: () => {
-        for (const e of beforeSeams) {
-          const edge = ctx.mesh.edges.get(e.id);
-          if (edge) edge.seam = e.seam;
-        }
-        ctx.mesh.geometryVersion += 1;
-        ctx.mesh.dirty.uvs = true;
+        applySeamSnapshot(ctx.mesh, before);
         applied = false;
         session.requestRedraw();
       },
     });
     session.requestRedraw();
     refresh();
+  };
+
+  const toggleSeams = (seam: boolean) => {
+    const ctx = activeMesh();
+    if (!ctx) return;
+    const edgeIds = [...session.selection.state.selectedEdgeIds];
+    if (!edgeIds.length) return;
+    commitSeamEdit(seam ? 'Mark UV Seams' : 'Clear UV Seams', () => {
+      markUvSeams(ctx.mesh, edgeIds, seam);
+    });
+  };
+
+  const autoMarkSeams = () => {
+    const ctx = activeMesh();
+    if (!ctx) return;
+    commitSeamEdit('Auto UV Seams (45°)', () => {
+      markUvSeamsByAngle(ctx.mesh, 45);
+    });
+  };
+
+  const clearSeams = () => {
+    const ctx = activeMesh();
+    if (!ctx) return;
+    commitSeamEdit('Clear All UV Seams', () => {
+      clearAllUvSeams(ctx.mesh);
+    });
   };
 
   const applyUvCanvasNav = (kind: 'pan' | 'zoom', dx: number, dy: number, clientX: number, clientY: number) => {
@@ -1684,10 +1659,19 @@ export function UvPixelEditor({ session, workspace }: Props) {
           ? workspace.texture.background
           : workspace.texture.foreground;
         const before = clonePaintTarget(image);
-        const count = floodFill(image, p.x, p.y, fillColour, {
-          tolerance: workspace.texture.fillTolerance,
-          contiguous: workspace.texture.fillContiguous,
-        });
+        let count = 0;
+        for (const target of mirroredPaintPixels(
+          image.width,
+          image.height,
+          p,
+          workspace.texture.paintMirrorX,
+          workspace.texture.paintMirrorY,
+        )) {
+          count += floodFill(image, target.x, target.y, fillColour, {
+            tolerance: workspace.texture.fillTolerance,
+            contiguous: workspace.texture.fillContiguous,
+          });
+        }
         if (count) {
           const after = clonePaintTarget(image);
           let applied = true;
@@ -1900,6 +1884,8 @@ export function UvPixelEditor({ session, workspace }: Props) {
       paintMode3D: !['line', 'rectangle', 'ellipse', 'replace'].includes(pixelTool),
       activeRightEditor: tex.activeRightEditor === 'uv' ? 'combined' : tex.activeRightEditor,
       uvPanelTab: 'paint',
+      atlasPanelOpen: false,
+      atlasPaintMode: false,
     });
   };
 
@@ -1916,46 +1902,16 @@ export function UvPixelEditor({ session, workspace }: Props) {
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       const key = e.key.toLowerCase();
 
-      if (tileDrawActive && !e.ctrlKey && !e.metaKey) {
-        if (key === 'q' || key === 'e') {
-          e.preventDefault();
-          if (e.shiftKey) {
-            workspace.patchTexture(key === 'q'
-              ? { atlasFlipV: !tex.atlasFlipV }
-              : { atlasFlipU: !tex.atlasFlipU });
-          } else {
-            const delta = key === 'q' ? 3 : 1;
-            workspace.patchTexture({ atlasQuarterTurns: ((tex.atlasQuarterTurns + delta) % 4) as 0 | 1 | 2 | 3 });
-          }
-          return;
-        }
-        if (key === '1' || key === '2') {
-          e.preventDefault();
-          workspace.patchTexture({ atlasDrawShape: key === '1' ? 'stroke' : 'rectangle' });
-          return;
-        }
-        if (e.key.startsWith('Arrow') && image) {
-          e.preventDefault();
-          const dx = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
-          const dy = e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0;
-          const stepX = tex.atlasTileWidth + tex.atlasMarginX;
-          const stepY = tex.atlasTileHeight + tex.atlasMarginY;
-          workspace.patchTexture({
-            atlasTileX: Math.max(tex.atlasOffsetX, Math.min(image.width - tex.atlasTileWidth, tex.atlasTileX + dx * stepX)),
-            atlasTileY: Math.max(tex.atlasOffsetY, Math.min(image.height - tex.atlasTileHeight, tex.atlasTileY + dy * stepY)),
-          });
-          return;
-        }
-        if (key === 'escape') {
-          e.preventDefault();
-          toggleTileDraw();
-          return;
-        }
+      if (tileDrawActive && applyTileDrawHotkey(session, workspace, e)) {
+        e.preventDefault();
+        refresh();
+        return;
       }
 
-      if (!e.ctrlKey && !e.metaKey && (key === 'b' || key === 'e' || key === 'i' || key === 'f' || key === 'l' || key === 'r' || key === 'o')) {
+      const paintTool = paintToolFromHotkey(e.key, e.shiftKey, uvPointerActive);
+      if (!e.ctrlKey && !e.metaKey && paintTool) {
         e.preventDefault();
-        activatePaintTool(key === 'b' ? 'pencil' : key === 'e' ? 'eraser' : key === 'i' ? 'eyedropper' : key === 'f' ? 'fill' : key === 'l' ? 'line' : key === 'o' ? 'ellipse' : e.shiftKey ? 'replace' : 'rectangle');
+        activatePaintTool(paintTool);
         return;
       }
       if (!e.ctrlKey && !e.metaKey && key === 'x' && !uvPointerActive) {
@@ -2070,13 +2026,31 @@ export function UvPixelEditor({ session, workspace }: Props) {
       pushToast('Select UV corners or faces to align');
       return;
     }
-    alignUvs(sel.ctx.mesh, sel.corners, sel.ctx.layerId, mode);
-    session.history.execute({
-      name: `Align UVs (${mode})`,
-      execute: () => session.requestRedraw(),
-      undo: () => session.requestRedraw(),
+    mutateSelection(`Align UVs (${mode})`, (mesh, layerId, before) => {
+      translateUvsToAlign(mesh, before.keys(), layerId, mode);
     });
-    session.requestRedraw();
+  };
+
+  const handleFlatten = (mode: UvAlignMode) => {
+    const sel = selectedSnapshot();
+    if (!sel || !sel.corners.length) {
+      pushToast('Select UV corners or faces to flatten');
+      return;
+    }
+    mutateSelection(`Flatten UVs (${mode})`, (mesh, layerId, before) => {
+      alignUvs(mesh, before.keys(), layerId, mode);
+    });
+  };
+
+  const handleDistribute = (axis: 'u' | 'v') => {
+    const sel = selectedSnapshot();
+    if (!sel || sel.corners.length < 3) {
+      pushToast('Select at least 3 UV corners to distribute');
+      return;
+    }
+    mutateSelection(`Distribute UVs (${axis.toUpperCase()})`, (mesh, layerId, before) => {
+      distributeUvs(mesh, before.keys(), layerId, axis);
+    });
   };
 
   const handlePixelSnap = () => {
@@ -2085,13 +2059,11 @@ export function UvPixelEditor({ session, workspace }: Props) {
       pushToast('Select UV corners to snap to pixels');
       return;
     }
-    snapUvsToPixelGrid(sel.ctx.mesh, sel.corners, sel.ctx.layerId, image?.width ?? 64, image?.height ?? 64);
-    session.history.execute({
-      name: 'Snap UVs to Pixel Grid',
-      execute: () => session.requestRedraw(),
-      undo: () => session.requestRedraw(),
+    const width = image?.width ?? canvasImage?.width ?? 64;
+    const height = image?.height ?? canvasImage?.height ?? 64;
+    mutateSelection('Snap UVs to Pixel Grid', (mesh, layerId, before) => {
+      snapUvsToPixelGrid(mesh, before.keys(), layerId, width, height);
     });
-    session.requestRedraw();
   };
 
   const handleImportImageFile = async (file: File | null) => {
@@ -2133,33 +2105,60 @@ export function UvPixelEditor({ session, workspace }: Props) {
     }
   };
 
+  const paletteProps = {
+    session,
+    workspace,
+    hasUvSelection: !!selectedSnapshot(),
+    onApply: () => applySelectedAtlasTile(),
+    onCreatePlane: createAtlasTilePlane,
+    onCreateGrid: createAtlasGrid,
+    onPickTile: pickAtlasTileFromFace,
+    onToggleDraw: toggleTileDraw,
+    onEraseFaces: eraseSelectedTileFaces,
+    onFillConnected: fillConnectedTileFaces,
+  };
+  const showPalette = shouldShowTilesetPanel(workspace);
+  const paletteDocked = showPalette && tex.atlasPanelDock !== 'float';
+
   return (
-    <div className="uv-pixel-editor">
+    <div className={`uv-pixel-editor${paletteDocked ? ` has-tile-dock-${tex.atlasPanelDock}` : ''}`}>
+      {paletteDocked && tex.atlasPanelDock === 'left' && (
+        <aside className="tile-palette-dock" aria-label="Tile palette">
+          <FloatingAtlasTilePanel {...paletteProps} docked />
+        </aside>
+      )}
       <div className="uv-pixel-canvas-column">
         <div className="uv-canvas-toolbar" aria-label="UV and pixel tools">
-          <div className="uv-canvas-toolgroup" role="group" aria-label="Interaction mode">
-            <button
-              type="button"
-              className={`uv-canvas-tool${uvPointerActive ? ' is-active' : ''}`}
-              onClick={() => armUv({ uvPanelTab: 'edit' })}
-              title="Edit UV islands on the texture"
-            >
-              UV
-            </button>
-            <button
-              type="button"
-              className={`uv-canvas-tool${!uvPointerActive ? ' is-active' : ''}`}
-              onClick={() => activatePaintTool(tex.pixelTool)}
-              title="Paint the texture and the 3D model"
-            >
-              Paint
-            </button>
+          <div className="uv-canvas-toolbar-row">
+            {tex.uvPanelTab !== 'tiles' && (
+              <div className="uv-canvas-toolgroup uv-canvas-mode-switch" role="group" aria-label="Editor mode">
+                <button
+                  type="button"
+                  className={`uv-canvas-tool${uvPointerActive ? ' is-active' : ''}`}
+                  onClick={() => armUv({ uvPanelTab: 'edit' })}
+                  aria-pressed={uvPointerActive}
+                  title="Edit UV islands on the texture"
+                >
+                  <BlenderIcon name="uv" size={13} />
+                  <span>UV</span>
+                </button>
+                <button
+                  type="button"
+                  className={`uv-canvas-tool${!uvPointerActive ? ' is-active' : ''}`}
+                  onClick={() => activatePaintTool(tex.pixelTool)}
+                  aria-pressed={!uvPointerActive}
+                  title="Paint the texture and the 3D model"
+                >
+                  <BlenderIcon name="greasepencil" size={13} />
+                  <span>Paint</span>
+                </button>
+              </div>
+            )}
             <label
-              className="uv-canvas-tool"
-              style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-              title="Import image texture file (.png, .jpg, .webp)"
+              className="uv-canvas-tool is-icon"
+              title="Import image texture (.png, .jpg, .webp)"
             >
-              📁 Import Image
+              <BlenderIcon name="import" size={13} />
               <input
                 type="file"
                 accept="image/png,image/jpeg,image/webp,image/gif"
@@ -2171,133 +2170,203 @@ export function UvPixelEditor({ session, workspace }: Props) {
                 }}
               />
             </label>
+            <div className="uv-canvas-toolgroup" role="group" aria-label="Workspace layout">
+              <button
+                type="button"
+                className={`uv-canvas-tool${tex.maximize === 'none' ? ' is-active' : ''}`}
+                onClick={() => workspace.patchTexture({ maximize: 'none' })}
+                title="Show 3D and canvas side-by-side"
+              >
+                <BlenderIcon name="split_vertical" size={13} />
+                <span>Split</span>
+              </button>
+              <button
+                type="button"
+                className={`uv-canvas-tool${tex.maximize === 'left' ? ' is-active' : ''}`}
+                onClick={() => workspace.patchTexture({ maximize: 'left' })}
+                title="Focus 3D viewport"
+              >
+                <BlenderIcon name="view3d" size={13} />
+                <span>3D</span>
+              </button>
+              <button
+                type="button"
+                className={`uv-canvas-tool${tex.maximize === 'right' ? ' is-active' : ''}`}
+                onClick={() => workspace.patchTexture({ maximize: 'right' })}
+                title="Focus UV / Paint canvas"
+              >
+                <BlenderIcon name="image" size={13} />
+                <span>Canvas</span>
+              </button>
+            </div>
+            <div className="uv-canvas-toolbar-spacer" />
+            <div className="uv-canvas-toolgroup uv-canvas-view-tools" role="group" aria-label="Canvas view">
+              <button
+                type="button"
+                className={`uv-canvas-tool is-icon${tex.showUvCheckerboard ? ' is-active' : ''}`}
+                onClick={() => workspace.patchTexture({ showUvCheckerboard: !tex.showUvCheckerboard })}
+                title="Toggle checkerboard"
+                aria-pressed={tex.showUvCheckerboard}
+                aria-label="Toggle checkerboard"
+              >
+                <BlenderIcon name="grid" size={13} />
+              </button>
+              <button type="button" className="uv-canvas-tool is-icon" onClick={() => stepZoom(-1)} aria-label="Zoom out">
+                <BlenderIcon name="zoom_out" size={13} />
+              </button>
+              <span className="uv-canvas-zoom">{Math.round(editorCamera(tex).zoom * 100)}%</span>
+              <button type="button" className="uv-canvas-tool is-icon" onClick={() => stepZoom(1)} aria-label="Zoom in">
+                <BlenderIcon name="zoom_in" size={13} />
+              </button>
+              <button type="button" className="uv-canvas-tool" onClick={actualPixels} title="Actual pixels">
+                <BlenderIcon name="viewzoom" size={13} />
+                <span>1:1</span>
+              </button>
+              <button
+                type="button"
+                className={`uv-canvas-tool is-icon${tex.uvInspectorOpen ? ' is-active' : ''}`}
+                onClick={() => workspace.patchTexture({ uvInspectorOpen: !tex.uvInspectorOpen })}
+                title={tex.uvInspectorOpen ? 'Hide inspector (N)' : 'Show inspector (N)'}
+                aria-pressed={tex.uvInspectorOpen}
+                aria-label={tex.uvInspectorOpen ? 'Hide inspector' : 'Show inspector'}
+              >
+                <BlenderIcon name="properties" size={13} />
+              </button>
+            </div>
           </div>
-          <div className="uv-canvas-toolgroup" role="group" aria-label="Layout view mode">
-            <button
-              type="button"
-              className={`uv-canvas-tool${tex.maximize === 'none' ? ' is-active' : ''}`}
-              onClick={() => workspace.patchTexture({ maximize: 'none' })}
-              title="Show 3D View and UV Editor side-by-side"
-            >
-              📐 Split
-            </button>
-            <button
-              type="button"
-              className={`uv-canvas-tool${tex.maximize === 'left' ? ' is-active' : ''}`}
-              onClick={() => workspace.patchTexture({ maximize: 'left' })}
-              title="Focus 3D Viewport (Full Screen 3D)"
-            >
-              🧊 Full 3D
-            </button>
-            <button
-              type="button"
-              className={`uv-canvas-tool${tex.maximize === 'right' ? ' is-active' : ''}`}
-              onClick={() => workspace.patchTexture({ maximize: 'right' })}
-              title="Focus UV Editor (Full Screen UV)"
-            >
-              🎨 Full UV
-            </button>
-          </div>
-          {uvPointerActive ? (
-            <>
-              <div className="uv-canvas-toolgroup" role="group" aria-label="UV selection mode">
-                {(['face', 'point', 'island'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    className={`uv-canvas-tool${tex.uvEditMode === mode ? ' is-active' : ''}`}
-                    onClick={() => armUv({ uvEditMode: mode, uvPanelTab: 'edit' })}
-                  >
-                    {mode[0]!.toUpperCase() + mode.slice(1)}
-                  </button>
-                ))}
-              </div>
-              <div className="uv-canvas-toolgroup" role="group" aria-label="Smart Unwrap">
+          <div className="uv-canvas-toolbar-row uv-canvas-toolbar-tools">
+            {tex.uvPanelTab === 'tiles' ? (
+              <div className="uv-canvas-toolgroup" role="group" aria-label="Tileset tools">
+                <span className="uv-canvas-tool is-label">Tileset</span>
                 <button
                   type="button"
-                  className="uv-canvas-tool"
-                  style={{ color: '#ffd2a8', fontWeight: 600 }}
-                  onClick={() => runUnwrap('smart')}
-                  title="Smart Conformal Unwrap: Auto seam sharp edges & pack islands"
+                  className={`uv-canvas-tool${!tex.atlasNavigatorPan ? ' is-active' : ''}`}
+                  onClick={() => workspace.patchTexture({ atlasNavigatorPan: false })}
+                  title="Click a tile to select it. Shift+drag selects a stamp."
                 >
-                  ⚡ Smart Unwrap
+                  Select
+                </button>
+                <button
+                  type="button"
+                  className={`uv-canvas-tool${tex.atlasNavigatorPan ? ' is-active' : ''}`}
+                  onClick={() => workspace.patchTexture({ atlasNavigatorPan: true })}
+                  title="Drag to pan the atlas"
+                >
+                  Pan
+                </button>
+                <button
+                  type="button"
+                  className={`uv-canvas-tool${tex.atlasPanelOpen ? ' is-active' : ''}`}
+                  onClick={() => toggleTilesetPopup(workspace)}
+                  title={tex.atlasPanelOpen ? 'Hide tileset palette' : 'Show tileset palette'}
+                  aria-pressed={tex.atlasPanelOpen}
+                >
+                  Palette
                 </button>
               </div>
-              <div className="uv-canvas-toolgroup" role="group" aria-label="UV transform tool">
-                {(['move', 'scale', 'rotate'] as const).map((tool) => (
+            ) : uvPointerActive ? (
+              <>
+                <div className="uv-canvas-toolgroup" role="group" aria-label="UV selection mode">
+                  {(['face', 'point', 'island'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={`uv-canvas-tool${tex.uvEditMode === mode ? ' is-active' : ''}`}
+                      onClick={() => armUv({ uvEditMode: mode, uvPanelTab: 'edit' })}
+                      title={`${mode[0]!.toUpperCase() + mode.slice(1)} selection`}
+                    >
+                      <BlenderIcon name={UV_EDIT_MODE_ICONS[mode]} size={13} />
+                      <span>{mode[0]!.toUpperCase() + mode.slice(1)}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="uv-canvas-toolgroup" role="group" aria-label="Smart Unwrap">
+                  <button
+                    type="button"
+                    className="uv-canvas-tool"
+                    onClick={() => runUnwrap('smart')}
+                    title="Planar unwrap per island, then pack into 0–1"
+                  >
+                    <BlenderIcon name="mod_uvproject" size={13} />
+                    <span>Unwrap</span>
+                  </button>
+                </div>
+                <div className="uv-canvas-toolgroup" role="group" aria-label="UV transform tool">
+                  {(['move', 'scale', 'rotate'] as const).map((tool) => (
+                    <button
+                      key={tool}
+                      type="button"
+                      className={`uv-canvas-tool${tex.uvTransformTool === tool ? ' is-active' : ''}`}
+                      onClick={() => armUv({ uvTransformTool: tool, uvPanelTab: 'edit' })}
+                      title={tool[0]!.toUpperCase() + tool.slice(1)}
+                    >
+                      <BlenderIcon name={UV_TRANSFORM_ICONS[tool]} size={13} />
+                      <span>{tool[0]!.toUpperCase() + tool.slice(1)}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="uv-canvas-toolgroup" role="group" aria-label="UV alignment">
+                  <button type="button" className="uv-canvas-tool is-icon" onClick={() => handleAlign('left')} title="Move selection to U=0">
+                    <BlenderIcon name="align_left" size={13} />
+                    <span className="uv-canvas-tool-key">L</span>
+                  </button>
+                  <button type="button" className="uv-canvas-tool is-icon" onClick={() => handleAlign('center-u')} title="Center selection on U=0.5">
+                    <BlenderIcon name="align_center" size={13} />
+                    <span className="uv-canvas-tool-key">U</span>
+                  </button>
+                  <button type="button" className="uv-canvas-tool is-icon" onClick={() => handleAlign('right')} title="Move selection to U=1">
+                    <BlenderIcon name="align_right" size={13} />
+                    <span className="uv-canvas-tool-key">R</span>
+                  </button>
+                  <button type="button" className="uv-canvas-tool is-icon" onClick={() => handleAlign('top')} title="Move selection to V=1">
+                    <BlenderIcon name="align_top" size={13} />
+                    <span className="uv-canvas-tool-key">T</span>
+                  </button>
+                  <button type="button" className="uv-canvas-tool is-icon" onClick={() => handleAlign('bottom')} title="Move selection to V=0">
+                    <BlenderIcon name="align_bottom" size={13} />
+                    <span className="uv-canvas-tool-key">B</span>
+                  </button>
+                  <button type="button" className="uv-canvas-tool" onClick={handlePixelSnap} title="Snap selected UVs to texels">
+                    <BlenderIcon name="snap_increment" size={13} />
+                    <span>Snap</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="uv-canvas-toolgroup uv-canvas-brush-tools" role="group" aria-label="Paint tools">
+                {PIXEL_TOOLS.map((tool) => (
                   <button
                     key={tool}
                     type="button"
-                    className={`uv-canvas-tool${tex.uvTransformTool === tool ? ' is-active' : ''}`}
-                    onClick={() => armUv({ uvTransformTool: tool, uvPanelTab: 'edit' })}
+                    className={`uv-canvas-tool is-icon${tex.pixelTool === tool ? ' is-active' : ''}`}
+                    onClick={() => activatePaintTool(tool)}
+                    title={`${PIXEL_TOOL_LABELS[tool]} (${PIXEL_TOOL_HOTKEYS[tool]})`}
+                    aria-label={`${PIXEL_TOOL_LABELS[tool]} (${PIXEL_TOOL_HOTKEYS[tool]})`}
+                    aria-pressed={tex.pixelTool === tool}
                   >
-                    {tool[0]!.toUpperCase() + tool.slice(1)}
+                    <BlenderIcon name={PIXEL_TOOL_ICONS[tool]} size={14} />
                   </button>
                 ))}
-              </div>
-              <div className="uv-canvas-toolgroup" role="group" aria-label="UV alignment">
-                <button type="button" className="uv-canvas-tool" onClick={() => handleAlign('left')} title="Align Left (U min)">Align L</button>
-                <button type="button" className="uv-canvas-tool" onClick={() => handleAlign('center-u')} title="Align Center U">Center U</button>
-                <button type="button" className="uv-canvas-tool" onClick={() => handleAlign('right')} title="Align Right (U max)">Align R</button>
-                <button type="button" className="uv-canvas-tool" onClick={() => handleAlign('top')} title="Align Top (V max)">Align T</button>
-                <button type="button" className="uv-canvas-tool" onClick={handlePixelSnap} title="Snap to Pixel Grid">Pixel Snap</button>
-              </div>
-            </>
-          ) : (
-            <div className="uv-canvas-toolgroup uv-canvas-brush-tools" role="group" aria-label="Paint tools">
-              {PIXEL_TOOLS.map((tool) => (
+                <span className="uv-canvas-divider" aria-hidden />
                 <button
-                  key={tool}
                   type="button"
-                  className={`uv-canvas-tool${tex.pixelTool === tool ? ' is-active' : ''}`}
-                  onClick={() => activatePaintTool(tool)}
-                  title={`${PIXEL_TOOL_LABELS[tool]} (${PIXEL_TOOL_HOTKEYS[tool]})`}
+                  className={`uv-canvas-tool${tex.paintMode3D ? ' is-active' : ''}`}
+                  title="Paint on the 3D model"
+                  aria-pressed={tex.paintMode3D}
+                  onClick={() => workspace.patchTexture({ paintMode3D: !tex.paintMode3D })}
                 >
-                  {PIXEL_TOOL_LABELS[tool]}
+                  <BlenderIcon name="view3d" size={13} />
+                  <span>3D</span>
                 </button>
-              ))}
-              <span className="uv-canvas-divider" aria-hidden />
-              <button
-                type="button"
-                className={`uv-canvas-tool${tex.paintMode3D ? ' is-active' : ''}`}
-                title="Paint on the 3D model (left view)"
-                aria-pressed={tex.paintMode3D}
-                onClick={() => workspace.patchTexture({ paintMode3D: !tex.paintMode3D })}
-              >
-                3D
-              </button>
-              <label className="uv-canvas-swatch" title="Foreground colour (X swaps)">
-                <input
-                  type="color"
-                  value={rgbaToHex(tex.foreground)}
-                  onChange={(e) => workspace.patchTexture({ foreground: hexToRgba(e.target.value, tex.foreground[3]) })}
-                />
-              </label>
-            </div>
-          )}
-          <div className="uv-canvas-toolgroup uv-canvas-view-tools" role="group" aria-label="Canvas view">
-            <button
-              type="button"
-              className={`uv-canvas-tool${tex.showUvCheckerboard ? ' is-active' : ''}`}
-              onClick={() => workspace.patchTexture({ showUvCheckerboard: !tex.showUvCheckerboard })}
-              title="Toggle UV Checkerboard pattern"
-            >
-              Checker
-            </button>
-            <button type="button" className="uv-canvas-tool" onClick={() => stepZoom(-1)} aria-label="Zoom out">−</button>
-            <span className="uv-canvas-zoom">{Math.round(editorCamera(tex).zoom * 100)}%</span>
-            <button type="button" className="uv-canvas-tool" onClick={() => stepZoom(1)} aria-label="Zoom in">+</button>
-            <button type="button" className="uv-canvas-tool" onClick={actualPixels} title="Actual pixels">1:1</button>
-            <button
-              type="button"
-              className={`uv-canvas-tool${tex.uvInspectorOpen ? ' is-active' : ''}`}
-              onClick={() => workspace.patchTexture({ uvInspectorOpen: !tex.uvInspectorOpen })}
-              title={tex.uvInspectorOpen ? 'Hide inspector (N)' : 'Show inspector (N)'}
-              aria-pressed={tex.uvInspectorOpen}
-              aria-label={tex.uvInspectorOpen ? 'Hide inspector' : 'Show inspector'}
-            >
-              <BlenderIcon name="properties" size={13} />
-            </button>
+                <label className="uv-canvas-swatch" title="Foreground colour (X swaps)">
+                  <input
+                    type="color"
+                    value={rgbaToHex(tex.foreground)}
+                    onChange={(e) => workspace.patchTexture({ foreground: hexToRgba(e.target.value, tex.foreground[3]) })}
+                  />
+                </label>
+              </div>
+            )}
           </div>
         </div>
         <div ref={hostRef} className="uv-pixel-canvas-host">
@@ -2347,10 +2416,10 @@ export function UvPixelEditor({ session, workspace }: Props) {
         />
         {canvasImage && (
           <div className="uv-canvas-status" aria-live="polite">
-            <span className={`uv-status-mode${uvPointerActive ? ' is-uv' : ' is-paint'}`}>
-              {uvPointerActive ? 'UV EDIT' : 'PIXEL PAINT'}
+            <span className={`uv-status-mode${tex.uvPanelTab === 'tiles' ? ' is-tiles' : uvPointerActive ? ' is-uv' : ' is-paint'}`}>
+              {tex.uvPanelTab === 'tiles' ? 'TILESET' : uvPointerActive ? 'UV EDIT' : 'PIXEL PAINT'}
             </span>
-            <span>{image ? image.name : 'UV guide · no texture assigned'}</span>
+            <span className="uv-status-name">{image ? image.name : 'UV guide · no texture assigned'}</span>
             <span>{canvasImage.width}×{canvasImage.height}</span>
             <span>{Math.round(editorCamera(tex).zoom * 100)}%</span>
             <span>{modeSummary}</span>
@@ -2404,25 +2473,32 @@ export function UvPixelEditor({ session, workspace }: Props) {
           onRotateToEdge={runRotateToEdge}
           onFlipFaces={flipSelectedFaces}
           onToggleSeams={toggleSeams}
+          onAutoSeams={autoMarkSeams}
+          onClearSeams={clearSeams}
+          onAlign={handleAlign}
+          onFlatten={handleFlatten}
+          onDistribute={handleDistribute}
+          onPixelSnap={handlePixelSnap}
           onFrame={frameSelection}
           onArmUv={armUv}
           onRefresh={refresh}
           embedded
+          onApplyAtlasTile={() => applySelectedAtlasTile()}
+          onCreateAtlasPlane={createAtlasTilePlane}
+          onCreateAtlasGrid={createAtlasGrid}
+          onPickAtlasTile={pickAtlasTileFromFace}
+          onToggleTileDraw={toggleTileDraw}
+          onEraseAtlasFaces={eraseSelectedTileFaces}
+          onFillAtlasConnected={fillConnectedTileFaces}
         />
       </UvInspectorPortal>
-      {tex.atlasPanelOpen && (
-        <FloatingAtlasTilePanel
-          session={session}
-          workspace={workspace}
-          hasUvSelection={!!selectedSnapshot()}
-          onApply={() => applySelectedAtlasTile()}
-          onCreatePlane={createAtlasTilePlane}
-          onCreateGrid={createAtlasGrid}
-          onPickTile={pickAtlasTileFromFace}
-          onToggleDraw={toggleTileDraw}
-          onEraseFaces={eraseSelectedTileFaces}
-          onFillConnected={fillConnectedTileFaces}
-        />
+      {paletteDocked && tex.atlasPanelDock === 'right' && (
+        <aside className="tile-palette-dock" aria-label="Tile palette">
+          <FloatingAtlasTilePanel {...paletteProps} docked />
+        </aside>
+      )}
+      {showPalette && tex.atlasPanelDock === 'float' && (
+        <FloatingAtlasTilePanel {...paletteProps} />
       )}
     </div>
   );

@@ -1,9 +1,56 @@
 import { describe, expect, it } from 'vitest';
 import { buildBox } from '@/core/mesh/builders/BoxBuilder';
-import { alignUvs, distributeUvs, snapUvsToPixelGrid, getCornerUv } from '@/core/uv/UvEdit';
+import { CommandHistory } from '@/core/history/CommandHistory';
+import {
+  alignUvs,
+  boundsOfUvs,
+  commitUvEdit,
+  distributeUvs,
+  getCornerUv,
+  snapUvsToPixelGrid,
+  snapshotUvs,
+  translateUvsToAlign,
+} from '@/core/uv/UvEdit';
 
 describe('UvAlignment', () => {
-  it('aligns UV corners to left boundary', () => {
+  it('translates the selection bbox to the left of 0–1 without collapsing width', () => {
+    const mesh = buildBox({ width: 1, height: 1, depth: 1 });
+    const layerId = mesh.defaultUvLayerId!;
+    const cornerIds = [...mesh.faceCorners.keys()].slice(0, 4);
+    mesh.faceCorners.get(cornerIds[0]!)!.uvs.set(layerId, { x: 0.2, y: 0.2 });
+    mesh.faceCorners.get(cornerIds[1]!)!.uvs.set(layerId, { x: 0.5, y: 0.2 });
+    mesh.faceCorners.get(cornerIds[2]!)!.uvs.set(layerId, { x: 0.5, y: 0.4 });
+    mesh.faceCorners.get(cornerIds[3]!)!.uvs.set(layerId, { x: 0.2, y: 0.4 });
+
+    const before = snapshotUvs(mesh, cornerIds, layerId);
+    const beforeBounds = boundsOfUvs(before)!;
+    translateUvsToAlign(mesh, cornerIds, layerId, 'left');
+    const after = snapshotUvs(mesh, cornerIds, layerId);
+    const afterBounds = boundsOfUvs(after)!;
+
+    expect(afterBounds.min.x).toBeCloseTo(0);
+    expect(afterBounds.size.x).toBeCloseTo(beforeBounds.size.x);
+    expect(afterBounds.size.y).toBeCloseTo(beforeBounds.size.y);
+    expect(afterBounds.min.y).toBeCloseTo(beforeBounds.min.y);
+  });
+
+  it('undoes translate align through commitUvEdit', () => {
+    const mesh = buildBox({ width: 1, height: 1, depth: 1 });
+    const layerId = mesh.defaultUvLayerId!;
+    const cornerIds = [...mesh.faceCorners.keys()].slice(0, 4);
+    for (const id of cornerIds) {
+      mesh.faceCorners.get(id)!.uvs.set(layerId, { x: 0.3, y: 0.3 });
+    }
+    const before = snapshotUvs(mesh, cornerIds, layerId);
+    translateUvsToAlign(mesh, cornerIds, layerId, 'right');
+    const after = snapshotUvs(mesh, cornerIds, layerId);
+    const history = new CommandHistory();
+    commitUvEdit(history, mesh, layerId, before, after, 'Align UVs (right)');
+    history.undo();
+    expect(getCornerUv(mesh, cornerIds[0]!, layerId).x).toBeCloseTo(0.3);
+  });
+
+  it('flattens UV corners to the left selection boundary', () => {
     const mesh = buildBox({ width: 1, height: 1, depth: 1 });
     const layerId = mesh.defaultUvLayerId!;
     const cornerIds = [...mesh.faceCorners.keys()].slice(0, 4);

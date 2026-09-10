@@ -288,14 +288,16 @@ export const BlenderIcon = memo(function BlenderIcon({
   );
 
   if (!rawSvg) {
-    // Fallback if an icon name is missing
     return (
       <span
         className={`blender-icon-fallback ${className}`}
         style={containerStyle}
         title={title || name}
+        aria-hidden={!title}
       >
-        ▪
+        <svg viewBox="0 0 16 16" width="100%" height="100%" aria-hidden="true">
+          <rect x="3" y="3" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        </svg>
       </span>
     );
   }

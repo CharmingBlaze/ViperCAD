@@ -280,12 +280,14 @@ export class TerrainStructureTool implements Tool {
     actionName: string,
   ): void {
     const object = context.document.objects.get(objectId);
+    const mesh = object?.meshId ? context.document.meshes.get(object.meshId) : null;
     if (!object) return;
     let applied = true;
     context.history.execute({
       name: actionName,
       execute: () => {
         if (applied) return;
+        if (mesh) context.document.meshes.set(mesh.id, mesh);
         context.document.objects.set(objectId, object);
         if (!context.document.rootObjectIds.includes(objectId)) {
           context.document.rootObjectIds.push(objectId);

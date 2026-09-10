@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import {
-  DEFAULT_SKY_PARAMS,
   SKY_PRESETS,
   generateSkysphereMesh,
+  getDocumentSkybox,
   renderProceduralSkyCanvas,
+  updateDocumentSkybox,
   type SkyPreset,
   type SkyboxParams,
 } from '@/core/skybox/SkyboxGenerator';
-import { commitMeshObject } from '@/core/document/ModelDocument';
+import { commitMeshObject, createMaterial, removeObject } from '@/core/document/ModelDocument';
+import { createImageAssetFromPixels, createTextureAsset } from '@/core/image/PixelEditor';
+import { pushToast } from '@/app/Toast';
 
 export function FloatingSkyboxEditor({
   session,
@@ -17,7 +20,7 @@ export function FloatingSkyboxEditor({
   session: EditorSession;
   onClose: () => void;
 }) {
-  const [params, setParams] = useState<SkyboxParams>(DEFAULT_SKY_PARAMS);
+  const [params, setParams] = useState<SkyboxParams>(() => getDocumentSkybox(session.document));
   const [customImage, setCustomImage] = useState<HTMLImageElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -34,16 +37,24 @@ export function FloatingSkyboxEditor({
     if (canvasRef.current) {
       renderProceduralSkyCanvas(canvasRef.current, params, customImage);
     }
-  }, [params, customImage]);
+    updateDocumentSkybox(session.document, params);
+  }, [params, customImage, session]);
+
+  const persistParams = (next: SkyboxParams) => {
+    setParams(next);
+    updateDocumentSkybox(session.document, next);
+  };
 
   const handleImageFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
+    reader.onerror = () => pushToast('Could not read the sky image', 'error');
     reader.onload = (event) => {
       const src = event.target?.result as string;
       if (!src) return;
       const img = new Image();
+      img.onerror = () => pushToast('Could not decode the sky image', 'error');
       img.onload = () => {
         setCustomImage(img);
         if (canvasRef.current) {
@@ -131,18 +142,89 @@ export function FloatingSkyboxEditor({
 
   const applyPreset = (presetName: SkyPreset) => {
     const p = SKY_PRESETS[presetName];
-    setParams((prev) => ({
-      ...prev,
+    persistParams({
+      ...params,
       ...p,
       preset: presetName,
-    }));
+    });
   };
 
   const applySkyboxToScene = () => {
+    updateDocumentSkybox(session.document, params);
+    const canvas = canvasRef.current;
+    if (canvas) renderProceduralSkyCanvas(canvas, params, customImage);
+
     const skysphere = generateSkysphereMesh(600, 24);
-    commitMeshObject(session.document, skysphere, { name: `Skysphere (${params.preset})` });
+    const { objectId, meshId } = commitMeshObject(session.document, skysphere, {
+      name: `Skysphere (${params.preset})`,
+    });
+    const object = session.document.objects.get(objectId);
+    if (object) {
+      object.metadata.skybox = 'true';
+      object.metadata.skyboxPreset = params.preset;
+    }
+
+    let imageId: string | null = null;
+    let textureId: string | null = null;
+    let materialId: string | null = null;
+    if (canvas) {
+      try {
+        const ctx = canvas.getContext('2d');
+        const pixels = ctx?.getImageData(0, 0, canvas.width, canvas.height).data;
+        if (pixels) {
+          const image = createImageAssetFromPixels(
+            session.document,
+            `Sky ${params.preset}`,
+            canvas.width,
+            canvas.height,
+            pixels,
+          );
+          const texture = createTextureAsset(session.document, image, `Sky ${params.preset}`);
+          texture.wrapping = 'clamp';
+          const material = createMaterial(session.document, {
+            name: `Sky ${params.preset}`,
+            assignToObjectId: objectId,
+          });
+          material.baseColourTextureId = texture.id;
+          material.unlit = true;
+          material.doubleSided = true;
+          imageId = image.id;
+          textureId = texture.id;
+          materialId = material.id;
+        }
+      } catch {
+        pushToast('Sky mesh created without a baked texture', 'info');
+      }
+    }
+
+    const mesh = session.document.meshes.get(meshId);
+    let applied = true;
+    session.history.execute({
+      name: `Apply Skybox (${params.preset})`,
+      execute: () => {
+        if (applied) return;
+        if (mesh) session.document.meshes.set(mesh.id, mesh);
+        if (object) session.document.objects.set(object.id, object);
+        if (object && !session.document.rootObjectIds.includes(object.id)) {
+          session.document.rootObjectIds.push(object.id);
+        }
+        session.document.dirty = true;
+        session.requestRedraw();
+        applied = true;
+      },
+      undo: () => {
+        removeObject(session.document, objectId, true);
+        if (materialId) session.document.materials.delete(materialId);
+        if (textureId) session.document.textures.delete(textureId);
+        if (imageId) session.document.images.delete(imageId);
+        session.document.dirty = true;
+        session.requestRedraw();
+        applied = false;
+      },
+    });
     session.document.dirty = true;
     session.requestRedraw();
+    pushToast(`Applied ${params.preset} skysphere`, 'success');
   };
 
   const containerStyle: CSSProperties = {

@@ -26,10 +26,13 @@ import {
   type ObjectRenderHandle,
 } from '@/renderer/MeshRenderAdapter';
 import { evaluateMeshAsync } from '@/renderer/workers/MeshEvaluationWorkerClient';
+import { shouldPreviewTerrainAlbedo } from '@/app/tilesetWorkspace';
+import type { WorkspaceController } from '@/workspace/WorkspaceController';
 
 type Options = {
   handles: Map<string, ObjectRenderHandle>;
   getSession: () => EditorSession | null;
+  getWorkspace?: () => WorkspaceController | null;
   isAttached: () => boolean;
   onApplied: () => void;
 };
@@ -177,13 +180,15 @@ export class ViewportSceneSynchronizer {
       .filter(Boolean) as MaterialAsset[];
     for (const material of materials) retuneDefaultPlaceholderMaterial(material);
     const resolvedMaterials = materials.length ? materials : [defaultMaterial(session)];
+    const assets = {
+      textures: session.document.textures,
+      images: session.document.images,
+      albedoPreview: shouldPreviewTerrainAlbedo(this.options.getWorkspace?.() ?? null),
+    };
 
     let handle = this.options.handles.get(handleKey);
     if (!handle) {
-      handle = createObjectRenderHandle(pickObjectId, renderMesh, resolvedMaterials, {
-        textures: session.document.textures,
-        images: session.document.images,
-      });
+      handle = createObjectRenderHandle(pickObjectId, renderMesh, resolvedMaterials, assets);
       handle.meshId = baseMesh.id;
       handle.group.name = handleKey;
       this.options.handles.set(handleKey, handle);
@@ -196,7 +201,7 @@ export class ViewportSceneSynchronizer {
         handle,
         renderMesh,
         resolvedMaterials,
-        { textures: session.document.textures, images: session.document.images },
+        assets,
         (targetHandle, targetMesh) => this.schedule(
           handleKey,
           targetHandle,
@@ -264,12 +269,16 @@ export class ViewportSceneSynchronizer {
       this.pending.delete(handleKey);
       const session = this.options.getSession();
       const currentBase = session?.document.meshes.get(baseMesh.id);
-      if (currentBase) {
-        const currentObject = object ?? session?.document.objects.get(handle.objectId);
+      if (session && currentBase) {
+        const currentObject = object ?? session.document.objects.get(handle.objectId);
         const currentRender = currentObject
           ? resolveDisplayMesh(currentBase, currentObject)
           : currentBase;
-        updateObjectRenderHandle(handle, currentRender);
+        updateObjectRenderHandle(handle, currentRender, undefined, {
+          textures: session.document.textures,
+          images: session.document.images,
+          albedoPreview: shouldPreviewTerrainAlbedo(this.options.getWorkspace?.() ?? null),
+        });
       }
       this.options.onApplied();
     });

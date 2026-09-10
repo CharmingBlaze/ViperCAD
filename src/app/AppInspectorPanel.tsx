@@ -72,7 +72,7 @@ import {
 } from '@/core/symmetry/Symmetry';
 import { gameReadiness } from '@/app/GameExportProfiles';
 import { makeModelInstanceUnique } from '@/core/editor/ModelInstances';
-import { PRIMITIVE_KINDS, PRIMITIVE_LABELS, type PrimitiveKind } from '@/core/primitives/PrimitiveFactory';
+import { PRIMITIVE_KINDS, PRIMITIVE_LABELS } from '@/core/primitives/PrimitiveFactory';
 import { ModifierStackPanel } from '@/app/inspector/ModifierStackPanel';
 import { PrimitiveOperationPanel } from '@/app/inspector/PrimitiveOperationPanel';
 import { CurveOperationPanel } from '@/app/inspector/CurveOperationPanel';
@@ -984,8 +984,8 @@ export function AppInspectorPanel({
         {tab === 'create' && (
           <>
             <section className="uv-section">
-              <h3 className="uv-section-title">Mode</h3>
-              <div className="inspector-segmented uv-btn-grid uv-btn-grid-4" role="group" aria-label="Create mode">
+              <h3 className="uv-section-title">Build with</h3>
+              <div className="inspector-segmented create-mode-switch" role="group" aria-label="Create mode">
                 <button
                   type="button"
                   className={createMode === 'primitive' ? 'is-active' : ''}
@@ -997,19 +997,20 @@ export function AppInspectorPanel({
                     onRefresh();
                   }}
                 >
-                  <BlenderIcon name="mesh_cube" size={12} />
-                  Primitive
+                  <BlenderIcon name="mesh_cube" size={13} />
+                  <span>Primitive</span>
                 </button>
                 <button
                   type="button"
-                  className={`tool${createMode === 'workflows' ? ' is-active' : ''}`}
+                  className={createMode === 'workflows' ? 'is-active' : ''}
                   aria-pressed={createMode === 'workflows'}
                   onClick={() => {
                     cancelCreateTools();
                     activateWorkflow();
                   }}
                 >
-                  Blockout
+                  <BlenderIcon name="mesh_grid" size={13} />
+                  <span>Blockout</span>
                 </button>
                 <button
                   type="button"
@@ -1023,8 +1024,8 @@ export function AppInspectorPanel({
                     onRefresh();
                   }}
                 >
-                  <BlenderIcon name="curve_data" size={12} />
-                  Curves
+                  <BlenderIcon name="curve_data" size={13} />
+                  <span>Curves</span>
                 </button>
                 <button
                   type="button"
@@ -1041,8 +1042,8 @@ export function AppInspectorPanel({
                     onRefresh();
                   }}
                 >
-                  <BlenderIcon name="greasepencil" size={12} />
-                  Draw
+                  <BlenderIcon name="greasepencil" size={13} />
+                  <span>Draw</span>
                 </button>
               </div>
             </section>
@@ -2917,7 +2918,7 @@ export function AppInspectorPanel({
                         primitiveTool.selectPrimitive(kind, session.context());
                         onRefresh();
                       }}
-                      title={PRIMITIVE_LABELS[kind]}
+                      title={`${PRIMITIVE_LABELS[kind]} · click in the viewport to place`}
                     >
                       <PrimitiveIcon kind={kind} size={19} />
                       <span>{PRIMITIVE_LABELS[kind]}</span>
@@ -2927,30 +2928,6 @@ export function AppInspectorPanel({
               </div>
 
               <div className="inspector-field-row">
-                <label className="uv-field">
-                  <span>Type</span>
-                  <select
-                    className="uv-select"
-                    aria-label="Primitive"
-                    value={primitiveTool.kindChosen ? primitiveTool.state.kind : ''}
-                    onChange={(e) => {
-                      const next = e.target.value as PrimitiveKind;
-                      if (!next) return;
-                      session.tools.setActive('create-primitive', session.context());
-                      primitiveTool.selectPrimitive(next, session.context());
-                      onRefresh();
-                    }}
-                  >
-                    <option value="" disabled>
-                      Select…
-                    </option>
-                    {PRIMITIVE_KINDS.map((kind) => (
-                      <option key={kind} value={kind}>
-                        {PRIMITIVE_LABELS[kind]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
                 <label className="uv-field">
                   <span>Complexity</span>
                   <select
@@ -2995,35 +2972,20 @@ export function AppInspectorPanel({
                 />
                 Continuous
               </label>
-              <p className="uv-hint">
-                Click a surface to place. Click empty space to use the view plane.
-              </p>
-              {!isCreatingPrimitive ? (
-                <button
-                  type="button"
-                  className="tool primary uv-btn-block"
-                  disabled={!primitiveTool.kindChosen}
-                  onClick={() => {
-                    session.tools.setActive('create-primitive', session.context());
-                    onRefresh();
-                  }}
-                >
-                  {primitiveTool.kindChosen
-                    ? `Create ${PRIMITIVE_LABELS[primitiveTool.state.kind]}`
-                    : 'Create'}
-                </button>
-              ) : (
+              {isCreatingPrimitive && primitiveTool.kindChosen && (
                 <div className="uv-btn-grid uv-btn-grid-2" style={{ marginTop: 8 }}>
-                  <button
-                    type="button"
-                    className="tool primary"
-                    onClick={() => {
-                      primitiveTool.confirm(session.context());
-                      onRefresh();
-                    }}
-                  >
-                    Commit
-                  </button>
+                  {primitiveTool.state.stage !== 'idle' && (
+                    <button
+                      type="button"
+                      className="tool"
+                      onClick={() => {
+                        primitiveTool.confirm(session.context());
+                        onRefresh();
+                      }}
+                    >
+                      Confirm {PRIMITIVE_LABELS[primitiveTool.state.kind]}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="tool"
@@ -3041,11 +3003,16 @@ export function AppInspectorPanel({
             )}
 
             {createMode === 'primitive' && isCreatingPrimitive && (
+              primitiveTool.state.stage !== 'idle' ||
+              ['cylinder', 'cone', 'sphere', 'capsule', 'tube', 'stairs', 'arch', 'torus'].includes(
+                primitiveTool.state.kind,
+              )
+            ) && (
               <section className="uv-section">
                 <h3 className="uv-section-title">
-                  Draw · {primitiveTool.state.stage}
+                  {primitiveTool.state.stage !== 'idle' ? 'Size' : 'Options'}
                 </h3>
-                {(['width', 'height', 'depth'] as const).map((key) => (
+                {primitiveTool.state.stage !== 'idle' && (['width', 'height', 'depth'] as const).map((key) => (
                   <label key={key} className="uv-field">
                     <span>{key[0]!.toUpperCase() + key.slice(1)}</span>
                     <input
@@ -3162,21 +3129,6 @@ export function AppInspectorPanel({
                     </label>
                   </>
                 )}
-                {primitiveTool.state.stage !== 'idle' && (
-                  <button
-                    type="button"
-                    className="tool primary uv-btn-block"
-                    onClick={() => {
-                      primitiveTool.confirm(session.context());
-                      onRefresh();
-                    }}
-                  >
-                    Finish
-                  </button>
-                )}
-                <p className="uv-hint">
-                  Click-drag base · height · confirm · Shift proportional · Alt centre · Esc cancel
-                </p>
               </section>
             )}
           </>
@@ -3185,7 +3137,7 @@ export function AppInspectorPanel({
         {tab === 'edit' && (
           <>
             {editSection === 'select' && <section className="uv-section">
-              <h3 className="uv-section-title">Mode</h3>
+              <h3 className="uv-section-title">Selection</h3>
               <div className="selection-mode-strip" role="group" aria-label="Selection mode">
                 {(
                   [

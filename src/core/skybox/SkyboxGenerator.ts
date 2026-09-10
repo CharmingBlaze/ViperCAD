@@ -256,3 +256,18 @@ export function renderProceduralSkyCanvas(
     }
   }
 }
+
+export function getDocumentSkybox(doc: { settings: Record<string, unknown> }): SkyboxParams {
+  const raw = doc.settings.skybox as Partial<SkyboxParams> | undefined;
+  return { ...DEFAULT_SKY_PARAMS, ...(raw ?? {}) };
+}
+
+export function updateDocumentSkybox(
+  doc: { settings: Record<string, unknown>; dirty?: boolean },
+  updates: Partial<SkyboxParams>,
+): SkyboxParams {
+  const next = { ...getDocumentSkybox(doc), ...updates };
+  doc.settings.skybox = next;
+  if ('dirty' in doc) doc.dirty = true;
+  return next;
+}

@@ -113,4 +113,39 @@ describe('TerrainStructureTool', () => {
     expect(session.document.objects.size).toBe(countBefore + 1);
     expect(tool.point1).toBeNull();
   });
+
+  it('restores a placed building mesh on redo', () => {
+    const session = new EditorSession();
+    createTerrain(session, { size: 20, resolution: 8 });
+    const terrain = [...session.document.objects.values()].find(
+      (o) => o.metadata.terrain === 'true',
+    );
+    const tool = new TerrainStructureTool();
+    tool.configure('building', terrain!.id, session.context());
+    tool.begin(
+      {
+        button: 'left',
+        screenX: 100,
+        screenY: 100,
+        worldPosition: v3(2, 0, 2),
+        rayOrigin: v3(2, 20, 2),
+        rayDirection: v3(0, -1, 0),
+        shiftKey: false,
+        ctrlKey: false,
+        altKey: false,
+      },
+      session.context(),
+    );
+    const placed = [...session.document.objects.values()].find((object) => object.name.includes('Building'))!;
+    const meshId = placed.meshId!;
+    expect(session.document.meshes.has(meshId)).toBe(true);
+
+    expect(session.undo()).toBe(true);
+    expect(session.document.objects.has(placed.id)).toBe(false);
+    expect(session.document.meshes.has(meshId)).toBe(false);
+
+    expect(session.redo()).toBe(true);
+    expect(session.document.objects.has(placed.id)).toBe(true);
+    expect(session.document.meshes.has(meshId)).toBe(true);
+  });
 });

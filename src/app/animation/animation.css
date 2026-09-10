@@ -134,8 +134,8 @@
 
 .animation-panel-kicker {
   font-size: 0.62rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-transform: none;
   color: var(--muted);
 }
 
@@ -475,10 +475,10 @@
 
 .rig-panel-title {
   margin: 0 0 7px;
-  font-size: 0.66rem;
+  font-size: 0.68rem;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  text-transform: none;
   color: var(--muted);
 }
 
@@ -744,10 +744,10 @@
 
 .rig-bone-props-label {
   margin: 0;
-  font-size: 0.62rem;
+  font-size: 0.68rem;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  text-transform: none;
   color: var(--muted);
 }
 
@@ -2065,10 +2065,10 @@
   align-items: center;
   justify-content: space-between;
   font-size: 0.74rem;
-  font-weight: 700;
+  font-weight: 650;
   color: var(--text);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
+  text-transform: none;
+  letter-spacing: 0.01em;
   padding-bottom: 4px;
   border-bottom: 1px solid var(--line);
 }

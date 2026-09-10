@@ -3,6 +3,8 @@ import { createEmptyDocument, createDefaultMaterial } from '@/core/document/Mode
 import { DEFAULT_PLACEHOLDER_IMAGE_NAME } from '@/core/image/DefaultPlaceholderImage';
 import { faceCornerIds } from '@/core/mesh/EditableMesh';
 import { buildPlane } from '@/core/mesh/builders/PlaneBuilder';
+import { createTerrain } from '@/core/terrain/Terrain';
+import { EditorSession } from '@/core/editor/EditorSession';
 import {
   createObjectRenderHandle,
   disposeOwnedTexture,
@@ -114,6 +116,24 @@ describe('MeshRenderAdapter live updates', () => {
     texture.userData.viperSharedPlaceholder = true;
     disposeOwnedTexture(texture);
     expect(texture.image.data![0]).toBe(10);
+  });
+
+  it('builds a color attribute and splat material for terrain layers', () => {
+    const session = new EditorSession();
+    const terrain = createTerrain(session, { size: 8, resolution: 2 });
+    const object = session.document.objects.get(terrain.objectId)!;
+    const mesh = session.document.meshes.get(terrain.meshId)!;
+    const material = session.document.materials.get(object.materialSlotIds[0]!)!;
+    const handle = createObjectRenderHandle(object.id, mesh, [material], {
+      textures: session.document.textures,
+      images: session.document.images,
+    });
+    const color = handle.mesh.geometry.getAttribute('color') as BufferAttribute;
+    expect(color).toBeTruthy();
+    expect(color.getX(0)).toBeCloseTo(1);
+    expect(color.getY(0)).toBeCloseTo(0);
+    expect((handle.materials[0] as { vertexColors?: boolean }).vertexColors).toBe(true);
+    expect(handle.materials[0]!.userData.terrainSplat).toBeTruthy();
   });
 
   it('evaluates transferable mesh buffers through the worker fallback', async () => {

@@ -36,6 +36,7 @@ export function createEmptyMesh(name = 'Mesh'): EditableMesh {
     geometryVersion: 0,
     dirty: emptyDirtyFlags(true),
     triangulationHints: new Map(),
+    metadata: {},
   };
 }
 
@@ -440,6 +441,7 @@ export function cloneMeshPreserveIds(mesh: EditableMesh): EditableMesh {
     geometryVersion: mesh.geometryVersion,
     dirty: { ...mesh.dirty },
     triangulationHints: new Map(mesh.triangulationHints),
+    metadata: mesh.metadata ? { ...mesh.metadata } : {},
   };
 }
 
@@ -459,6 +461,7 @@ export function restoreMeshFromSnapshot(target: EditableMesh, snapshot: Editable
   target.geometryVersion = clone.geometryVersion + 1;
   target.dirty = emptyDirtyFlags(true);
   target.triangulationHints = new Map(clone.triangulationHints);
+  target.metadata = clone.metadata ? { ...clone.metadata } : {};
 }
 
 /** Merge a topology change returned by a lower-level operation. */

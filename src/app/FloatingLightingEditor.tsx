@@ -21,8 +21,26 @@ export function FloatingLightingEditor({ session, onClose, onRefresh }: Props) {
   const [lighting, setLighting] = useState(() => getDocumentLighting(session.document));
 
   const applyUpdate = (updates: Partial<typeof lighting>) => {
+    const before = getDocumentLighting(session.document);
     const updated = updateDocumentLighting(session.document, updates);
     setLighting(updated);
+    let applied = true;
+    session.history.execute({
+      name: 'Edit Level Lighting',
+      execute: () => {
+        if (applied) return;
+        updateDocumentLighting(session.document, updated);
+        session.document.dirty = true;
+        session.requestRedraw();
+        applied = true;
+      },
+      undo: () => {
+        updateDocumentLighting(session.document, before);
+        session.document.dirty = true;
+        session.requestRedraw();
+        applied = false;
+      },
+    });
     session.document.dirty = true;
     session.requestRedraw();
     onRefresh();

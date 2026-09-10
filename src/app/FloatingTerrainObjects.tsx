@@ -21,6 +21,9 @@ import {
   moveTerrainLayer,
   duplicateTerrainLayer,
   fillTerrainWithLayer,
+  restoreTerrainSplat,
+  snapshotTerrainSplat,
+  TERRAIN_LAYER_PRESETS,
 } from '@/core/terrain/TerrainLayers';
 import { importImageFile } from '@/core/image/ImageImport';
 import { FloatingSkyboxEditor } from '@/app/FloatingSkyboxEditor';
@@ -44,9 +47,12 @@ import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
 import { TerrainStructureTool, type TerrainStructureKind } from '@/core/tools/TerrainStructureTool';
 import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
 import { TileDrawTool, type TileDrawMode } from '@/core/tools/TileDrawTool';
+import { prepareTerrainTileDraw } from '@/app/tilesetWorkspace';
+import type { WorkspaceController } from '@/workspace/WorkspaceController';
 
 type Props = {
   session: EditorSession;
+  workspace: WorkspaceController;
   onClose: () => void;
   onOpenOutliner: () => void;
   onRefresh: () => void;
@@ -71,6 +77,7 @@ type ScatterLayer = {
 
 export function FloatingTerrainObjects({
   session,
+  workspace,
   onClose,
   onOpenOutliner,
   onRefresh,
@@ -198,11 +205,7 @@ export function FloatingTerrainObjects({
   const tileTool = session.tools.get('tile-draw') as TileDrawTool | undefined;
 
   const prepareTileTool = (mode: TileDrawMode = 'paint') => {
-    if (tileTool) {
-      tileTool.setConfig({ mode }, session.context());
-    }
-    session.tools.setActive('tile-draw', session.context());
-    session.requestRedraw();
+    prepareTerrainTileDraw(session, workspace, mode);
     onRefresh();
   };
 
@@ -818,17 +821,7 @@ export function FloatingTerrainObjects({
                   const activeLayer = layers[activeLayerIndex] ?? layers[0];
                   const isPaintActive = session.tools.getActive() === sculptTool && sculptTool.mode === 'paint';
 
-                  const presets = [
-                    { name: 'Grass', color: '#4a7c59', tiling: 8, roughness: 0.8, metallic: 0.0 },
-                    { name: 'Dirt / Soil', color: '#7a5a3a', tiling: 8, roughness: 0.9, metallic: 0.0 },
-                    { name: 'Cliff Rock', color: '#686b73', tiling: 12, roughness: 0.7, metallic: 0.1 },
-                    { name: 'Snow Peak', color: '#e8edf5', tiling: 6, roughness: 0.4, metallic: 0.0 },
-                    { name: 'Beach Sand', color: '#d4b27d', tiling: 10, roughness: 0.85, metallic: 0.0 },
-                    { name: 'Cobblestone', color: '#52525b', tiling: 16, roughness: 0.6, metallic: 0.1 },
-                    { name: 'Asphalt', color: '#27272a', tiling: 14, roughness: 0.9, metallic: 0.0 },
-                    { name: 'Volcanic Lava', color: '#ef4444', tiling: 8, roughness: 0.3, metallic: 0.2 },
-                    { name: 'Wet Mud', color: '#453123', tiling: 8, roughness: 0.2, metallic: 0.1 },
-                  ];
+                  const presets = TERRAIN_LAYER_PRESETS;
 
                   return (
                     <div className="terrain-action-card">
@@ -1087,7 +1080,7 @@ export function FloatingTerrainObjects({
                           className={`terrain-action-btn primary full-width${isPaintActive ? ' is-active' : ''}`}
                           onClick={() => preparePaintLayerTool(activeLayerIndex)}
                         >
-                          {isPaintActive ? '✓ Brush Active (Paint on 3D Viewport)' : `Paint ${activeLayer?.name ?? 'Layer'} with Brush`}
+                          {isPaintActive ? `Painting ${activeLayer?.name ?? 'layer'}` : `Paint ${activeLayer?.name ?? 'layer'}`}
                         </button>
                         <button
                           type="button"
@@ -1104,7 +1097,26 @@ export function FloatingTerrainObjects({
                           type="button"
                           className="terrain-action-btn"
                           onClick={() => {
+                            const before = snapshotTerrainSplat(t.mesh);
                             fillTerrainWithLayer(t.mesh, activeLayerIndex);
+                            const after = snapshotTerrainSplat(t.mesh);
+                            let applied = true;
+                            session.history.execute({
+                              name: `Fill ${activeLayer?.name ?? 'layer'}`,
+                              execute: () => {
+                                if (applied) return;
+                                restoreTerrainSplat(t.mesh, after);
+                                session.document.dirty = true;
+                                session.requestRedraw();
+                                applied = true;
+                              },
+                              undo: () => {
+                                restoreTerrainSplat(t.mesh, before);
+                                session.document.dirty = true;
+                                session.requestRedraw();
+                                applied = false;
+                              },
+                            });
                             session.document.dirty = true;
                             session.requestRedraw();
                             onRefresh();
@@ -1186,8 +1198,8 @@ export function FloatingTerrainObjects({
                       onClick={() => prepareFeatureTool('river')}
                     >
                       {session.tools.getActive() === featureTool && featureTool.kind === 'river'
-                        ? '✓ River Active'
-                        : 'Carve River'}
+                        ? 'River active'
+                        : 'Carve river'}
                     </button>
                     <button
                       type="button"
@@ -1195,8 +1207,8 @@ export function FloatingTerrainObjects({
                       onClick={() => prepareFeatureTool('path')}
                     >
                       {session.tools.getActive() === featureTool && featureTool.kind === 'path'
-                        ? '✓ Path Active'
-                        : 'Carve Path'}
+                        ? 'Path active'
+                        : 'Carve path'}
                     </button>
                     {(['building', 'road_grid', 'bridge', 'cave', 'waterfall'] as TerrainStructureKind[]).map((kind) => (
                       <button
@@ -1209,6 +1221,84 @@ export function FloatingTerrainObjects({
                       </button>
                     ))}
                   </div>
+                  {session.tools.getActive() === structureTool && structureTool.kind === 'building' && (
+                    <div className="terrain-placement-settings">
+                      <label className="uv-field">
+                        <span>Style</span>
+                        <select
+                          className="uv-select"
+                          value={structureTool.buildingStyle}
+                          onChange={(event) => {
+                            structureTool.buildingStyle = event.target.value as typeof structureTool.buildingStyle;
+                            structureTool.revision += 1;
+                            onRefresh();
+                          }}
+                        >
+                          <option value="skyscraper">Skyscraper</option>
+                          <option value="office">Office</option>
+                          <option value="residential">Residential</option>
+                          <option value="warehouse">Warehouse</option>
+                        </select>
+                      </label>
+                      <label className="uv-field">
+                        <span>Floors · {structureTool.buildingFloors}</span>
+                        <input
+                          className="uv-range"
+                          type="range"
+                          min={1}
+                          max={24}
+                          step={1}
+                          value={structureTool.buildingFloors}
+                          onChange={(event) => {
+                            structureTool.buildingFloors = Number(event.target.value);
+                            structureTool.revision += 1;
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                    </div>
+                  )}
+                  {session.tools.getActive() === structureTool && structureTool.kind === 'road_grid' && (
+                    <div className="terrain-placement-settings">
+                      <label className="uv-field">
+                        <span>Grid {structureTool.gridX} x {structureTool.gridZ}</span>
+                        <input
+                          className="uv-range"
+                          type="range"
+                          min={1}
+                          max={8}
+                          step={1}
+                          value={structureTool.gridX}
+                          onChange={(event) => {
+                            structureTool.gridX = Number(event.target.value);
+                            structureTool.gridZ = Number(event.target.value);
+                            structureTool.revision += 1;
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                    </div>
+                  )}
+                  {session.tools.getActive() === structureTool && structureTool.kind === 'cave' && (
+                    <div className="terrain-placement-settings">
+                      <label className="uv-field">
+                        <span>Cave radius · {structureTool.caveRadius.toFixed(1)}m</span>
+                        <input
+                          className="uv-range"
+                          type="range"
+                          min={0.5}
+                          max={16}
+                          step={0.5}
+                          value={structureTool.caveRadius}
+                          onChange={(event) => {
+                            structureTool.caveRadius = Number(event.target.value);
+                            structureTool.revision += 1;
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                    </div>
+                  )}
                   {session.tools.getActive() === featureTool && (
                     <div className="terrain-placement-settings">
                       <label className="uv-field">
@@ -1269,7 +1359,7 @@ export function FloatingTerrainObjects({
                         }
                       }}
                     >
-                      Auto-Paint Terrain Biomes
+                      Auto-paint material layers
                     </button>
                     <button
                       type="button"
@@ -1331,6 +1421,13 @@ export function FloatingTerrainObjects({
                       onClick={() => prepareTileTool('fill')}
                     >
                       Flood Fill
+                    </button>
+                    <button
+                      type="button"
+                      className={`terrain-action-btn${tileTool?.config.mode === 'pick' ? ' is-active' : ''}`}
+                      onClick={() => prepareTileTool('pick')}
+                    >
+                      Pick Tile
                     </button>
                   </div>
 
@@ -1432,7 +1529,7 @@ export function FloatingTerrainObjects({
                   )}
 
                   <p className="uv-hint">
-                    Construct 3D tile models, levels, and blockouts in Crocotile style directly on planes or terrain surfaces.
+                    Opens UV/Paint Tiles with the 3D tile tool armed. Import an atlas there, then paint, erase, replace, or flood-fill tile meshes.
                   </p>
                 </div>
 

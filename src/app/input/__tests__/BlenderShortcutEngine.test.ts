@@ -8,6 +8,8 @@ import { commitMeshObject, createEmptyDocument } from '@/core/document/ModelDocu
 import { EditorSession } from '@/core/editor/EditorSession';
 import { buildBox } from '@/core/mesh/builders/BoxBuilder';
 import { WorkspaceController } from '@/workspace/WorkspaceController';
+import { prepareTileDraw } from '@/app/tilesetWorkspace';
+import { TileDrawTool } from '@/core/tools/TileDrawTool';
 
 const camera = {
   right: { x: 1, y: 0, z: 0 },
@@ -171,6 +173,25 @@ describe('BlenderShortcutEngine', () => {
       const handledEsc = handleBlenderShortcut(key('Escape'), ctx);
       expect(handledEsc).toBe(true);
       expect(session.transform.active).toBe(false);
+    });
+
+    it('uses G as Grab brush in sculpt instead of translate', () => {
+      const { session, workspace, ctx } = setupTestScene();
+      workspace.setShellMode('sculpt');
+      const handled = handleBlenderShortcut(key('g'), ctx);
+      expect(handled).toBe(true);
+      expect(session.transform.active).toBe(false);
+      expect(session.tools.getActive()?.id).toBe('mesh-sculpt');
+    });
+
+    it('keeps 3D tile draw modes on B/X instead of select/erase conflicts', () => {
+      const { session, workspace, ctx } = setupTestScene();
+      expect(prepareTileDraw(session, workspace)).toBe(true);
+      expect(handleBlenderShortcut(key('x'), ctx)).toBe(true);
+      expect(session.tools.getActive()?.id).toBe('tile-draw');
+      expect((session.tools.getActive() as TileDrawTool).config.mode).toBe('erase');
+      expect(handleBlenderShortcut(key('b'), ctx)).toBe(true);
+      expect((session.tools.getActive() as TileDrawTool).config.mode).toBe('paint');
     });
   });
 });

@@ -26,7 +26,14 @@ import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
 import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
+import { TerrainStructureTool } from '@/core/tools/TerrainStructureTool';
 import { activateTerrainWorkspaceTool } from '@/app/terrainWorkspace';
+import { openTerrainTilesetWorkspace, openTilesetWorkspace, openUvPixelWorkspace, prepareTileDraw, prepareTilePaint, tileEditorJob, toggleTilesetPopup } from '@/app/tilesetWorkspace';
+import {
+  readSculptPanelOpen,
+  resetSculptPanelLayout,
+  writeSculptPanelOpen,
+} from '@/app/sculptWorkspace';
 import { resolveTerrainAsset } from '@/core/terrain/Terrain';
 import { sculptableObjects } from '@/core/sculpt/MeshSculptTarget';
 import type { GizmoMode, TransformOrientation, TransformPivotMode } from '@/core/transform/types';
@@ -35,7 +42,7 @@ import { VIEW_LABELS, SHADING_MODE_LABELS, type ShadingMode } from '@/workspace/
 import { APP_VERSION } from '@/app/appVersion';
 import { registerProjectCapture } from '@/app/crashRecovery';
 import { serializeProject, serializeViperProject } from '@/core/persistence/ProjectSerializer';
-import { firstMeshValidationError, inspectDocumentHealth, openViperProjectText } from '@/core/persistence/projectHealth';
+import { firstMeshValidationError, inspectDocumentHealth, inspectProjectHealth, openViperProjectText } from '@/core/persistence/projectHealth';
 import { validateMeshFull } from '@/core/mesh/Validation';
 import { exportObj, importObj } from '@/core/io/ObjAdapter';
 import { commitMeshObject } from '@/core/document/ModelDocument';
@@ -127,6 +134,10 @@ export default function App() {
   const [themeId, setThemeId] = useState<WorkspaceThemeId>(() => readStoredTheme());
   const [terrainObjectsOpen, setTerrainObjectsOpen] = useState(false);
   const [terrainFocusTab, setTerrainFocusTab] = useState<TerrainPanelTab | null>(null);
+  const [sculptBrushesOpen, setSculptBrushesOpen] = useState(() => readSculptPanelOpen('brushes'));
+  const [sculptSettingsOpen, setSculptSettingsOpen] = useState(() => readSculptPanelOpen('settings'));
+  const [sculptMeshOpen, setSculptMeshOpen] = useState(() => readSculptPanelOpen('mesh'));
+  const [sculptLayoutKey, setSculptLayoutKey] = useState(0);
   const [timelineOpen, setTimelineOpen] = useState(true);
   const [timelineHeight, setTimelineHeight] = useState(TIMELINE_HEIGHT_DEFAULT);
   const workspaceStackRef = useRef<HTMLDivElement>(null);
@@ -245,6 +256,13 @@ export default function App() {
   useEffect(() => session.onRedraw(refresh), [session]);
   useEffect(() => workspace.subscribe(refresh), [workspace]);
   useEffect(() => animation.subscribe(refresh), [animation]);
+  useEffect(() => {
+    writeSculptPanelOpen({
+      brushes: sculptBrushesOpen,
+      settings: sculptSettingsOpen,
+      mesh: sculptMeshOpen,
+    });
+  }, [sculptBrushesOpen, sculptSettingsOpen, sculptMeshOpen]);
   useEffect(() => {
     viewportEngine.setAnimationSession(animation);
     return () => viewportEngine.setAnimationSession(null);
@@ -371,7 +389,7 @@ export default function App() {
 
   const saveProject = async (saveAs = false) => {
     try {
-      const health = inspectDocumentHealth(session.document);
+      const health = inspectProjectHealth(session.project);
       if (!health.ok) {
         pushToast(health.errors[0] ?? 'Project failed validation', 'error');
         return;
@@ -589,6 +607,7 @@ export default function App() {
   const meshSculptTool = session.tools.get('mesh-sculpt') as MeshSculptTool;
   const terrainObjectTool = session.tools.get('terrain-object') as TerrainObjectTool;
   const terrainFeatureTool = session.tools.get('terrain-feature') as TerrainFeatureTool;
+  const terrainStructureTool = session.tools.get('terrain-structure') as TerrainStructureTool;
   const blockoutVectorTool = session.tools.get('blockout-vector') as BlockoutVectorTool | undefined;
   const blockoutSolidTool = session.tools.get('blockout-solid') as BlockoutSolidTool | undefined;
   const blockoutRoundTool = session.tools.get('blockout-round') as BlockoutRoundTool | undefined;
@@ -811,6 +830,7 @@ export default function App() {
       }
       // UV shell uses 3D face picks to drive UV selection.
       session.selection.setMode('face');
+      openUvPixelWorkspace(session, workspace);
     } else if (mode === 'terrain') {
       session.selection.setMode('object');
       const terrain = resolveTerrainAsset(session);
@@ -1339,7 +1359,7 @@ export default function App() {
         {
           kind: 'command',
           label: 'UV / Pixel Workspace',
-          checked: workspace.shellMode === 'texture',
+          checked: workspace.shellMode === 'texture' && workspace.texture.uvPanelTab !== 'tiles',
           action: () => setShell('texture'),
         },
         { kind: 'separator' },
@@ -1757,14 +1777,66 @@ export default function App() {
             </button>
             <button
               type="button"
-              className={`tool${workspace.shellMode === 'texture' ? ' is-active' : ''}`}
+              className={`tool${workspace.shellMode === 'texture' && workspace.texture.uvPanelTab !== 'tiles' ? ' is-active' : ''}`}
               onClick={() => setShell('texture')}
-              aria-pressed={workspace.shellMode === 'texture'}
+              aria-pressed={workspace.shellMode === 'texture' && workspace.texture.uvPanelTab !== 'tiles'}
               title="UV and pixel workspace"
             >
               UV / Pixel
             </button>
           </div>
+          {(workspace.shellMode === 'model' || workspace.shellMode === 'texture' || workspace.shellMode === 'blockout') && (
+            <>
+              <span className="bar-sep" aria-hidden />
+              <div className="shell-switch selection-switch" role="group" aria-label="Tileset workflow">
+                <button
+                  type="button"
+                  className={`tool${workspace.shellMode === 'texture' && workspace.texture.uvPanelTab === 'tiles' && tileEditorJob(session, workspace) === 'tileset' ? ' is-active' : ''}`}
+                  onClick={() => {
+                    if (
+                      workspace.shellMode === 'texture' &&
+                      workspace.texture.uvPanelTab === 'tiles' &&
+                      tileEditorJob(session, workspace) === 'tileset'
+                    ) {
+                      toggleTilesetPopup(workspace);
+                      refresh();
+                      return;
+                    }
+                    if (openTilesetWorkspace(session, workspace)) refresh();
+                  }}
+                  title={
+                    workspace.shellMode === 'texture' && workspace.texture.uvPanelTab === 'tiles'
+                      ? workspace.texture.atlasPanelOpen
+                        ? 'Hide the tileset palette'
+                        : 'Show the tileset palette'
+                      : 'Manage the tileset atlas and tile selection'
+                  }
+                >
+                  Tileset
+                </button>
+                <button
+                  type="button"
+                  className={`tool${tileEditorJob(session, workspace) === 'build' ? ' is-active' : ''}`}
+                  onClick={() => {
+                    if (prepareTileDraw(session, workspace)) refresh();
+                  }}
+                  title="Build tiles directly in the 3D viewport"
+                >
+                  Build
+                </button>
+                <button
+                  type="button"
+                  className={`tool${workspace.shellMode === 'texture' && tileEditorJob(session, workspace) === 'paint' ? ' is-active' : ''}`}
+                  onClick={() => {
+                    if (prepareTilePaint(session, workspace)) refresh();
+                  }}
+                  title="Paint tiles onto existing faces"
+                >
+                  Paint
+                </button>
+              </div>
+            </>
+          )}
           {(workspace.shellMode === 'rig' || workspace.shellMode === 'animate' || workspace.shellMode === 'blockout' || workspace.shellMode === 'terrain') && (
             <span className="bar-sep" aria-hidden />
           )}
@@ -1830,16 +1902,39 @@ export default function App() {
             <div className="shell-switch selection-switch" role="group" aria-label="Terrain tool">
               <button
                 type="button"
-                className={`tool${activeTool === terrainTool ? ' is-active' : ''}`}
+                className={`tool${activeTool === terrainTool && terrainTool.mode !== 'paint' ? ' is-active' : ''}`}
                 onClick={() => {
                   activateTerrainWorkspaceTool(session, 'sculpt');
                   setTerrainFocusTab('sculpt');
                   refresh();
                 }}
-                aria-pressed={activeTool === terrainTool}
+                aria-pressed={activeTool === terrainTool && terrainTool.mode !== 'paint'}
                 title="Sculpt height (1)"
               >
                 Sculpt
+              </button>
+              <button
+                type="button"
+                className={`tool${activeTool === terrainTool && terrainTool.mode === 'paint' ? ' is-active' : ''}`}
+                onClick={() => {
+                  activateTerrainWorkspaceTool(session, 'paint');
+                  setTerrainFocusTab('surface');
+                  refresh();
+                }}
+                aria-pressed={activeTool === terrainTool && terrainTool.mode === 'paint'}
+                title="Paint material layers"
+              >
+                Paint
+              </button>
+              <button
+                type="button"
+                className="tool"
+                onClick={() => {
+                  if (openTerrainTilesetWorkspace(session, workspace)) refresh();
+                }}
+                title="Open UV/Paint tileset tools"
+              >
+                Tiles
               </button>
               <button
                 type="button"
@@ -1870,6 +1965,19 @@ export default function App() {
               </button>
               <button
                 type="button"
+                className={`tool${activeTool === terrainStructureTool ? ' is-active' : ''}`}
+                onClick={() => {
+                  activateTerrainWorkspaceTool(session, 'structure');
+                  setTerrainFocusTab('objects');
+                  refresh();
+                }}
+                aria-pressed={activeTool === terrainStructureTool}
+                title="Buildings, roads, bridges (4)"
+              >
+                Build
+              </button>
+              <button
+                type="button"
                 className={`tool${activeTool?.id === 'select' ? ' is-active' : ''}`}
                 onClick={() => {
                   activateTerrainWorkspaceTool(session, 'select');
@@ -1879,6 +1987,63 @@ export default function App() {
                 title="Select and transform props (G/R/S)"
               >
                 Select
+              </button>
+            </div>
+          )}
+          {workspace.shellMode === 'sculpt' && (
+            <div className="shell-switch selection-switch" role="group" aria-label="Sculpt panels">
+              <button
+                type="button"
+                className={`tool${sculptBrushesOpen ? ' is-active' : ''}`}
+                onClick={() => setSculptBrushesOpen((open) => !open)}
+                aria-pressed={sculptBrushesOpen}
+                title="Brush shelf"
+              >
+                Brushes
+              </button>
+              <button
+                type="button"
+                className={`tool${sculptSettingsOpen ? ' is-active' : ''}`}
+                onClick={() => setSculptSettingsOpen((open) => !open)}
+                aria-pressed={sculptSettingsOpen}
+                title="Size, strength, and falloff"
+              >
+                Settings
+              </button>
+              <button
+                type="button"
+                className={`tool${sculptMeshOpen ? ' is-active' : ''}`}
+                onClick={() => setSculptMeshOpen((open) => !open)}
+                aria-pressed={sculptMeshOpen}
+                title="Mesh, symmetry, and mask"
+              >
+                Mesh
+              </button>
+              <button
+                type="button"
+                className={`tool${outlinerOpen ? ' is-active' : ''}`}
+                onClick={() => {
+                  setOutlinerTab('scene');
+                  setOutlinerOpen((open) => !open);
+                }}
+                aria-pressed={outlinerOpen}
+                title="Scene outliner"
+              >
+                Outliner
+              </button>
+              <button
+                type="button"
+                className="tool"
+                onClick={() => {
+                  resetSculptPanelLayout();
+                  setSculptBrushesOpen(true);
+                  setSculptSettingsOpen(true);
+                  setSculptMeshOpen(true);
+                  setSculptLayoutKey((key) => key + 1);
+                }}
+                title="Reset floating panel layout"
+              >
+                Reset
               </button>
             </div>
           )}
@@ -1963,7 +2128,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className={`workspace${workspace.shellMode === 'animate' ? ' is-animate' : ''}${workspace.shellMode === 'rig' ? ' is-rig' : ''}${workspace.shellMode === 'blockout' ? ' is-blockout' : ''}${workspace.shellMode === 'terrain' ? ' is-terrain' : ''}`}>
+      <main className={`workspace${workspace.shellMode === 'animate' ? ' is-animate' : ''}${workspace.shellMode === 'rig' ? ' is-rig' : ''}${workspace.shellMode === 'blockout' ? ' is-blockout' : ''}${workspace.shellMode === 'terrain' ? ' is-terrain' : ''}${workspace.shellMode === 'sculpt' ? ' is-sculpt' : ''}`}>
         {(workspace.shellMode === 'model' || workspace.shellMode === 'blockout') && !zenMode && (
           <LeftToolbar
             session={session}
@@ -2212,12 +2377,6 @@ export default function App() {
                 textureInspector={workspace.shellMode === 'texture'}
               />
             )}
-            {workspace.shellMode === 'sculpt' && (
-              <SculptPanel
-                session={session}
-                onRefresh={refresh}
-              />
-            )}
             {workspace.shellMode === 'terrain' && (
               <TerrainPanel
                 session={session}
@@ -2249,7 +2408,20 @@ export default function App() {
         )}
       </main>
 
-      {(workspace.shellMode === 'model' || workspace.shellMode === 'blockout' || workspace.shellMode === 'terrain') && outlinerOpen && (
+      {workspace.shellMode === 'sculpt' && (
+        <SculptPanel
+          session={session}
+          onRefresh={refresh}
+          brushesOpen={sculptBrushesOpen}
+          settingsOpen={sculptSettingsOpen}
+          meshOpen={sculptMeshOpen}
+          layoutKey={sculptLayoutKey}
+          onToggleBrushes={() => setSculptBrushesOpen((open) => !open)}
+          onToggleSettings={() => setSculptSettingsOpen((open) => !open)}
+          onToggleMesh={() => setSculptMeshOpen((open) => !open)}
+        />
+      )}
+      {(workspace.shellMode === 'model' || workspace.shellMode === 'blockout' || workspace.shellMode === 'terrain' || workspace.shellMode === 'sculpt') && outlinerOpen && (
         <FloatingOutliner
           session={session}
           activeTab={outlinerTab}
@@ -2261,6 +2433,7 @@ export default function App() {
       {workspace.shellMode === 'terrain' && terrainObjectsOpen && (
         <FloatingTerrainObjects
           session={session}
+          workspace={workspace}
           onClose={() => setTerrainObjectsOpen(false)}
           onOpenOutliner={() => {
             setOutlinerTab('models');
@@ -2312,9 +2485,11 @@ export default function App() {
                 ? terrainObjectTool.statusLine()
                 : activeTool === terrainFeatureTool
                   ? terrainFeatureTool.statusLine()
+                  : activeTool === terrainStructureTool
+                    ? terrainStructureTool.statusLine()
                   : activeTool === terrainTool
                     ? terrainTool.statusLine()
-                    : 'Select · G/R/S transform props · 1 sculpt · 2 objects · 3 water'
+                    : 'Select · G/R/S transform props · 1 sculpt · 2 objects · 3 water · 4 build'
               : 'Create a terrain from the panel on the right'}
           </span>
         )}
@@ -2369,7 +2544,7 @@ export default function App() {
                 : transformActive
                   ? 'Enter/LMB confirm · Esc/RMB cancel · X/Y/Z · Shift+axis · Ctrl toggle snap'
                   : workspace.shellMode === 'sculpt'
-                    ? 'LMB sculpt · Alt+drag orbit · Shift+Alt pan · Ctrl+Alt zoom · wheel brush size · Shift-wheel pan · Alt sample flatten · RMB pan'
+                    ? 'LMB sculpt · Shift smooth · Ctrl invert · D/C/G brushes · [ ] / wheel size · drag panels · close/reopen from header'
                   : workspace.shellMode === 'terrain'
                     ? activeTool === terrainObjectTool
                       ? terrainObjectTool.mode === 'place'
@@ -2383,7 +2558,19 @@ export default function App() {
                             : 'LMB sculpt · Alt+drag orbit · Shift+Alt pan · Ctrl+Alt zoom · wheel/[ ] size · RMB pan'
                           : 'LMB select · LMB drag orbit · Alt+drag orbit · RMB pan · G/R/S transform'
                   : workspace.shellMode === 'texture'
-                    ? '3D · LightWave Alt orbit · UV · Alt pan · Ctrl+Alt zoom · N inspector · Tab hides pane'
+                    ? session.tools.getActive()?.id === 'tile-draw'
+                      ? workspace.texture.atlasDrawShape === 'rectangle'
+                        ? 'Rectangle · Drag corners · Shift constrain · Alt + Click: Pick tile · Esc cancel'
+                        : workspace.texture.atlasDrawShape === 'line'
+                          ? 'Line · Drag start to end · Alt + Click: Pick tile · Q rotate · Esc cancel'
+                          : workspace.texture.atlasUseFacePlane
+                            ? 'Surface · Hover face to set plane · L lock plane · Alt + Click: Pick tile'
+                            : `Draw · LMB place · Drag ${workspace.texture.atlasDrawShape} · Alt + Click: Pick tile · Q rotate · Esc cancel`
+                      : workspace.texture.atlasPaintMode
+                        ? 'Paint · click faces to stamp · Alt + Click: Pick tile'
+                        : workspace.texture.uvPanelTab === 'tiles'
+                          ? 'Tileset · select a tile · Build to draw in 3D · Paint to stamp faces'
+                          : '3D · LightWave Alt orbit · UV · Alt pan · Ctrl+Alt zoom · N inspector · Tab hides pane'
                   : workspace.shellMode === 'rig'
                     ? animation.editMode === 'weight'
                       ? 'LMB paint · Ctrl subtract · wheel/[ ] radius · ↑↓ bone · M mirror'

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createEmptyDocument } from '@/core/document/ModelDocument';
 import type { ModelDocument } from '@/core/document/types';
+import { EditorSession } from '@/core/editor/EditorSession';
+import { createTerrain } from '@/core/terrain/Terrain';
 import { APP_VERSION } from '@/version';
 import {
   deserializeProject,
@@ -113,5 +115,28 @@ describe('ProjectSerializer migrations', () => {
     expect(lighting).toBeDefined();
     expect(lighting.sunColor).toBe('#ff0000');
     expect(lighting.preset).toBe('sunset');
+  });
+
+  it('serializes skybox settings and terrain layer metadata', () => {
+    const doc = createEmptyDocument();
+    (doc.settings as Record<string, unknown>).skybox = {
+      preset: 'night',
+      starIntensity: 0.8,
+      zenithColor: '#020617',
+    };
+    const session = new EditorSession(doc);
+    createTerrain(session, { size: 16, resolution: 8, name: 'Layered Terrain' });
+    const terrainMesh = [...session.document.meshes.values()].find((mesh) => mesh.metadata?.terrainLayers);
+    expect(terrainMesh?.metadata?.terrainLayers).toBeTruthy();
+
+    const deserialized = deserializeProject(serializeProject(session.document, 'test'));
+    const skybox = (deserialized.settings as Record<string, unknown>).skybox as Record<string, unknown>;
+    expect(skybox.preset).toBe('night');
+    expect(skybox.starIntensity).toBe(0.8);
+    const loadedMesh = [...deserialized.meshes.values()].find((mesh) => mesh.metadata?.terrainLayers);
+    expect(loadedMesh?.metadata?.terrainLayers).toContain('layer_grass');
+    const sourceCorner = [...(terrainMesh?.faceCorners.values() ?? [])][0];
+    const loadedCorner = [...(loadedMesh?.faceCorners.values() ?? [])][0];
+    expect(loadedCorner?.vertexColour?.x).toBeCloseTo(sourceCorner?.vertexColour?.x ?? 1);
   });
 });

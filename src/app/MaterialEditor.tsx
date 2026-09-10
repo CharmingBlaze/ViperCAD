@@ -24,6 +24,7 @@ import { IMAGE_FILES, openNativeFile } from '@/app/platform/FileDialogs';
 import { PixelateToolControls } from '@/app/PixelateToolControls';
 import { GradientToolControls } from '@/app/GradientToolControls';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';
+import { BlenderIcon } from '@/components/BlenderIcon';
 
 type Props = {
   session: EditorSession;
@@ -207,6 +208,11 @@ export function MaterialEditor({ session, compact = false, workspace }: Props) {
     const texture = createTextureAsset(doc, image, `${material.name} Map ${w}×${h}`);
     material.baseColourTextureId = texture.id;
     material.presetId = null;
+    workspace?.patchTexture({
+      activeMaterialId: material.id,
+      activeTextureId: texture.id,
+      activeImageId: image.id,
+    });
     setImportNote(null);
     touch();
   };
@@ -219,6 +225,11 @@ export function MaterialEditor({ session, compact = false, workspace }: Props) {
       const result = await importImageFile(doc, file);
       material.baseColourTextureId = result.textureId;
       material.presetId = null;
+      workspace?.patchTexture({
+        activeMaterialId: material.id,
+        activeTextureId: result.textureId,
+        activeImageId: result.imageId,
+      });
       setImportNote(
         result.scaled
           ? `Imported ${result.sourceWidth}×${result.sourceHeight} → ${result.width}×${result.height}`
@@ -568,7 +579,8 @@ export function MaterialEditor({ session, compact = false, workspace }: Props) {
                 className="tool primary uv-btn-block"
                 style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, margin: '0.5rem 0' }}
               >
-                📁 Import Image Texture File...
+                <BlenderIcon name="import" size={14} />
+                Import Image Texture File...
                 <input
                   type="file"
                   accept="image/png,image/jpeg,image/webp,image/gif"

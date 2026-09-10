@@ -39,6 +39,7 @@ import { ViewportNavToolbar, viewportNavToolbarRightInset } from '@/app/Viewport
 import { getActiveClip } from '@/core/rig/RigDocument';
 import { clipFrameCount } from '@/core/rig/AnimationLibrary';
 import { TexturePanelWindow } from '@/app/TexturePanelWindow';
+import { TileDrawHud } from '@/app/TileDrawHud';
 import { clampTextureSplit, isTextureSplitLayout } from '@/workspace/TextureWorkspace';
 import type { ViewportNavMode } from '@/workspace/WorkspaceController';
 import { hasModelDrag, readModelDrag } from '@/app/outliner/modelDrag';
@@ -693,6 +694,9 @@ export function Viewport({ session, workspace }: Props) {
         dockedWidth={splitLayout ? `${liveTextureSplit * 100}%` : undefined}
       >
         <div ref={hostRef} className="modelling-canvas" />
+        {textureMode && workspace.texture.uvPanelTab === 'tiles' && (
+          <TileDrawHud session={session} workspace={workspace} />
+        )}
 
         {!textureMode && (
           <div className={`viewport-chrome${openViewMenu ? ' is-menu-open' : ''}`}>
@@ -814,18 +818,23 @@ export function Viewport({ session, workspace }: Props) {
                     }
                   />
                 )}
-                {isBlockout && (() => {
+                {isBlockout && workspace.activeViewportId === r.id && (() => {
                   const hint = blockoutPaneHint(r.id, session.tools.getActive());
                   return hint ? <div className="blockout-pane-hint">{hint}</div> : null;
                 })()}
                 {(() => {
                   const tool = session.tools.getActive();
                   if (!(tool instanceof CreatePrimitiveTool) || !tool.kindChosen) return null;
+                  const hintPane =
+                    mode === 'maximized'
+                      ? workspace.splits.state.maximizedViewportId
+                      : workspace.activeViewportId;
+                  if (r.id !== hintPane) return null;
                   const label = PRIMITIVE_LABELS[tool.state.kind];
                   return (
                     <div className="viewport-create-hint">
                       <strong>{label}</strong>
-                      {' · Click surface to place · Drag to size · Esc cancel'}
+                      {' · click to place · drag to size · Esc cancel'}
                     </div>
                   );
                 })()}

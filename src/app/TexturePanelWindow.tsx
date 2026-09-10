@@ -5,6 +5,7 @@ import {
   type TexturePanelId,
 } from '@/workspace/TextureWorkspace';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';
+import { BlenderIcon } from '@/components/BlenderIcon';
 
 type DragKind = 'move' | 'resize';
 
@@ -180,7 +181,7 @@ export function TexturePanelWindow({
               title={`Detach ${title}`}
               onClick={detach}
             >
-              ⧉
+              <BlenderIcon name="window" size={12} />
             </button>
           ) : (
             <button
@@ -189,7 +190,7 @@ export function TexturePanelWindow({
               title="Dock in split"
               onClick={() => workspace.restoreTextureSplit()}
             >
-              ▤
+              <BlenderIcon name="split_vertical" size={12} />
             </button>
           )}
           <button
@@ -201,7 +202,7 @@ export function TexturePanelWindow({
               else workspace.toggleTextureMaximize(panel === '3d' ? 'left' : 'right');
             }}
           >
-            {maximized || fill ? '▭' : '□'}
+            <BlenderIcon name={maximized || fill ? 'fullscreen_exit' : 'fullscreen_enter'} size={12} />
           </button>
           <button
             type="button"
@@ -212,7 +213,7 @@ export function TexturePanelWindow({
               workspace.setTexturePanelWindow(panel, { visible: false });
             }}
           >
-            ×
+            <BlenderIcon name="panel_close" size={12} />
           </button>
         </div>
       </header>
