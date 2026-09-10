@@ -145,8 +145,18 @@ export function terrainAssetFromObject(document: ModelDocument, objectId: Object
   return object?.metadata.terrain === 'true' && mesh ? { object, mesh } : null;
 }
 
-export function activeTerrain(session: EditorSession) {
-  return terrainAssetFromObject(session.document, session.selection.state.activeObjectId);
+export function activeTerrain(sessionOrDoc: EditorSession | ModelDocument) {
+  const isSession = 'selection' in sessionOrDoc && !!sessionOrDoc.selection;
+  const doc: ModelDocument = isSession ? (sessionOrDoc as EditorSession).document : sessionOrDoc;
+  if (isSession) {
+    const selected = terrainAssetFromObject(
+      doc,
+      (sessionOrDoc as EditorSession).selection.state.activeObjectId,
+    );
+    if (selected) return selected;
+  }
+  const firstTerrain = [...doc.objects.values()].find((obj) => obj.metadata.terrain === 'true');
+  return firstTerrain ? terrainAssetFromObject(doc, firstTerrain.id) : null;
 }
 
 /** Terrain under the selection, a placed prop's owner, or the first terrain in the level. */
@@ -244,12 +254,18 @@ export function applyTerrainTileRepeat(mesh: EditableMesh, repeat: number): void
   const layerId = mesh.defaultUvLayerId;
   if (!layerId) return;
   const amount = clamp(repeat, 1, 128);
-  const xs = [...mesh.vertices.values()].map((vertex) => vertex.position.x);
-  const zs = [...mesh.vertices.values()].map((vertex) => vertex.position.z);
-  const minX = Math.min(...xs);
-  const minZ = Math.min(...zs);
-  const spanX = Math.max(1e-8, Math.max(...xs) - minX);
-  const spanZ = Math.max(1e-8, Math.max(...zs) - minZ);
+  let minX = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxZ = -Infinity;
+  for (const vertex of mesh.vertices.values()) {
+    const px = vertex.position.x;
+    const pz = vertex.position.z;
+    if (px < minX) minX = px;
+    if (px > maxX) maxX = px;
+    if (pz < minZ) minZ = pz;
+    if (pz > maxZ) maxZ = pz;
+  }
+  const spanX = Math.max(1e-8, maxX - minX);
+  const spanZ = Math.max(1e-8, maxZ - minZ);
   for (const face of mesh.faces.values()) {
     for (const cornerId of faceCornerIds(mesh, face.id)) {
       const corner = mesh.faceCorners.get(cornerId)!;

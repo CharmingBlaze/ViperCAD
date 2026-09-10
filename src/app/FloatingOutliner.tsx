@@ -23,8 +23,9 @@ import { OutlinerDocumentList } from '@/app/outliner/OutlinerDocumentList';
 import { AddModelMenu } from '@/app/outliner/AddModelMenu';
 import { SceneContextBar } from '@/app/outliner/SceneContextBar';
 import { BlenderIcon, type KnownBlenderIcon } from '@/components/BlenderIcon';
+import { AssetBrowser } from '@/app/outliner/AssetBrowser';
 
-export type OutlinerTab = 'scene' | 'models' | 'levels';
+export type OutlinerTab = 'scene' | 'assets' | 'models' | 'levels';
 
 type Props = {
   session: EditorSession;
@@ -62,6 +63,7 @@ export function FloatingOutliner({
   const [dragObjectId, setDragObjectId] = useState<ObjectId | null>(null);
   const [dropTargetId, setDropTargetId] = useState<ObjectId | null>(null);
   const [renamingId, setRenamingId] = useState<ObjectId | null>(null);
+  const [sceneQuery, setSceneQuery] = useState('');
   const drag = useRef<DragState | null>(null);
   const panel = useRef<HTMLElement>(null);
 
@@ -87,13 +89,25 @@ export function FloatingOutliner({
     };
   }, []);
 
+  const normalizedSceneQuery = sceneQuery.trim().toLocaleLowerCase();
+  const matchingObjectIds = new Set<ObjectId>();
+  const markMatches = (id: ObjectId): boolean => {
+    const object = session.document.objects.get(id);
+    if (!object) return false;
+    const childMatches = object.childIds.some(markMatches);
+    const matches = !normalizedSceneQuery || object.name.toLocaleLowerCase().includes(normalizedSceneQuery);
+    if (matches || childMatches) matchingObjectIds.add(id);
+    return matches || childMatches;
+  };
+  for (const id of session.document.rootObjectIds) markMatches(id);
+
   const visibleObjectIds: ObjectId[] = [];
   const collectVisible = (ids: ObjectId[]) => {
     for (const id of ids) {
       const object = session.document.objects.get(id);
-      if (!object) continue;
+      if (!object || !matchingObjectIds.has(id)) continue;
       visibleObjectIds.push(id);
-      if (object.childIds.length > 0 && !collapsed.has(id)) collectVisible(object.childIds);
+      if (object.childIds.length > 0 && (!collapsed.has(id) || normalizedSceneQuery)) collectVisible(object.childIds);
     }
   };
   collectVisible(session.document.rootObjectIds);
@@ -178,7 +192,7 @@ export function FloatingOutliner({
   const rows = (ids: ObjectId[], depth = 0): React.ReactNode =>
     ids.map((id) => {
       const object = session.document.objects.get(id);
-      if (!object) return null;
+      if (!object || !matchingObjectIds.has(id)) return null;
       const selected = session.selection.state.selectedObjectIds.has(id);
       const active = session.selection.state.activeObjectId === id;
       const group = isGroupObject(object);
@@ -382,7 +396,7 @@ export function FloatingOutliner({
               </button>
             </div>
           </div>
-          {hasChildren && !isCollapsed && rows(object.childIds, depth + 1)}
+          {hasChildren && (!isCollapsed || !!normalizedSceneQuery) && rows(object.childIds, depth + 1)}
         </div>
       );
     });
@@ -432,7 +446,9 @@ export function FloatingOutliner({
               <span>
                 {tab === 'models'
                   ? `${session.project.modelDocumentIds.length} models`
-                  : `${session.project.levelDocumentIds.length} levels`}
+                  : tab === 'levels'
+                    ? `${session.project.levelDocumentIds.length} levels`
+                    : `${session.project.materials.size + session.project.textures.size + session.project.images.size} assets`}
               </span>
             )}
           </div>
@@ -476,6 +492,7 @@ export function FloatingOutliner({
         <nav className="outliner-tabs" aria-label="Outliner views">
           {([
             ['scene', 'Scene', 'outliner', null],
+            ['assets', 'Assets', 'texture', session.project.materials.size + session.project.textures.size + session.project.images.size],
             ['models', 'Models', 'object_data', session.project.modelDocumentIds.length],
             ['levels', 'Levels', 'world', session.project.levelDocumentIds.length],
           ] as const).map(([id, label, icon, count]) => (
@@ -535,6 +552,18 @@ export function FloatingOutliner({
               </button>
             </div>
           </div>
+          <label className="outliner-scene-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              value={sceneQuery}
+              onChange={(event) => setSceneQuery(event.target.value)}
+              placeholder="Find objects, groups, or instances"
+              aria-label="Search scene objects"
+            />
+            {sceneQuery ? (
+              <button type="button" onClick={() => setSceneQuery('')} aria-label="Clear scene search">×</button>
+            ) : null}
+          </label>
           {session.focusGroupId ? (
             <nav className="scene-focus-crumb" aria-label="Group focus breadcrumb">
               {focusCrumb.map((label, index) => (
@@ -566,36 +595,45 @@ export function FloatingOutliner({
             </nav>
           ) : null}
           <div className="outliner-body" role="tree" aria-label="Scene objects">
-            {session.document.rootObjectIds.length
+            {session.document.rootObjectIds.length && visibleObjectIds.length
               ? rows(session.document.rootObjectIds)
               : (
-                <div className="outliner-empty">
-                  <strong>{session.document.kind === 'level' ? 'Empty level' : 'Empty scene'}</strong>
-                  <span>
-                    {session.document.kind === 'level'
-                      ? 'Place a model or create geometry.'
-                      : 'Create a primitive to begin modelling.'}
-                  </span>
-                  {session.document.kind !== 'level' && (
-                    <button
-                      type="button"
-                      className="outliner-empty-action"
-                      onClick={() => {
-                        session.tools.setActive('create-primitive', session.context());
-                        onRefresh();
-                      }}
-                    >
-                      <BlenderIcon name="add" size={12} style={{ marginRight: 4 }} />
-                      Add Primitive
-                    </button>
-                  )}
-                </div>
+                normalizedSceneQuery ? (
+                  <p className="outliner-empty">
+                    {`No scene objects match “${sceneQuery.trim()}”`}
+                  </p>
+                ) : (
+                  <div className="outliner-empty">
+                    <strong>{session.document.kind === 'level' ? 'Empty level' : 'Empty scene'}</strong>
+                    <span>
+                      {session.document.kind === 'level'
+                        ? 'Place a model or create geometry. Use Add Model or create geometry in the viewport.'
+                        : 'Create a primitive to begin modelling. Add meshes to build a reusable asset.'}
+                    </span>
+                    {session.document.kind !== 'level' && (
+                      <button
+                        type="button"
+                        className="outliner-empty-action"
+                        onClick={() => {
+                          session.tools.setActive('create-primitive', session.context());
+                          onRefresh();
+                        }}
+                      >
+                        <BlenderIcon name="add" size={12} style={{ marginRight: 4 }} />
+                        Add Primitive
+                      </button>
+                    )}
+                  </div>
+                )
               )}
           </div>
         </div>
       )}
       {!minimized && tab === 'models' && (
         <OutlinerDocumentList session={session} kind="model" onRefresh={onRefresh} onPlaced={afterModelPlaced} />
+      )}
+      {!minimized && tab === 'assets' && (
+        <AssetBrowser session={session} onRefresh={onRefresh} onPlaced={afterModelPlaced} />
       )}
       {!minimized && tab === 'levels' && (
         <OutlinerDocumentList session={session} kind="level" onRefresh={onRefresh} />

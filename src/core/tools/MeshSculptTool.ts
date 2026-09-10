@@ -1,8 +1,9 @@
-import { cloneVec3, scaleVec3, subVec3, type Vec3 } from '@/core/math/Vec3';
+import { cloneVec3, normalizeVec3, scaleVec3, subVec3, type Vec3 } from '@/core/math/Vec3';
 import { bumpPositions } from '@/core/mesh/EditableMesh';
 import type { EditableMesh, VertexId } from '@/core/mesh/types';
 import {
   applyMeshBrush,
+  collectBrushVertices,
   restoreVertexPositions,
   snapshotVertexPositions,
   type MeshBrushMode,
@@ -16,6 +17,8 @@ import type { ModellingContext, Tool, ToolPointerInput } from '@/core/tools/Tool
 
 export type { MeshBrushMode, SculptFalloff };
 
+const MAX_STAMP_STEPS = 16;
+
 export class MeshSculptTool implements Tool {
   id = 'mesh-sculpt' as const;
   label = 'Mesh Sculpt';
@@ -23,10 +26,17 @@ export class MeshSculptTool implements Tool {
   falloff: SculptFalloff = 'smooth';
   radius = 0.35;
   strength = 0.12;
+  hardness = 0.28;
+  spacing = 0.14;
+  buildUp = 1;
+  preserveVolume = 0.75;
   pressureRadius = true;
   pressureStrength = true;
+  usePressure = true;
+  frontFacesOnly = true;
   flattenPlanePoint: Vec3 = { x: 0, y: 0, z: 0 };
   flattenPlaneNormal: Vec3 = { x: 0, y: 1, z: 0 };
+  flattenPlaneSampled = false;
   dragging = false;
   revision = 0;
   stabilizer = new StrokeStabilizer();
@@ -41,10 +51,12 @@ export class MeshSculptTool implements Tool {
   private targetObjectId: string | null = null;
   private grabAnchor: Vec3 | null = null;
   private lastPoint: Vec3 | null = null;
+  private lastNormal: Vec3 | null = null;
 
   activate(context: ModellingContext): void {
     this.dragging = false;
     this.lastPoint = null;
+    this.lastNormal = null;
     this.previewHit = null;
     this.stabilizer.reset();
     context.requestRedraw();
@@ -98,6 +110,7 @@ export class MeshSculptTool implements Tool {
     if ((this.mode === 'flatten' || this.mode === 'scrape') && input.altKey) {
       this.flattenPlanePoint = cloneVec3(hit.localPosition);
       this.flattenPlaneNormal = cloneVec3(hit.localNormal);
+      this.flattenPlaneSampled = true;
       this.revision += 1;
       context.requestRedraw();
       return;
@@ -109,8 +122,13 @@ export class MeshSculptTool implements Tool {
     this.touchedVertexIds.clear();
     this.strokeBase = snapshotVertexPositions(hit.mesh);
     this.grabAnchor = cloneVec3(hit.localPosition);
+    if (this.mode === 'flatten' && !this.flattenPlaneSampled) {
+      this.flattenPlanePoint = cloneVec3(hit.localPosition);
+      this.flattenPlaneNormal = cloneVec3(hit.localNormal);
+    }
     this.dragging = true;
     this.lastPoint = null;
+    this.lastNormal = null;
     this.stabilizer.reset();
     const hitPos = this.stabilizer.enabled
       ? this.stabilizer.update(hit.localPosition).smoothed
@@ -138,7 +156,6 @@ export class MeshSculptTool implements Tool {
     if (!this.dragging || !this.strokeInitialPositions || !this.targetMesh) return false;
     const mesh = this.targetMesh;
 
-    // Sparse undo snapshot: only store vertex positions that actually changed
     const beforeSparse = new Map<VertexId, Vec3>();
     const afterSparse = new Map<VertexId, Vec3>();
 
@@ -177,15 +194,7 @@ export class MeshSculptTool implements Tool {
       });
     }
 
-    this.dragging = false;
-    this.strokeInitialPositions = null;
-    this.touchedVertexIds.clear();
-    this.strokeBase = null;
-    this.targetMesh = null;
-    this.targetObjectId = null;
-    this.grabAnchor = null;
-    this.lastPoint = null;
-    this.stabilizer.reset();
+    this.resetStroke();
     this.revision += 1;
     context.requestRedraw();
     return true;
@@ -199,6 +208,22 @@ export class MeshSculptTool implements Tool {
       restoreVertexPositions(this.targetMesh, this.strokeInitialPositions);
       bumpPositions(this.targetMesh);
     }
+    this.resetStroke();
+    this.revision += 1;
+    context.requestRedraw();
+  }
+
+  statusLine(): string {
+    const flattenHint = this.mode === 'flatten' || this.mode === 'scrape'
+      ? ' · Alt+click sample plane'
+      : '';
+    return `${this.mode} · radius ${this.radius.toFixed(2)} · strength ${this.strength.toFixed(2)} · Shift smooth · Ctrl invert · wheel size · Ctrl+wheel strength${flattenHint}`;
+  }
+
+  getAllowedSelectionModes() { return ['object'] as const; }
+  getSnapPolicy() { return [] as const; }
+
+  private resetStroke(): void {
     this.dragging = false;
     this.strokeInitialPositions = null;
     this.touchedVertexIds.clear();
@@ -207,56 +232,59 @@ export class MeshSculptTool implements Tool {
     this.targetObjectId = null;
     this.grabAnchor = null;
     this.lastPoint = null;
+    this.lastNormal = null;
     this.stabilizer.reset();
-    this.revision += 1;
-    context.requestRedraw();
   }
 
-  statusLine(): string {
-    const flattenHint = this.mode === 'flatten' || this.mode === 'scrape' ? ' · Alt+click sample plane' : '';
-    return `${this.mode} · radius ${this.radius.toFixed(2)} · strength ${this.strength.toFixed(2)} · Shift smooth · Ctrl invert${flattenHint}`;
+  private stylusPressure(input: ToolPointerInput): number {
+    if (!this.usePressure) return 1;
+    return Math.max(0.05, Math.min(1, input.pressure ?? 1));
   }
-
-  getAllowedSelectionModes() { return ['object'] as const; }
-  getSnapPolicy() { return [] as const; }
 
   private applyAt(
     input: ToolPointerInput,
     context: ModellingContext,
     point: Vec3,
-    contactNormal: Vec3,
+    normal: Vec3,
   ): void {
     const mesh = this.targetMesh;
     const strokeBase = this.strokeBase;
     if (!mesh || !strokeBase) return;
 
-    // Shift held down: standard DCC behavior switches any active brush to Smooth
     const effectiveMode = (input.shiftKey && this.mode !== 'smooth') ? 'smooth' : this.mode;
-    // Ctrl held down: inverts brush action (or shift if already in smooth)
     const invert = input.ctrlKey;
-
-    // Stylus pressure modulation
-    const pressure = input.pressure ?? 1.0;
+    const stylus = this.stylusPressure(input);
     const effRadius = this.pressureRadius
-      ? this.radius * (0.3 + 0.7 * pressure)
+      ? this.radius * (0.3 + 0.7 * stylus)
       : this.radius;
     const effStrength = this.pressureStrength
-      ? this.strength * (0.2 + 0.8 * pressure)
+      ? this.strength * (0.2 + 0.8 * stylus)
       : this.strength;
-
     const mask = getMeshMask(mesh.id);
 
-    const applyPoint = (localPoint: Vec3, strokeDelta?: Vec3) => {
-      const primaryBefore = snapshotVertexPositions(mesh);
+    const applyPoint = (localPoint: Vec3, localNormal: Vec3, strokeDelta?: Vec3) => {
+      const nearby = collectBrushVertices(mesh, localPoint, effRadius, this.falloff, {
+        hardness: this.hardness,
+        frontFacesOnly: this.frontFacesOnly,
+        surfaceNormal: localNormal,
+      });
+      const primaryBefore = new Map<VertexId, Vec3>();
+      for (const item of nearby) {
+        const vertex = mesh.vertices.get(item.id);
+        if (vertex) primaryBefore.set(item.id, cloneVec3(vertex.position));
+      }
+
       const grabDelta =
         effectiveMode === 'grab' && this.grabAnchor
           ? subVec3(localPoint, this.grabAnchor)
           : undefined;
+      const brushCenter =
+        effectiveMode === 'grab' && this.grabAnchor ? this.grabAnchor : localPoint;
 
       applyMeshBrush(
         mesh,
         effectiveMode,
-        localPoint,
+        brushCenter,
         effRadius,
         effectiveMode === 'smooth' && input.shiftKey ? Math.min(0.4, effStrength * 1.5) : effStrength,
         this.falloff,
@@ -267,20 +295,30 @@ export class MeshSculptTool implements Tool {
           strokeBase,
           flattenPlanePoint: this.flattenPlanePoint,
           flattenPlaneNormal: this.flattenPlaneNormal,
-          contactNormal,
+          contactNormal: localNormal,
           mask,
+          hardness: this.hardness,
+          pressure: 1,
+          buildUp: this.buildUp,
+          frontFacesOnly: this.frontFacesOnly,
+          surfaceNormal: localNormal,
+          preserveVolume: this.preserveVolume,
         },
       );
 
-      // Track modified vertices for sparse undo
       for (const [id, beforePos] of primaryBefore) {
-        const v = mesh.vertices.get(id);
-        if (v && (v.position.x !== beforePos.x || v.position.y !== beforePos.y || v.position.z !== beforePos.z)) {
+        const vertex = mesh.vertices.get(id);
+        if (
+          vertex &&
+          (vertex.position.x !== beforePos.x ||
+            vertex.position.y !== beforePos.y ||
+            vertex.position.z !== beforePos.z)
+        ) {
           this.touchedVertexIds.add(id);
         }
       }
 
-      if (context.document.settings.symmetry.liveMirror) {
+      if (context.document.settings.symmetry.liveMirror && primaryBefore.size) {
         const primaryAfter = new Map<VertexId, Vec3>();
         for (const [id, beforePos] of primaryBefore) {
           const vertex = mesh.vertices.get(id);
@@ -309,23 +347,34 @@ export class MeshSculptTool implements Tool {
 
     const previous = this.lastPoint;
     if (!previous) {
-      applyPoint(point);
+      applyPoint(point, normal);
       this.lastPoint = cloneVec3(point);
+      this.lastNormal = cloneVec3(normal);
     } else {
       const strokeDelta = subVec3(point, previous);
       const distance = Math.hypot(strokeDelta.x, strokeDelta.y, strokeDelta.z);
-      if (distance < effRadius * 0.06) return;
-      const steps = Math.max(1, Math.ceil(distance / Math.max(0.01, effRadius * 0.18)));
+      const stampSpacing = Math.max(0.005, effRadius * this.spacing);
+      if (distance < stampSpacing * 0.25) return;
+      const steps = Math.min(MAX_STAMP_STEPS, Math.max(1, Math.ceil(distance / stampSpacing)));
+      const previousNormal = this.lastNormal ?? normal;
       for (let step = 1; step <= steps; step++) {
         const t = step / steps;
-        const subDelta = scaleVec3(strokeDelta, 1 / steps);
-        applyPoint({
-          x: previous.x + (point.x - previous.x) * t,
-          y: previous.y + (point.y - previous.y) * t,
-          z: previous.z + (point.z - previous.z) * t,
-        }, subDelta);
+        applyPoint(
+          {
+            x: previous.x + (point.x - previous.x) * t,
+            y: previous.y + (point.y - previous.y) * t,
+            z: previous.z + (point.z - previous.z) * t,
+          },
+          normalizeVec3({
+            x: previousNormal.x + (normal.x - previousNormal.x) * t,
+            y: previousNormal.y + (normal.y - previousNormal.y) * t,
+            z: previousNormal.z + (normal.z - previousNormal.z) * t,
+          }),
+          scaleVec3(strokeDelta, 1 / steps),
+        );
       }
       this.lastPoint = cloneVec3(point);
+      this.lastNormal = cloneVec3(normal);
     }
     bumpPositions(mesh);
     context.document.dirty = true;

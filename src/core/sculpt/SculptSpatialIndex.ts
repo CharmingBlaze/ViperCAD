@@ -140,3 +140,13 @@ export function getOrCreateSpatialIndex(mesh: EditableMesh): SculptSpatialIndex 
   }
   return index;
 }
+
+export function pruneSpatialIndexes(liveMeshIds: Set<string>): void {
+  for (const id of spatialIndexCache.keys()) {
+    if (!liveMeshIds.has(id)) spatialIndexCache.delete(id);
+  }
+}
+
+export function clearSpatialIndexes(): void {
+  spatialIndexCache.clear();
+}

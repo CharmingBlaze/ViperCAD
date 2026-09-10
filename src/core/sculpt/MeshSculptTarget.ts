@@ -34,6 +34,16 @@ function bvhForMesh(mesh: EditableMesh): MeshBvh {
   return bvh;
 }
 
+export function pruneSculptBvhs(liveMeshIds: Set<string>): void {
+  for (const id of bvhCache.keys()) {
+    if (!liveMeshIds.has(id)) bvhCache.delete(id);
+  }
+}
+
+export function clearSculptBvhs(): void {
+  bvhCache.clear();
+}
+
 export function transformDirection(dir: Vec3, transform: Transform): Vec3 {
   const origin = transformPoint({ x: 0, y: 0, z: 0 }, transform);
   const tip = transformPoint(dir, transform);

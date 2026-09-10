@@ -15,6 +15,14 @@ import { PRIMITIVE_LABELS } from '@/core/primitives/PrimitiveFactory';
 import { BlockoutVectorTool } from '@/core/tools/BlockoutVectorTool';
 import { BlockoutSolidTool } from '@/core/tools/BlockoutSolidTool';
 import { BlockoutRoundTool } from '@/core/tools/BlockoutRoundTool';
+import { CreateDoodleTool } from '@/core/tools/CreateDoodleTool';
+import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
+import { KnifeTool } from '@/core/tools/KnifeTool';
+import { LoopCutTool } from '@/core/tools/LoopCutTool';
+import { PushPullTool } from '@/core/tools/PushPullTool';
+import { commitDeleteSelection } from '@/core/editor/DeleteSelection';
+import { exitGroupFocus } from '@/core/editor/GroupFocus';
+import { handleTransformHotkey } from '@/app/TransformHotkeys';
 import type { CameraAxes } from '@/core/transform/Orientation';
 import {
   gizmoHandleOpacity,
@@ -25,6 +33,7 @@ import {
 } from '@/app/orientationGizmo';
 import { importPngAsImagePlane } from '@/core/editor/ImagePlane';
 import { importBlockoutReference } from '@/core/blockout/BlockoutReferenceObject';
+import { combineMeshObjects } from '@/core/editor/GameAssetTools';
 import { pushToast } from '@/app/Toast';
 import { ViewportNavToolbar, viewportNavToolbarRightInset } from '@/app/ViewportNavToolbar';
 import { getActiveClip } from '@/core/rig/RigDocument';
@@ -32,6 +41,7 @@ import { clipFrameCount } from '@/core/rig/AnimationLibrary';
 import { TexturePanelWindow } from '@/app/TexturePanelWindow';
 import { clampTextureSplit, isTextureSplitLayout } from '@/workspace/TextureWorkspace';
 import type { ViewportNavMode } from '@/workspace/WorkspaceController';
+import { hasModelDrag, readModelDrag } from '@/app/outliner/modelDrag';
 
 const UvPixelEditor = lazy(() =>
   import('@/app/UvPixelEditor').then((module) => ({ default: module.UvPixelEditor })),
@@ -240,6 +250,305 @@ export function Viewport({ session, workspace }: Props) {
     }
   };
 
+  const placeDroppedModel = (event: DragEvent<HTMLDivElement>) => {
+    const modelDocumentId = readModelDrag(event.dataTransfer);
+    if (!modelDocumentId) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    const model = session.project.documents.get(modelDocumentId);
+    const objectId = viewportEngine.placeModelAtScreen(
+      modelDocumentId,
+      event.clientX,
+      event.clientY,
+    );
+    if (objectId) {
+      pushToast(`Placed ${model?.name ?? 'model'} from Outliner`, 'success');
+      syncUi();
+    } else {
+      pushToast(
+        `Could not place ${model?.name ?? 'model'} — drop it over an active Level viewport`,
+        'error',
+      );
+    }
+    return true;
+  };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        handleTransformHotkey(
+          e,
+          session,
+          workspace,
+          (id) => viewportEngine.getCameraAxes(id),
+          (id) => viewportEngine.getLastPointerSample(id),
+        )
+      ) {
+        viewportEngine.syncTransformInteractionState();
+        if (session.transform.active) {
+          viewportEngine.syncLiveTransform();
+        } else {
+          viewportEngine.syncGizmo();
+          viewportEngine.invalidate();
+        }
+        syncUi();
+        return;
+      }
+      if (e.key === 'Escape' && viewportEngine.getModelPlacement()) {
+        e.preventDefault();
+        viewportEngine.cancelModelPlacement();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Escape' && session.focusGroupId && workspace.input.owner === 'none') {
+        e.preventDefault();
+        exitGroupFocus(session);
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      const tool = session.tools.getActive();
+      if (
+        e.key === 'Escape' &&
+        (tool instanceof CreatePrimitiveTool || tool instanceof CreateDoodleTool)
+      ) {
+        e.preventDefault();
+        tool.cancel(session.context());
+        session.tools.setActive('select', session.context());
+        workspace.input.end('tool');
+        syncUi();
+        return;
+      }
+      if (e.key === 'Escape' && tool instanceof DrawPolyTool) {
+        e.preventDefault();
+        if (tool.state.chain.length > 0) {
+          tool.cancel(session.context());
+        } else {
+          tool.cancel(session.context());
+          session.tools.setActive('select', session.context());
+          workspace.input.end('tool');
+        }
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Escape' && tool instanceof KnifeTool) {
+        e.preventDefault();
+        if (tool.state.dragging) {
+          tool.cancel(session.context());
+          workspace.input.end('tool');
+          viewportEngine.syncInputControls();
+        } else {
+          tool.cancel(session.context());
+          session.tools.setActive('select', session.context());
+          workspace.input.end('tool');
+        }
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Enter' && tool instanceof KnifeTool && tool.state.dragging) {
+        e.preventDefault();
+        tool.confirm(session.context());
+        workspace.input.end('tool');
+        viewportEngine.syncInputControls();
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Escape' && tool instanceof LoopCutTool) {
+        e.preventDefault();
+        tool.cancel(session.context());
+        session.tools.setActive('select', session.context());
+        workspace.input.end('tool');
+        viewportEngine.syncInputControls();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Escape' && tool instanceof PushPullTool) {
+        e.preventDefault();
+        if (tool.state.phase === 'dragging') {
+          tool.cancel(session.context());
+          workspace.input.end('tool');
+          viewportEngine.syncInputControls();
+        } else {
+          tool.cancel(session.context());
+          session.tools.setActive('select', session.context());
+          workspace.input.end('tool');
+          viewportEngine.syncInputControls();
+        }
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Enter' && tool instanceof PushPullTool && tool.state.phase === 'dragging') {
+        e.preventDefault();
+        tool.confirm(session.context());
+        workspace.input.end('tool');
+        viewportEngine.syncInputControls();
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (
+        e.key === 'Enter' &&
+        tool instanceof LoopCutTool &&
+        tool.state.phase === 'slide'
+      ) {
+        e.preventDefault();
+        const completed = tool.confirm(session.context());
+        if (completed) {
+          session.tools.setActive('select', session.context());
+          workspace.input.end('tool');
+          viewportEngine.syncInputControls();
+        }
+        syncUi();
+        return;
+      }
+      if (
+        e.key === 'Enter' &&
+        tool instanceof CreatePrimitiveTool &&
+        tool.state.stage !== 'idle'
+      ) {
+        e.preventDefault();
+        (e.target as HTMLElement)?.blur?.();
+        tool.confirm(session.context());
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (
+        e.key === 'Backspace' &&
+        tool instanceof CreateDoodleTool &&
+        tool.inputMode === 'pen' &&
+        tool.state.stage === 'drawing'
+      ) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        tool.popPoint(session.context());
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Enter' && tool instanceof CreateDoodleTool && tool.state.stage === 'drawing') {
+        e.preventDefault();
+        (e.target as HTMLElement)?.blur?.();
+        tool.confirm(session.context());
+        workspace.setCurveNodeEditMode(false);
+        workspace.setSelectedCurvePointIndex(0);
+        workspace.input.end('tool');
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (
+        e.key === 'Enter' &&
+        tool instanceof DrawPolyTool &&
+        (tool.buildMode === 'vertices'
+          ? tool.state.createdInChain.length > 0
+          : tool.state.chain.length >= 3)
+      ) {
+        e.preventDefault();
+        (e.target as HTMLElement)?.blur?.();
+        tool.confirm(session.context());
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Backspace' && tool instanceof DrawPolyTool) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        if (tool.state.chain.length > 0) {
+          tool.popLast(session.context());
+        } else {
+          commitDeleteSelection(session);
+        }
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (e.key === 'Delete' || (e.key === 'Backspace' && !(tool instanceof DrawPolyTool))) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        commitDeleteSelection(session);
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === 'j' &&
+        workspace.shellMode === 'model'
+      ) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        session.selection.setMode('object');
+        const result = combineMeshObjects(
+          session.document,
+          session.selection.state.selectedObjectIds,
+        );
+        if (!result.ok) {
+          pushToast(result.message, 'info');
+        } else {
+          session.selection.selectObjects([result.objectId], 'replace');
+          session.tools.setActive('select', session.context());
+          pushToast(`Combined ${result.sourceCount} objects into one mesh`, 'success');
+        }
+        viewportEngine.invalidate();
+        syncUi();
+        return;
+      }
+      const tag = (e.target as HTMLElement)?.tagName;
+      const isTextInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+      if (!isTextInput && !session.transform.active && workspace.shellMode === 'model') {
+        if (e.code === 'NumpadDecimal' || e.key === '.' || e.key.toLowerCase() === 'f') {
+          e.preventDefault();
+          viewportEngine.frameSelection();
+          syncUi();
+          return;
+        }
+        if (e.key === 'Home' && e.shiftKey) {
+          e.preventDefault();
+          viewportEngine.resetView();
+          syncUi();
+          return;
+        }
+        if (e.key === 'Home') {
+          e.preventDefault();
+          viewportEngine.frameAll();
+          syncUi();
+          return;
+        }
+      }
+      if (!workspace.input.canHandleTab(e)) return;
+      e.preventDefault();
+      // Texture shell: Tab maximizes left/right based on pointer side
+      if (workspace.shellMode === 'texture') {
+        const host = hostRef.current?.parentElement;
+        if (host) {
+          const rect = host.getBoundingClientRect();
+          const ratio = workspace.texture.splitRatio;
+          const overLeft = (window as unknown as { __lastPointerX?: number }).__lastPointerX != null
+            ? ((window as unknown as { __lastPointerX: number }).__lastPointerX - rect.left) / rect.width < ratio
+            : true;
+          workspace.toggleTextureMaximize(overLeft ? 'left' : 'right');
+        } else {
+          workspace.handleTab();
+        }
+      } else {
+        workspace.handleTab();
+      }
+      viewportEngine.invalidate();
+      syncUi();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [workspace, session, syncUi]);
+
   useEffect(() => {
     if (!openViewMenu) return;
     const close = () => setOpenViewMenu(null);
@@ -344,12 +653,22 @@ export function Viewport({ session, workspace }: Props) {
     <div
       className={`modelling-region${textureMode ? ' is-texture-shell' : ''}${splitLayout ? ' is-texture-split' : ''}`}
       onDragEnter={(event) => {
+        if (hasModelDrag(event.dataTransfer)) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+          return;
+        }
         if (!hasPngFiles(event)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'copy';
         setPngDropActive(true);
       }}
       onDragOver={(event) => {
+        if (hasModelDrag(event.dataTransfer)) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+          return;
+        }
         if (!hasPngFiles(event)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'copy';
@@ -359,7 +678,10 @@ export function Viewport({ session, workspace }: Props) {
         const next = event.relatedTarget as Node | null;
         if (!next || !event.currentTarget.contains(next)) setPngDropActive(false);
       }}
-      onDrop={(event) => void importDroppedPngs(event)}
+      onDrop={(event) => {
+        if (placeDroppedModel(event)) return;
+        void importDroppedPngs(event);
+      }}
     >
       <TexturePanelWindow
         workspace={workspace}

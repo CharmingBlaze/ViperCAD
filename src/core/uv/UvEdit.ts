@@ -168,11 +168,11 @@ export type UvGizmoHit = { handle: UvGizmoHandle; pivot: Vec2 };
 
 /** Shared screen-pixel sizes for UV transform gizmo draw + hit testing. */
 export const UV_GIZMO_PX = {
-  handle: 7,
-  handleHit: 16,
-  edgeHit: 12,
-  rotateStem: 20,
-  rotateHit: 18,
+  handle: 9,
+  handleHit: 24,
+  edgeHit: 18,
+  rotateStem: 22,
+  rotateHit: 24,
 } as const;
 
 export type UvGizmoLayout = {
@@ -806,3 +806,103 @@ export function cameraToFrameUvBounds(
     panY: canvasH / 2 - cy * zoom,
   };
 }
+
+export type UvAlignMode = 'left' | 'right' | 'center-u' | 'top' | 'bottom' | 'center-v';
+
+/** Align selected UV corners to their min/max/center boundary. */
+export function alignUvs(
+  mesh: EditableMesh,
+  cornerIds: Iterable<FaceCornerId>,
+  layerId: UvLayerId,
+  mode: UvAlignMode,
+): void {
+  const corners = [...cornerIds];
+  if (!corners.length) return;
+  const snapshot = snapshotUvs(mesh, corners, layerId);
+  const bounds = boundsOfUvs(snapshot);
+  if (!bounds) return;
+
+  for (const id of corners) {
+    const corner = mesh.faceCorners.get(id);
+    if (!corner) continue;
+    const current = corner.uvs.get(layerId) ?? { x: 0, y: 0 };
+    let nextX = current.x;
+    let nextY = current.y;
+
+    if (mode === 'left') nextX = bounds.min.x;
+    else if (mode === 'right') nextX = bounds.max.x;
+    else if (mode === 'center-u') nextX = bounds.center.x;
+    else if (mode === 'top') nextY = bounds.max.y;
+    else if (mode === 'bottom') nextY = bounds.min.y;
+    else if (mode === 'center-v') nextY = bounds.center.y;
+
+    corner.uvs.set(layerId, { x: nextX, y: nextY });
+  }
+
+  mesh.geometryVersion += 1;
+  mesh.dirty.uvs = true;
+}
+
+/** Distribute UV points evenly along U or V axis between min and max bounds. */
+export function distributeUvs(
+  mesh: EditableMesh,
+  cornerIds: Iterable<FaceCornerId>,
+  layerId: UvLayerId,
+  axis: 'u' | 'v',
+): void {
+  const corners = [...cornerIds];
+  if (corners.length < 3) return;
+  const snapshot = snapshotUvs(mesh, corners, layerId);
+  const bounds = boundsOfUvs(snapshot);
+  if (!bounds) return;
+
+  const items = corners
+    .map((id) => ({ id, uv: getCornerUv(mesh, id, layerId) }))
+    .sort((a, b) => (axis === 'u' ? a.uv.x - b.uv.x : a.uv.y - b.uv.y));
+
+  const minVal = axis === 'u' ? bounds.min.x : bounds.min.y;
+  const maxVal = axis === 'u' ? bounds.max.x : bounds.max.y;
+  const range = maxVal - minVal;
+  if (range <= 1e-8) return;
+
+  const count = items.length;
+  for (let i = 0; i < count; i += 1) {
+    const item = items[i]!;
+    const corner = mesh.faceCorners.get(item.id);
+    if (!corner) continue;
+    const current = corner.uvs.get(layerId) ?? { x: 0, y: 0 };
+    const step = minVal + (i / (count - 1)) * range;
+    if (axis === 'u') {
+      corner.uvs.set(layerId, { x: step, y: current.y });
+    } else {
+      corner.uvs.set(layerId, { x: current.x, y: step });
+    }
+  }
+
+  mesh.geometryVersion += 1;
+  mesh.dirty.uvs = true;
+}
+
+/** Snap UV coordinates to exact integer pixel steps for the active texture resolution. */
+export function snapUvsToPixelGrid(
+  mesh: EditableMesh,
+  cornerIds: Iterable<FaceCornerId>,
+  layerId: UvLayerId,
+  imageWidth: number,
+  imageHeight: number,
+): void {
+  const w = Math.max(1, imageWidth);
+  const h = Math.max(1, imageHeight);
+  for (const id of cornerIds) {
+    const corner = mesh.faceCorners.get(id);
+    if (!corner) continue;
+    const current = corner.uvs.get(layerId) ?? { x: 0, y: 0 };
+    corner.uvs.set(layerId, {
+      x: Math.round(current.x * w) / w,
+      y: Math.round(current.y * h) / h,
+    });
+  }
+  mesh.geometryVersion += 1;
+  mesh.dirty.uvs = true;
+}
+

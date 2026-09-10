@@ -5,7 +5,7 @@ import { getViperDocument } from '@/core/document/ViperProject';
 import { filterDocumentIds } from '@/app/outliner/documentNavigation';
 import { pushToast } from '@/app/Toast';
 
-type OutlinerTab = 'scene' | 'models' | 'levels';
+type OutlinerTab = 'scene' | 'assets' | 'models' | 'levels';
 
 type Props = {
   session: EditorSession;

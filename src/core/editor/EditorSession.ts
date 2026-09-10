@@ -1,8 +1,10 @@
 import {
   createEmptyProject,
+  buildModelDocumentView,
   projectFromLegacyDocument,
   removeGeneratedDefaultChecker,
 } from '@/core/document/ViperProject';
+import { ensureCurveObjectsLocalized } from '@/core/curves/CurveOperation';
 import type { DocumentId, DocumentKind, ModelDocument, ObjectId, SceneObject, ViperProject } from '@/core/document/types';
 import { syncFocusScopeFilter } from '@/core/editor/GroupFocus';
 import { ProjectEditor, type OpenDocumentSession } from '@/core/editor/ProjectEditor';
@@ -10,12 +12,14 @@ import { CommandHistory } from '@/core/history/CommandHistory';
 import { SelectionManager } from '@/core/selection/SelectionManager';
 import { resolveSnap, WORLD_XY_PLANE, WORLD_XZ_PLANE, WORLD_YZ_PLANE, type ConstructionPlane } from '@/core/snap/SnapEngine';
 import { CreateDoodleTool } from '@/core/tools/CreateDoodleTool';
+import { CombineMeshesTool } from '@/core/tools/CombineMeshesTool';
 import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
 import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
 import { TileDrawTool } from '@/core/tools/TileDrawTool';
 import { SelectTool } from '@/core/tools/SelectTool';
 import { KnifeTool } from '@/core/tools/KnifeTool';
 import { LoopCutTool } from '@/core/tools/LoopCutTool';
+import { PushPullTool } from '@/core/tools/PushPullTool';
 import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
 import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
@@ -24,6 +28,7 @@ import { BlockoutVectorTool } from '@/core/tools/BlockoutVectorTool';
 import { BlockoutSolidTool } from '@/core/tools/BlockoutSolidTool';
 import { BlockoutRoundTool } from '@/core/tools/BlockoutRoundTool';
 import { createEmptyBlockoutReferenceState, type BlockoutReferenceState } from '@/core/blockout/ReferenceImages';
+import { TerrainStructureTool } from '@/core/tools/TerrainStructureTool';
 import { ToolController } from '@/core/tools/ToolController';
 import type { ModellingContext } from '@/core/tools/Tool';
 import type { SnapQuery, SnapResult } from '@/core/snap/SnapEngine';
@@ -254,6 +259,9 @@ export class EditorSession {
   loadProject(project: ViperProject, activeDocumentId?: DocumentId): void {
     this.tools.getActive()?.cancel?.(this.context());
     removeGeneratedDefaultChecker(project);
+    for (const doc of project.documents.values()) {
+      ensureCurveObjectsLocalized(buildModelDocumentView(project, doc.id));
+    }
     this.projectEditor = new ProjectEditor(project);
     const active = activeDocumentId ?? project.activeDocumentId ?? project.levelDocumentIds[0] ?? project.modelDocumentIds[0];
     if (!active) throw new Error('Project has no documents');
@@ -292,10 +300,12 @@ export class EditorSession {
     this.tools.register(new SelectTool());
     this.tools.register(new CreatePrimitiveTool());
     this.tools.register(new CreateDoodleTool());
+    this.tools.register(new CombineMeshesTool());
     this.tools.register(new DrawPolyTool());
     this.tools.register(new TileDrawTool());
     this.tools.register(new KnifeTool());
     this.tools.register(new LoopCutTool());
+    this.tools.register(new PushPullTool());
     this.tools.register(new TerrainSculptTool());
     this.tools.register(new MeshSculptTool());
     this.tools.register(new TerrainObjectTool());
@@ -303,6 +313,7 @@ export class EditorSession {
     this.tools.register(new BlockoutVectorTool());
     this.tools.register(new BlockoutSolidTool());
     this.tools.register(new BlockoutRoundTool());
+    this.tools.register(new TerrainStructureTool());
   }
 
   private createTransformSystem(open: OpenDocumentSession): TransformSystem {

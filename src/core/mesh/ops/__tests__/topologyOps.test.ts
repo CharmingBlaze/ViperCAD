@@ -10,7 +10,7 @@ import {
   isBoundaryEdge,
 } from '@/core/mesh/EditableMesh';
 import { MeshBuilder } from '@/core/mesh/MeshBuilder';
-import { bridgeEdgeLoops, weldVerticesByDistance } from '@/core/mesh/ops/basic';
+import { bridgeEdgeLoops, relaxVertices, weldVerticesByDistance } from '@/core/mesh/ops/basic';
 import {
   closestBoundaryEdgeToPoint,
   findLoopCutRing,
@@ -235,5 +235,33 @@ describe('weldVerticesByDistance', () => {
     const result = weldVerticesByDistance(seam, [...seam.vertices.keys()], 0.01);
     expect(result.ok).toBe(true);
     expect(seam.vertices.size).toBeLessThan(before);
+  });
+});
+
+describe('relaxVertices', () => {
+  it('smooths an interior vertex while preserving the open silhouette', () => {
+    const builder = new MeshBuilder('Relax patch', true);
+    const vertices = Array.from({ length: 3 }, (_, z) =>
+      Array.from({ length: 3 }, (_, x) =>
+        builder.vertex(v3(x, x === 1 && z === 1 ? 1 : 0, z))),
+    );
+    for (let z = 0; z < 2; z++) {
+      for (let x = 0; x < 2; x++) {
+        builder.quad(
+          vertices[z]![x]!,
+          vertices[z]![x + 1]!,
+          vertices[z + 1]![x + 1]!,
+          vertices[z + 1]![x]!,
+        );
+      }
+    }
+    const mesh = builder.build();
+    const centre = vertices[1]![1]!;
+    const corner = vertices[0]![0]!;
+    const result = relaxVertices(mesh, [...mesh.vertices.keys()], 0.5, 2, true);
+    expect(result.ok).toBe(true);
+    expect(mesh.vertices.get(centre)!.position.y).toBeLessThan(1);
+    expect(mesh.vertices.get(corner)!.position).toEqual(v3(0, 0, 0));
+    expect(validateMeshFull(mesh).ok).toBe(true);
   });
 });

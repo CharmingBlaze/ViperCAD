@@ -31,6 +31,7 @@ export function CommandPalette({ open, commands, onClose }: Props) {
   if (!open) return null;
 
   const run = (command: PaletteCommand) => {
+    if (command.disabled) return;
     onClose();
     command.run();
   };
@@ -87,10 +88,20 @@ export function CommandPalette({ open, commands, onClose }: Props) {
                   className={`command-palette-item${index === active ? ' is-active' : ''}`}
                   role="option"
                   aria-selected={index === active}
+                  disabled={command.disabled}
                   onMouseEnter={() => setActive(index)}
                   onClick={() => run(command)}
                 >
-                  <span>{command.label}</span>
+                  <span>
+                    {command.id.includes(':') ? (
+                      <>
+                        <small>{command.id.slice(0, command.id.indexOf(':'))}</small>
+                        {command.label}
+                      </>
+                    ) : (
+                      command.label
+                    )}
+                  </span>
                   {command.shortcut ? (
                     <kbd className="command-palette-shortcut">{command.shortcut}</kbd>
                   ) : null}

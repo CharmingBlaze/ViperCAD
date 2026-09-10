@@ -5,12 +5,14 @@ import {
   Color,
   DirectionalLight,
   DoubleSide,
-  Fog,
+  FogExp2,
+  Group,
   HemisphereLight,
   MOUSE,
+  Mesh,
+  MeshBasicMaterial,
   LineBasicMaterial,
   LineLoop,
-  Mesh,
   OrthographicCamera,
   PlaneGeometry,
   PerspectiveCamera,
@@ -27,13 +29,15 @@ import {
   type Material,
   type Texture,
 } from 'three';
+import { getDocumentLighting } from '@/core/level/LevelLighting';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { ensureDefaultPlaceholderMaterial } from '@/core/document/ModelDocument';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { enterGroupFocusFromPick, isObjectInFocusScope } from '@/core/editor/GroupFocus';
-import { expandGroupsToDescendants, getObjectWorldTransform } from '@/core/editor/Hierarchy';
+import { expandGroupsToDescendants, getObjectWorldMatrix, getObjectWorldTransform } from '@/core/editor/Hierarchy';
 import {
+  editableMeshToRenderData,
   pickLogicalFace,
   type ObjectRenderHandle,
 } from '@/renderer/MeshRenderAdapter';
@@ -52,7 +56,7 @@ import {
 } from '@/renderer/ViewportClip';
 import { createViewportGrid, syncViewportGrid } from '@/renderer/ViewportGrid';
 import type { ViewportGrid } from '@/renderer/ViewportGrid';
-import { createViewportWorld, VIEWPORT_CLEAR, VIEWPORT_FOG, VIEWPORT_SUN_DIR, VIEWPORT_ZENITH } from '@/renderer/ViewportWorld';
+import { createViewportWorld, VIEWPORT_CLEAR, VIEWPORT_ZENITH } from '@/renderer/ViewportWorld';
 import type { ViewportWorld } from '@/renderer/ViewportWorld';
 import { faceVertexIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
 import type { ObjectId } from '@/core/document/types';
@@ -76,6 +80,7 @@ import { CreatePrimitiveTool } from '@/core/tools/CreatePrimitiveTool';
 import { DrawPolyTool } from '@/core/tools/DrawPolyTool';
 import { KnifeTool } from '@/core/tools/KnifeTool';
 import { LoopCutTool } from '@/core/tools/LoopCutTool';
+import { PushPullTool } from '@/core/tools/PushPullTool';
 import { TileDrawTool } from '@/core/tools/TileDrawTool';
 import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
 import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
@@ -83,6 +88,8 @@ import { raycastSculptTarget } from '@/core/sculpt/MeshSculptTarget';
 import { TerrainObjectTool } from '@/core/tools/TerrainObjectTool';
 import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
 import { resolveTerrainAsset } from '@/core/terrain/Terrain';
+import { TerrainStructureTool } from '@/core/tools/TerrainStructureTool';
+import { terrainPlacedObjects } from '@/core/terrain/TerrainProps';
 import { BlockoutVectorTool } from '@/core/tools/BlockoutVectorTool';
 import { BlockoutSolidTool } from '@/core/tools/BlockoutSolidTool';
 import { BlockoutRoundTool } from '@/core/tools/BlockoutRoundTool';
@@ -94,7 +101,12 @@ import {
 import { ReferenceImageOverlayHandle } from '@/renderer/ReferenceImageOverlay';
 import type { ToolPointerInput } from '@/core/tools/Tool';
 import { WORLD_XY_PLANE, WORLD_XZ_PLANE, WORLD_YZ_PLANE, constructionPlaneFromNormal, constructionPlaneThrough, rayPlaneIntersection } from '@/core/snap/SnapEngine';
-import { commitPlaceModelInLevel } from '@/core/editor/ModelInstances';
+import {
+  commitPlaceModelInLevel,
+  modelDocumentBaseOffset,
+  modelDocumentPlacementRadius,
+} from '@/core/editor/ModelInstances';
+import { buildModelDocumentView } from '@/core/document/ViperProject';
 import type { DocumentId } from '@/core/document/types';
 import { inverseTransformPointApprox, cloneTransform } from '@/core/math/Transform';
 import { PrimitivePreviewHandle } from '@/renderer/PrimitivePreviewAdapter';
@@ -200,7 +212,7 @@ export class ViewportEngine {
   private scene: Scene | null = null;
   private world: ViewportWorld | null = null;
   private shadowReceiver: Mesh<PlaneGeometry, ShadowMaterial> | null = null;
-  private sceneFog: Fog | null = null;
+  private lightingFog: FogExp2 | null = null;
   private panes = new Map<ViewId, Pane>();
   private host: HTMLElement | null = null;
   private session: EditorSession | null = null;
@@ -239,6 +251,7 @@ export class ViewportEngine {
   private onLayoutChange: (() => void) | null = null;
   private onCameraChange: ((id: ViewId, axes: CameraAxes) => void) | null = null;
   private lastPixelRatio = 0;
+  private renderQualityScale = 1;
   private primitivePreview = new PrimitivePreviewHandle();
   private tileDrawOverlay = new TileDrawOverlay();
   readonly referenceImageOverlay = new ReferenceImageOverlayHandle();
@@ -246,6 +259,9 @@ export class ViewportEngine {
   private gizmo = new TransformGizmo();
   private originOverlay = new OriginOverlay();
   private terrainBrushPreview = createTerrainBrushPreview();
+  private sculptHardnessPreview = createTerrainBrushPreview();
+  private terrainObjectGhost: Group | null = null;
+  private terrainObjectGhostKey = '';
   private modifierPreview = new ModifierPreviewOverlay();
   private curveControls = new CurveControlOverlay();
   private curvePointDrag: {
@@ -267,7 +283,7 @@ export class ViewportEngine {
   private draftCurvePointDrag: {
     paneId: ViewId;
     pointerId: number;
-    target: CurveControlTarget;
+    target: { kind: 'anchor' | 'handle-in' | 'handle-out'; index: number };
     planeOrigin: Vec3;
     planeNormal: Vec3;
   } | null = null;
@@ -311,6 +327,11 @@ export class ViewportEngine {
     modelName: string;
     onPlaced?: () => void;
   } | null = null;
+  private hemiLight: HemisphereLight | null = null;
+  private ambientLight: AmbientLight | null = null;
+  private sunLight: DirectionalLight | null = null;
+  private fillLight: DirectionalLight | null = null;
+  private rimLight: DirectionalLight | null = null;
 
   attach(
     host: HTMLElement,
@@ -394,6 +415,7 @@ export class ViewportEngine {
     this.draftCurvePointDrag = null;
     this.nav.cancel();
     this.interactionOverlay.detach();
+    this.clearTerrainObjectGhost();
     for (const pane of this.panes.values()) {
       pane.controls?.dispose();
       pane.controls = null;
@@ -407,7 +429,7 @@ export class ViewportEngine {
     this.workspace = null;
     this.world = null;
     this.shadowReceiver = null;
-    this.sceneFog = null;
+    this.lightingFog = null;
     this.onLayoutChange = null;
     this.onCameraChange = null;
   }
@@ -433,6 +455,17 @@ export class ViewportEngine {
 
   invalidate(): void {
     this.needsRender = true;
+  }
+
+  setRenderQuality(scale: number): void {
+    this.renderQualityScale = Math.max(0.5, Math.min(1.5, scale));
+    if (this.renderer) {
+      const ratio = Math.min((window.devicePixelRatio || 1) * this.renderQualityScale, 2);
+      this.renderer.setPixelRatio(ratio);
+      this.lastPixelRatio = ratio;
+      this.resize();
+      this.invalidate();
+    }
   }
 
   setModifierPreview(objectId: ObjectId | null, previews: ModifierPreview[]): void {
@@ -470,7 +503,8 @@ export class ViewportEngine {
     }
 
     // Pixel ratio is for sharpness only. Layout/viewport/scissor stay in CSS pixels.
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(Math.min((window.devicePixelRatio || 1) * this.renderQualityScale, 2));
+    this.lastPixelRatio = Math.min((window.devicePixelRatio || 1) * this.renderQualityScale, 2);
     // A compact neutral studio environment gives PBR materials readable
     // highlights and metallic reflections without requiring an external HDRI.
     renderer.toneMapping = ACESFilmicToneMapping;
@@ -509,30 +543,35 @@ export class ViewportEngine {
     pmrem.dispose();
     environment.dispose();
 
-    scene.add(new HemisphereLight(0x9ebee5, 0x303844, 0.72));
-    scene.add(new AmbientLight(0xffffff, 0.1));
-    const key = new DirectionalLight(0xfff1d0, 1.6);
-    key.position.copy(VIEWPORT_SUN_DIR).multiplyScalar(24);
-    key.castShadow = true;
-    key.shadow.mapSize.set(2048, 2048);
-    key.shadow.bias = -0.00015;
-    key.shadow.normalBias = 0.025;
-    key.shadow.camera.near = 0.1;
-    key.shadow.camera.far = 80;
-    key.shadow.camera.left = -24;
-    key.shadow.camera.right = 24;
-    key.shadow.camera.top = 24;
-    key.shadow.camera.bottom = -24;
-    scene.add(key);
-    const fill = new DirectionalLight(0x9ec4ff, 0.32);
-    fill.position.set(-6, 3, -5);
-    scene.add(fill);
+    this.hemiLight = new HemisphereLight(0xd8e4f8, 0x282830, 0.42);
+    scene.add(this.hemiLight);
 
-    this.sceneFog = new Fog(VIEWPORT_FOG, 28, 150);
+    this.ambientLight = new AmbientLight(0xffffff, 0.28);
+    scene.add(this.ambientLight);
+
+    this.sunLight = new DirectionalLight(0xffffff, 0.95);
+    this.sunLight.position.set(6, 10, 4);
+    this.sunLight.castShadow = true;
+    this.sunLight.shadow.mapSize.set(2048, 2048);
+    this.sunLight.shadow.bias = -0.00015;
+    this.sunLight.shadow.normalBias = 0.025;
+    this.sunLight.shadow.camera.near = 0.1;
+    this.sunLight.shadow.camera.far = 80;
+    this.sunLight.shadow.camera.left = -24;
+    this.sunLight.shadow.camera.right = 24;
+    this.sunLight.shadow.camera.top = 24;
+    this.sunLight.shadow.camera.bottom = -24;
+    scene.add(this.sunLight);
+
+    this.fillLight = new DirectionalLight(0xc8d4ff, 0.42);
+    this.fillLight.position.set(-5, 4, -7);
+    scene.add(this.fillLight);
+
+    this.rimLight = new DirectionalLight(0xffe8cc, 0.28);
+    this.rimLight.position.set(-2, 3, 8);
+    scene.add(this.rimLight);
 
     const world = createViewportWorld();
-    // The modeler uses a neutral studio canvas rather than a game-style sky.
-    world.visible = false;
     scene.add(world);
     this.world = world;
 
@@ -616,6 +655,9 @@ export class ViewportEngine {
     scene.add(this.bonesOverlay.group);
     scene.add(this.sceneHelpers.group);
     scene.add(this.terrainBrushPreview);
+    scene.add(this.sculptHardnessPreview);
+    (this.sculptHardnessPreview.material as LineBasicMaterial).opacity = 0.48;
+    this.sculptHardnessPreview.name = 'Sculpt Hardness';
     scene.add(this.modifierPreview.root);
     this.renderer = renderer;
     return true;
@@ -946,6 +988,7 @@ export class ViewportEngine {
     if (tool instanceof TerrainSculptTool) return true;
     if (tool instanceof TerrainObjectTool) return true;
     if (tool instanceof TerrainFeatureTool) return true;
+    if (tool instanceof TerrainStructureTool) return true;
     if (tool instanceof TileDrawTool) return true;
     if (tool instanceof BlockoutVectorTool) return true;
     if (tool instanceof KnifeTool) return true;
@@ -1007,10 +1050,12 @@ export class ViewportEngine {
     const modalMeshTool =
       (activeTool instanceof KnifeTool && activeTool.state.dragging) ||
       activeTool instanceof LoopCutTool ||
+      activeTool instanceof PushPullTool ||
       (activeTool instanceof TerrainSculptTool && activeTool.dragging) ||
       (activeTool instanceof MeshSculptTool && activeTool.dragging) ||
       (activeTool instanceof TerrainObjectTool && activeTool.dragging) ||
-      (activeTool instanceof TerrainFeatureTool && activeTool.dragging);
+      (activeTool instanceof TerrainFeatureTool && activeTool.dragging) ||
+      (activeTool instanceof TerrainStructureTool && activeTool.dragging);
     const blockTransform =
       !!this.session?.transform.active ||
       this.gizmoDragging ||
@@ -1350,9 +1395,13 @@ export class ViewportEngine {
       !(tool instanceof TerrainSculptTool) &&
       !(tool instanceof MeshSculptTool) &&
       !(tool instanceof TerrainObjectTool) &&
-      !(tool instanceof TerrainFeatureTool)
+      !(tool instanceof TerrainFeatureTool) &&
+      !(tool instanceof TerrainStructureTool)
     ) {
       this.terrainBrushPreview.visible = false;
+    }
+    if (!(tool instanceof MeshSculptTool)) {
+      this.sculptHardnessPreview.visible = false;
     }
     if (id && tool instanceof CreatePrimitiveTool) {
       if (tool.state.stage !== 'idle') {
@@ -1389,6 +1438,16 @@ export class ViewportEngine {
     if (id && tool instanceof KnifeTool) {
       tool.setViewportPick(this.resolveKnifePick(e, id));
       tool.update(this.pointerInput(e, id), this.session!.context());
+      this.invalidate();
+      return;
+    }
+    if (id && tool instanceof PushPullTool) {
+      if (tool.state.phase === 'hover') {
+        tool.setViewportPick(this.resolveKnifePick(e, id));
+      }
+      tool.update(this.pointerInput(e, id), this.session!.context());
+      this.interactionOverlay.updateTransform(e, tool.getStatusLine());
+      if (this.renderer) this.renderer.domElement.style.cursor = 'crosshair';
       this.invalidate();
       return;
     }
@@ -1449,6 +1508,17 @@ export class ViewportEngine {
       this.invalidate();
       return;
     }
+    if (id && tool instanceof TerrainStructureTool) {
+      const input = this.terrainPointerInput(e, id);
+      if (tool.dragging && (e.buttons & 1)) {
+        tool.update(input, this.session!.context());
+      }
+      this.updateTerrainStructureBrushPreview(input, tool);
+      this.interactionOverlay.updateTransform(e, tool.statusLine());
+      if (this.renderer) this.renderer.domElement.style.cursor = 'crosshair';
+      this.invalidate();
+      return;
+    }
 
     if (id && tool instanceof BlockoutVectorTool) {
       tool.onPointerMove(this.pointerInput(e, id), this.session!.context());
@@ -1474,10 +1544,12 @@ export class ViewportEngine {
       && !(tool instanceof TileDrawTool)
       && !(tool instanceof KnifeTool)
       && !(tool instanceof LoopCutTool)
+      && !(tool instanceof PushPullTool)
       && !(tool instanceof TerrainSculptTool)
       && !(tool instanceof MeshSculptTool)
       && !(tool instanceof TerrainObjectTool)
       && !(tool instanceof TerrainFeatureTool)
+      && !(tool instanceof TerrainStructureTool)
     ) {
       const gizmoHit = this.isTextureFaceEditing() ? null : this.pickGizmo(e, id);
       if (gizmoHit) {
@@ -1569,15 +1641,27 @@ export class ViewportEngine {
     if (this.tryHandleAnimationPointerDown(e, id)) return;
 
     const tool = this.session?.tools.getActive();
+    const vectorPenDrawing =
+      tool instanceof CreateDoodleTool &&
+      tool.inputMode === 'pen' &&
+      tool.state.stage === 'drawing';
+    const vectorPenIdle =
+      tool instanceof CreateDoodleTool &&
+      tool.inputMode === 'pen' &&
+      tool.state.stage === 'idle';
     if (
       !this.workspace.curveNodeEditMode &&
-      !(this.session?.tools.getActive() instanceof BlockoutVectorTool) &&
+      !vectorPenDrawing &&
+      !(tool instanceof BlockoutVectorTool) &&
       this.tryStartGizmoTransform(e, id)
     ) {
       this.invalidate();
       return;
     }
-    const curveTarget = this.workspace.curveNodeEditMode ? this.pickCurveControl(e, id) : null;
+    const curveTarget =
+      this.workspace.curveNodeEditMode && !vectorPenIdle
+        ? this.pickCurveControl(e, id)
+        : null;
     if (curveTarget && this.beginCurvePointDrag(e, id, curveTarget)) return;
 
     if (this.workspace.texture.seamPaintMode !== 'off') {
@@ -1601,10 +1685,12 @@ export class ViewportEngine {
       !(tool instanceof TileDrawTool) &&
       !(tool instanceof KnifeTool) &&
       !(tool instanceof LoopCutTool) &&
+      !(tool instanceof PushPullTool) &&
       !(tool instanceof TerrainSculptTool) &&
       !(tool instanceof MeshSculptTool) &&
       !(tool instanceof TerrainObjectTool) &&
       !(tool instanceof TerrainFeatureTool) &&
+      !(tool instanceof TerrainStructureTool) &&
       !(tool instanceof BlockoutVectorTool) &&
       !transform?.active
     ) {
@@ -1667,6 +1753,26 @@ export class ViewportEngine {
         this.invalidate();
         return;
       } else if (tool.state.stage === 'idle') {
+        if (tool.inputMode === 'pen') {
+          this.workspace.setCurveNodeEditMode(false);
+          this.workspace.setSelectedCurvePointIndex(0);
+        }
+        if (tool.inputMode !== 'pen') {
+          if (this.tryStartGizmoTransform(e, id)) {
+            this.invalidate();
+            return;
+          }
+          const hit = this.resolvePointerHit(e, id);
+          if (hit) {
+            this.pickSelection(e, id);
+            if (this.workspace.curveNodeEditMode) {
+              this.workspace.setCurveNodeEditMode(false);
+            }
+            this.syncGizmo();
+            this.invalidate();
+            return;
+          }
+        }
         e.preventDefault();
         if (tool.inputMode === 'sketch') {
           (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -1685,6 +1791,8 @@ export class ViewportEngine {
         this.invalidate();
         return;
       }
+      this.invalidate();
+      return;
     }
 
     if (tool instanceof DrawPolyTool) {
@@ -1727,6 +1835,27 @@ export class ViewportEngine {
         this.workspace.input.end('tool');
         this.syncOrbitEnabled();
       }
+      this.invalidate();
+      return;
+    }
+
+    if (tool instanceof PushPullTool) {
+      e.preventDefault();
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      this.rebindActiveControls();
+      if (tool.state.phase === 'hover') {
+        tool.setViewportPick(this.resolveKnifePick(e, id));
+      }
+      const wasDragging = tool.state.phase === 'dragging';
+      this.workspace.input.begin('tool');
+      this.syncOrbitEnabled();
+      tool.begin(this.pointerInput(e, id), this.session!.context());
+      if (wasDragging && tool.state.phase === 'hover') {
+        this.workspace.input.end('tool');
+        this.interactionOverlay.updateTransform(null, '');
+        this.syncOrbitEnabled();
+      }
+      this.interactionOverlay.updateTransform(e, tool.getStatusLine());
       this.invalidate();
       return;
     }
@@ -1812,6 +1941,20 @@ export class ViewportEngine {
       this.syncOrbitEnabled();
       tool.begin(input, this.session!.context());
       this.updateTerrainFeatureBrushPreview(input, tool);
+      this.interactionOverlay.updateTransform(e, tool.statusLine());
+      this.invalidate();
+      return;
+    }
+    if (tool instanceof TerrainStructureTool) {
+      const input = this.terrainPointerInput(e, id);
+      if (!input.worldPosition) return;
+      e.preventDefault();
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      this.rebindActiveControls();
+      this.workspace.input.begin('tool');
+      this.syncOrbitEnabled();
+      tool.begin(input, this.session!.context());
+      this.updateTerrainStructureBrushPreview(input, tool);
       this.interactionOverlay.updateTransform(e, tool.statusLine());
       this.invalidate();
       return;
@@ -1943,6 +2086,10 @@ export class ViewportEngine {
       !doodle.state.strokeLocked &&
       e.button === 0
     ) {
+      const paneId = this.workspace.hoveredViewportId ?? this.workspace.activeViewportId;
+      if (paneId) {
+        doodle.update(this.pointerInput(e, paneId), this.session.context());
+      }
       doodle.lockSketchStroke(this.session.context());
       if (doodle.isSketchStrokeLocked()) {
         doodle.confirm(this.session.context());
@@ -1985,6 +2132,14 @@ export class ViewportEngine {
     }
     if (doodle instanceof TerrainFeatureTool && doodle.dragging && e.button === 0) {
       doodle.endStroke(this.session);
+      this.workspace.input.end('tool');
+      this.interactionOverlay.updateTransform(null, '');
+      this.syncOrbitEnabled();
+      this.invalidate();
+      return;
+    }
+    if (doodle instanceof TerrainStructureTool && doodle.dragging && e.button === 0) {
+      doodle.endStroke(this.session.context());
       this.workspace.input.end('tool');
       this.interactionOverlay.updateTransform(null, '');
       this.syncOrbitEnabled();
@@ -2072,6 +2227,12 @@ export class ViewportEngine {
       this.syncOrbitEnabled();
     }
     if (terrain instanceof TerrainFeatureTool && terrain.dragging && this.session && this.workspace) {
+      terrain.cancel(this.session.context());
+      this.workspace.input.end('tool');
+      this.interactionOverlay.updateTransform(null, '');
+      this.syncOrbitEnabled();
+    }
+    if (terrain instanceof TerrainStructureTool && terrain.dragging && this.session && this.workspace) {
       terrain.cancel(this.session.context());
       this.workspace.input.end('tool');
       this.interactionOverlay.updateTransform(null, '');
@@ -2632,7 +2793,12 @@ export class ViewportEngine {
       shiftKey: e.shiftKey,
       ctrlKey: e.ctrlKey,
       altKey: e.altKey,
-      pressure: typeof e.pressure === 'number' && e.pressure > 0 ? e.pressure : undefined,
+      pressure:
+        e.pointerType === 'pen'
+          ? Math.max(0.05, Math.min(1, e.pressure || 0.5))
+          : typeof e.pressure === 'number' && e.pressure > 0
+            ? e.pressure
+            : undefined,
       worldUnitsPerPixel,
       viewportId: paneId,
     };
@@ -2647,7 +2813,9 @@ export class ViewportEngine {
         ? activeTool.terrainObjectId
         : activeTool instanceof TerrainFeatureTool && activeTool.terrainObjectId
           ? activeTool.terrainObjectId
-          : this.session.selection.state.activeObjectId;
+          : activeTool instanceof TerrainStructureTool && activeTool.terrainObjectId
+            ? activeTool.terrainObjectId
+            : this.session.selection.state.activeObjectId;
     const terrain = resolveTerrainAsset(this.session, preferredId);
     const object = terrain?.object ?? null;
     if (!object || object.metadata.terrain !== 'true') return input;
@@ -2657,10 +2825,39 @@ export class ViewportEngine {
       new Vector3(input.rayOrigin.x, input.rayOrigin.y, input.rayOrigin.z),
       new Vector3(input.rayDirection.x, input.rayDirection.y, input.rayDirection.z),
     );
+    if (
+      activeTool instanceof TerrainObjectTool &&
+      activeTool.mode === 'place' &&
+      activeTool.stackModels
+    ) {
+      const placedIds = new Set(
+        terrainPlacedObjects(this.session.document, object.id).map((placed) => placed.id),
+      );
+      const stackTargets: Mesh[] = [];
+      const objectIdByMesh = new Map<Mesh, ObjectId>();
+      for (const [handleKey, candidate] of this.handles) {
+        const candidateObjectId = handleKey.split('::')[0] as ObjectId;
+        if (!placedIds.has(candidateObjectId)) continue;
+        const placed = this.session.document.objects.get(candidateObjectId);
+        if (!placed?.visible) continue;
+        stackTargets.push(candidate.mesh);
+        objectIdByMesh.set(candidate.mesh, candidateObjectId);
+      }
+      this.scene?.updateMatrixWorld(true);
+      const stackedHit = raycaster.intersectObjects(stackTargets, false)[0];
+      if (stackedHit) {
+        return {
+          ...input,
+          worldPosition: v3(stackedHit.point.x, stackedHit.point.y, stackedHit.point.z),
+          surfaceObjectId: objectIdByMesh.get(stackedHit.object as Mesh) ?? null,
+        };
+      }
+    }
     const hit = raycaster.intersectObject(handle.mesh, false)[0];
     return {
       ...input,
       worldPosition: hit ? v3(hit.point.x, hit.point.y, hit.point.z) : null,
+      surfaceObjectId: hit ? object.id : null,
     };
   }
 
@@ -2683,6 +2880,7 @@ export class ViewportEngine {
     const hit = tool.previewHit;
     if (!hit) {
       this.terrainBrushPreview.visible = false;
+      this.sculptHardnessPreview.visible = false;
       return;
     }
     this.terrainBrushPreview.visible = true;
@@ -2696,6 +2894,12 @@ export class ViewportEngine {
     const up = new Vector3(0, 1, 0);
     const normal = new Vector3(hit.normal.x, hit.normal.y, hit.normal.z);
     this.terrainBrushPreview.quaternion.setFromUnitVectors(up, normal.normalize());
+    this.sculptHardnessPreview.visible = true;
+    this.sculptHardnessPreview.position.copy(this.terrainBrushPreview.position);
+    this.sculptHardnessPreview.quaternion.copy(this.terrainBrushPreview.quaternion);
+    this.sculptHardnessPreview.scale.setScalar(
+      tool.radius * Math.max(0.04, tool.hardness),
+    );
     const material = this.terrainBrushPreview.material as LineBasicMaterial;
     material.color.setHex(
       tool.mode === 'draw' ? 0xff8c28
@@ -2714,6 +2918,7 @@ export class ViewportEngine {
         : tool.mode === 'noise' ? 0xb18cff
         : 0xff8c28,
     );
+    (this.sculptHardnessPreview.material as LineBasicMaterial).color.copy(material.color);
   }
 
   private updateTerrainBrushPreview(
@@ -2737,7 +2942,8 @@ export class ViewportEngine {
         : tool.mode === 'smooth' ? 0x74d68b
           : tool.mode === 'flatten' ? 0xffc45c
             : tool.mode === 'noise' ? 0xb18cff
-              : 0xff8c28,
+              : tool.mode === 'paint' ? 0x3b82f6
+                : 0xff8c28,
     );
   }
 
@@ -2747,6 +2953,7 @@ export class ViewportEngine {
   ): void {
     if (!input.worldPosition) {
       this.terrainBrushPreview.visible = false;
+      if (this.terrainObjectGhost) this.terrainObjectGhost.visible = false;
       return;
     }
     this.terrainBrushPreview.visible = true;
@@ -2764,6 +2971,115 @@ export class ViewportEngine {
           ? 0x79d26b
           : 0xffa33b,
     );
+    this.syncTerrainObjectGhost(input, tool);
+  }
+
+  private syncTerrainObjectGhost(input: ToolPointerInput, tool: TerrainObjectTool): void {
+    if (
+      !this.scene ||
+      !this.session ||
+      !input.worldPosition ||
+      !tool.sourceModelDocumentId ||
+      tool.mode === 'erase'
+    ) {
+      if (this.terrainObjectGhost) this.terrainObjectGhost.visible = false;
+      return;
+    }
+    const model = this.session.project.documents.get(tool.sourceModelDocumentId);
+    if (!model || model.kind !== 'model') {
+      if (this.terrainObjectGhost) this.terrainObjectGhost.visible = false;
+      return;
+    }
+    const modelView = buildModelDocumentView(this.session.project, model.id);
+    const parts: {
+      objectId: ObjectId;
+      mesh: EditableMesh;
+      matrix: ReturnType<typeof getObjectWorldMatrix>;
+    }[] = [];
+    const walk = (objectId: ObjectId, ancestorsVisible: boolean) => {
+      const object = model.objects.get(objectId);
+      if (!object) return;
+      const visible = ancestorsVisible && object.visible;
+      if (visible && object.meshId) {
+        const mesh = this.session!.project.meshes.get(object.meshId);
+        if (mesh) {
+          parts.push({
+            objectId,
+            mesh,
+            matrix: getObjectWorldMatrix(modelView, objectId),
+          });
+        }
+      }
+      for (const childId of object.childIds) walk(childId, visible);
+    };
+    const roots = model.rootObjectIds.length
+      ? model.rootObjectIds
+      : [...model.objects.values()].filter((object) => !object.parentId).map((object) => object.id);
+    for (const rootId of roots) walk(rootId, true);
+    if (!parts.length) {
+      if (this.terrainObjectGhost) this.terrainObjectGhost.visible = false;
+      return;
+    }
+    const key = [
+      tool.sourceModelDocumentId,
+      ...parts.map(({ objectId, mesh, matrix }) =>
+        `${objectId}:${mesh.id}:${mesh.topologyVersion}:${mesh.geometryVersion}:${matrix.elements.join(',')}`),
+    ].join('|');
+    if (!this.terrainObjectGhost || this.terrainObjectGhostKey !== key) {
+      this.clearTerrainObjectGhost();
+      const material = new MeshBasicMaterial({
+        color: 0xffa33b,
+        transparent: true,
+        opacity: 0.34,
+        depthWrite: false,
+        wireframe: false,
+        side: DoubleSide,
+      });
+      this.terrainObjectGhost = new Group();
+      this.terrainObjectGhost.name = 'Terrain Model Ghost';
+      this.terrainObjectGhost.renderOrder = 115;
+      this.terrainObjectGhost.userData.nonSelectable = true;
+      for (const part of parts) {
+        const renderData = editableMeshToRenderData(part.mesh);
+        const child = new Mesh(renderData.geometry, material);
+        child.name = `Terrain Model Ghost · ${part.objectId}`;
+        child.matrixAutoUpdate = false;
+        child.matrix.copy(part.matrix);
+        child.renderOrder = 115;
+        child.userData.nonSelectable = true;
+        this.terrainObjectGhost.add(child);
+      }
+      this.scene.add(this.terrainObjectGhost);
+      this.terrainObjectGhostKey = key;
+    }
+    const ghost = this.terrainObjectGhost;
+    ghost.visible = true;
+    ghost.position.set(
+      input.worldPosition.x,
+      input.worldPosition.y +
+        tool.sourceModelBaseOffset * tool.placementScale +
+        tool.groundClearance +
+        tool.heightOffset,
+      input.worldPosition.z,
+    );
+    ghost.rotation.set(0, tool.placementYaw, 0);
+    ghost.scale.setScalar(tool.placementScale);
+  }
+
+  private clearTerrainObjectGhost(): void {
+    if (!this.terrainObjectGhost) return;
+    this.terrainObjectGhost.parent?.remove(this.terrainObjectGhost);
+    const materials = new Set<Material>();
+    this.terrainObjectGhost.traverse((child) => {
+      if (!(child instanceof Mesh)) return;
+      child.geometry.dispose();
+      const material = child.material;
+      if (Array.isArray(material)) material.forEach((item) => materials.add(item));
+      else materials.add(material);
+    });
+    materials.forEach((material) => material.dispose());
+    this.terrainObjectGhost = null;
+    this.terrainObjectGhostKey = '';
   }
 
   private updateTerrainFeatureBrushPreview(
@@ -2869,6 +3185,45 @@ export class ViewportEngine {
       }
     }
     this.applyViewConstructionPlane(paneId);
+  }
+
+  private updateTerrainStructureBrushPreview(
+    input: ToolPointerInput,
+    tool: TerrainStructureTool,
+  ): void {
+    if (!input.worldPosition) {
+      this.terrainBrushPreview.visible = false;
+      return;
+    }
+    this.terrainBrushPreview.visible = true;
+    this.terrainBrushPreview.position.set(
+      input.worldPosition.x,
+      input.worldPosition.y + 0.04,
+      input.worldPosition.z,
+    );
+    const radius =
+      tool.kind === 'building'
+        ? Math.max(tool.buildingWidth, tool.buildingDepth) * 0.5
+        : tool.kind === 'road_grid'
+          ? (tool.gridX * tool.blockSize) * 0.35
+          : tool.kind === 'bridge'
+            ? tool.bridgeWidth * 0.75
+            : tool.kind === 'cave'
+              ? tool.caveRadius
+              : tool.waterfallWidth * 0.5;
+    this.terrainBrushPreview.scale.setScalar(Math.max(0.2, radius));
+    const material = this.terrainBrushPreview.material as LineBasicMaterial;
+    material.color.setHex(
+      tool.kind === 'building'
+        ? 0x3b82f6
+        : tool.kind === 'road_grid'
+          ? 0xf59e0b
+          : tool.kind === 'bridge'
+            ? 0x10b981
+            : tool.kind === 'cave'
+              ? 0x8b5cf6
+              : 0x06b6d4,
+    );
   }
 
   private faceConstructionPlane(e: PointerEvent, paneId: ViewId): { plane: { origin: { x:number;y:number;z:number }; normal: { x:number;y:number;z:number }; xAxis: { x:number;y:number;z:number }; yAxis: { x:number;y:number;z:number } }; id: string } | null {
@@ -3543,11 +3898,15 @@ export class ViewportEngine {
         !(terrain instanceof TerrainSculptTool) &&
         !(terrain instanceof MeshSculptTool) &&
         !(terrain instanceof TerrainObjectTool) &&
-        !(terrain instanceof TerrainFeatureTool)
+        !(terrain instanceof TerrainFeatureTool) &&
+        !(terrain instanceof TerrainStructureTool)
       ) ||
       !terrain.dragging
     ) {
       this.terrainBrushPreview.visible = false;
+    }
+    if (!(terrain instanceof MeshSculptTool) || !terrain.dragging) {
+      this.sculptHardnessPreview.visible = false;
     }
     if (!this.session || this.interacting) return;
     const drawTool = this.session.tools.getActive();
@@ -3699,6 +4058,22 @@ export class ViewportEngine {
       this.invalidate();
       return;
     }
+    if (tool instanceof TerrainObjectTool && this.session && tool.mode === 'place') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        tool.placementScale = Math.max(
+          0.1,
+          Math.min(4, tool.placementScale * (e.deltaY < 0 ? 1.08 : 0.92)),
+        );
+      } else {
+        tool.placementYaw += (e.deltaY < 0 ? 1 : -1) * Math.PI / 12;
+      }
+      tool.revision += 1;
+      this.interactionOverlay.updateTransform(e, tool.statusLine());
+      this.session.requestRedraw();
+      this.invalidate();
+      return;
+    }
     if (!cameraChord && tool instanceof LoopCutTool && this.session) {
       e.preventDefault();
       tool.adjustCutCount(e.deltaY < 0 ? 1 : -1, this.session.context());
@@ -3715,7 +4090,14 @@ export class ViewportEngine {
     }
     if (!cameraChord && tool instanceof MeshSculptTool && this.session) {
       e.preventDefault();
-      tool.setRadius(tool.radius * (e.deltaY < 0 ? 1.12 : 0.89), this.session.context());
+      if (e.ctrlKey || e.metaKey) {
+        tool.setStrength(
+          tool.strength * (e.deltaY < 0 ? 1.12 : 0.89),
+          this.session.context(),
+        );
+      } else {
+        tool.setRadius(tool.radius * (e.deltaY < 0 ? 1.12 : 0.89), this.session.context());
+      }
       this.interactionOverlay.updateTransform(e, tool.statusLine());
       this.invalidate();
       return;
@@ -3820,6 +4202,11 @@ export class ViewportEngine {
     const tool = this.session.tools.getActive();
     const draft = tool instanceof CreateDoodleTool ? tool.getDraftOperation() : null;
     if (draft && tool instanceof CreateDoodleTool) {
+      if (
+        target.kind === 'scale-start' ||
+        target.kind === 'scale-mid' ||
+        target.kind === 'scale-end'
+      ) return false;
       const point =
         target.kind === 'anchor'
           ? tool.state.points[target.index]
@@ -3832,7 +4219,7 @@ export class ViewportEngine {
       this.draftCurvePointDrag = {
         paneId,
         pointerId: e.pointerId,
-        target,
+        target: { kind: target.kind, index: target.index },
         planeOrigin: { ...point },
         planeNormal: { ...axes.forward },
       };
@@ -3860,7 +4247,11 @@ export class ViewportEngine {
         ? operation?.points[target.index]
         : target.kind === 'handle-in'
           ? operation?.handlesIn[target.index]
-          : operation?.handlesOut[target.index]);
+          : target.kind === 'handle-out'
+            ? operation?.handlesOut[target.index]
+            : operation
+              ? crossSectionHandlePoint(operation, target.kind)
+              : undefined);
     const handle = objectId ? this.handles.get(objectId) : null;
     if (!object || !mesh || !localPoint || !handle) return false;
     const axes = this.getCameraAxes(paneId);
@@ -3964,8 +4355,27 @@ export class ViewportEngine {
       );
     } else if (target.kind === 'handle-in') {
       drag.operation.handlesIn[target.index] = next;
-    } else {
+    } else if (target.kind === 'handle-out') {
       drag.operation.handlesOut[target.index] = next;
+    } else {
+      const anchorIndex =
+        target.kind === 'scale-start'
+          ? 0
+          : target.kind === 'scale-mid'
+            ? Math.floor((drag.operation.points.length - 1) / 2)
+            : drag.operation.points.length - 1;
+      const anchor = drag.operation.points[anchorIndex]!;
+      const scale = Math.max(
+        0.05,
+        Math.min(
+          4,
+          Math.hypot(next.x - anchor.x, next.y - anchor.y, next.z - anchor.z) /
+            Math.max(1e-4, drag.operation.radius * drag.operation.profileWidth),
+        ),
+      );
+      if (target.kind === 'scale-start') drag.operation.startScale = scale;
+      else if (target.kind === 'scale-mid') drag.operation.midScale = scale;
+      else drag.operation.endScale = scale;
     }
     const sourceObject = drag.operation.pathSourceObjectId
       ? this.session.document.objects.get(drag.operation.pathSourceObjectId)
@@ -4025,7 +4435,12 @@ export class ViewportEngine {
     if (!afterMesh || !afterMetadata) return;
     let applied = true;
     this.session.history.execute({
-      name: drag.target.kind === 'anchor' ? 'Move Curve Point' : 'Move Bézier Handle',
+      name:
+        drag.target.kind === 'anchor'
+          ? 'Move Curve Point'
+          : drag.target.kind.startsWith('scale-')
+            ? 'Resize Flow Cross-section'
+            : 'Move Bézier Handle',
       execute: () => {
         if (applied) return;
         this.session!.document.meshes.set(afterMesh.id, afterMesh);
@@ -4312,12 +4727,18 @@ export class ViewportEngine {
       activeTool instanceof TerrainSculptTool ||
       activeTool instanceof MeshSculptTool ||
       activeTool instanceof TerrainObjectTool ||
-      activeTool instanceof TerrainFeatureTool;
+      activeTool instanceof TerrainFeatureTool ||
+      activeTool instanceof TerrainStructureTool;
     const lockedSelection =
       sel.mode === 'object' &&
       [...sel.selectedObjectIds].some((id) => this.session!.document.objects.get(id)?.locked);
+    const vectorPenDrawing =
+      activeTool instanceof CreateDoodleTool &&
+      activeTool.inputMode === 'pen' &&
+      activeTool.state.stage === 'drawing';
     const show =
       !terrainEditing &&
+      !vectorPenDrawing &&
       !this.isTextureFaceEditing() &&
       !this.isAnimateShell() &&
       !lockedSelection &&
@@ -4403,6 +4824,52 @@ export class ViewportEngine {
       this.referenceImageOverlay.update(overlayStateWithoutObjects(session.blockoutReference));
     } else {
       this.referenceImageOverlay.update(null);
+    }
+
+    const lighting = getDocumentLighting(session.document);
+    if (this.hemiLight) {
+      this.hemiLight.color.setStyle(lighting.skyColor);
+      this.hemiLight.groundColor.setStyle(lighting.groundColor);
+      this.hemiLight.intensity = lighting.ambientIntensity * 0.7;
+    }
+    if (this.ambientLight) {
+      this.ambientLight.color.setStyle(lighting.skyColor);
+      this.ambientLight.intensity = lighting.ambientIntensity * 0.3;
+    }
+    if (this.sunLight) {
+      this.sunLight.visible = lighting.sunEnabled;
+      this.sunLight.color.setStyle(lighting.sunColor);
+      this.sunLight.intensity = lighting.sunIntensity;
+      this.sunLight.castShadow = lighting.sunShadows;
+      const radAzimuth = (lighting.sunAzimuth * Math.PI) / 180;
+      const radElevation = (lighting.sunElevation * Math.PI) / 180;
+      const dist = 50;
+      this.sunLight.position.set(
+        dist * Math.cos(radElevation) * Math.sin(radAzimuth),
+        dist * Math.sin(radElevation),
+        dist * Math.cos(radElevation) * Math.cos(radAzimuth),
+      );
+    }
+    if (this.fillLight) {
+      this.fillLight.color.setStyle(lighting.fillColor);
+      this.fillLight.intensity = lighting.fillIntensity;
+    }
+    if (this.rimLight) {
+      this.rimLight.color.setStyle(lighting.rimColor);
+      this.rimLight.intensity = lighting.rimIntensity;
+    }
+    if (this.renderer) {
+      this.renderer.toneMappingExposure = lighting.exposure;
+    }
+    if (lighting.fogEnabled) {
+      if (!this.lightingFog) {
+        this.lightingFog = new FogExp2(lighting.fogColor, lighting.fogDensity);
+      } else {
+        this.lightingFog.color.setStyle(lighting.fogColor);
+        this.lightingFog.density = lighting.fogDensity;
+      }
+    } else {
+      this.lightingFog = null;
     }
     const shadingMode = this.workspace?.getShadingMode() ?? 'material';
     const displayTextures = this.workspace?.getDisplayTextures() ?? true;
@@ -4515,14 +4982,14 @@ export class ViewportEngine {
     };
   }
 
-  private resize(): void {
+  resize(): void {
     if (!this.host || !this.renderer || !this.workspace) return;
     const bounds = this.host.getBoundingClientRect();
     const w = Math.max(1, Math.floor(bounds.width));
     const h = Math.max(1, Math.floor(bounds.height));
     if (w < 2 || h < 2) return;
 
-    const nextRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const nextRatio = Math.min((window.devicePixelRatio || 1) * this.renderQualityScale, 2);
     if (nextRatio !== this.lastPixelRatio) {
       this.renderer.setPixelRatio(nextRatio);
       this.lastPixelRatio = nextRatio;
@@ -4638,7 +5105,7 @@ export class ViewportEngine {
           this.shadowReceiver.visible = pane.camera instanceof PerspectiveCamera;
         }
         if (this.scene) {
-          this.scene.fog = pane.camera instanceof PerspectiveCamera ? this.sceneFog : null;
+          this.scene.fog = pane.camera instanceof PerspectiveCamera ? this.lightingFog : null;
         }
 
         this.syncGizmoForCamera(pane.camera, rect.id, rect.height);
@@ -4729,32 +5196,121 @@ export class ViewportEngine {
     this.setModelPlacement(null);
   }
 
-  private groundRayHit(e: PointerEvent, paneId: ViewId) {
-    const input = this.pointerInput(e, paneId);
-    return rayPlaneIntersection(input.rayOrigin, input.rayDirection, WORLD_XZ_PLANE);
+  placeModelAtScreen(
+    modelDocumentId: DocumentId,
+    clientX: number,
+    clientY: number,
+  ): ObjectId | null {
+    if (!this.host || !this.session || this.session.document.kind !== 'level') return null;
+    const host = this.host.getBoundingClientRect();
+    const localX = clientX - host.left;
+    const localY = clientY - host.top;
+    const paneId = this.lastRects.find(
+      (rect) =>
+        localX >= rect.x &&
+        localX <= rect.x + rect.width &&
+        localY >= rect.y &&
+        localY <= rect.y + rect.height,
+    )?.id;
+    if (!paneId) return null;
+    const pointer = new PointerEvent('pointermove', { clientX, clientY });
+    const input = this.pointerInput(pointer, paneId);
+    const surface = this.modelPlacementSurface(input);
+    if (!surface) return null;
+    const point = { ...surface.point };
+    point.y += modelDocumentBaseOffset(this.session.project, modelDocumentId);
+    const objectId = commitPlaceModelInLevel(this.session, modelDocumentId, { position: point });
+    if (objectId) {
+      this.markPlacedModelTerrainMetadata(objectId, modelDocumentId, surface.terrainObjectId);
+      this.session.requestRedraw();
+      this.invalidate();
+    }
+    return objectId;
+  }
+
+  private modelPlacementSurface(
+    input: ToolPointerInput,
+  ): { point: Vec3; terrainObjectId: ObjectId | null } | null {
+    if (!this.session) return null;
+    let point: Vec3 | null = null;
+    let terrainObjectId: ObjectId | null = null;
+    let nearest = Infinity;
+    const raycaster = new Raycaster(
+      new Vector3(input.rayOrigin.x, input.rayOrigin.y, input.rayOrigin.z),
+      new Vector3(input.rayDirection.x, input.rayDirection.y, input.rayDirection.z),
+    );
+    for (const object of this.session.document.objects.values()) {
+      if (object.metadata.terrain !== 'true') continue;
+      const handle = this.handles.get(object.id);
+      const hit = handle ? raycaster.intersectObject(handle.mesh, false)[0] : null;
+      if (hit && hit.distance < nearest) {
+        nearest = hit.distance;
+        point = v3(hit.point.x, hit.point.y, hit.point.z);
+        terrainObjectId = object.id;
+      }
+    }
+    point ??= rayPlaneIntersection(input.rayOrigin, input.rayDirection, WORLD_XZ_PLANE);
+    return point ? { point, terrainObjectId } : null;
+  }
+
+  private markPlacedModelTerrainMetadata(
+    objectId: ObjectId,
+    modelDocumentId: DocumentId,
+    terrainObjectId: ObjectId | null,
+  ): void {
+    if (!this.session || !terrainObjectId) return;
+    const object = this.session.document.objects.get(objectId);
+    if (!object) return;
+    object.metadata = {
+      ...object.metadata,
+      terrainPlaced: 'true',
+      terrainOwnerId: terrainObjectId,
+      terrainSourceModelId: modelDocumentId,
+      terrainBaseOffset: String(modelDocumentBaseOffset(this.session.project, modelDocumentId)),
+      terrainGroundClearance: '0',
+      terrainHeightOffset: '0',
+      terrainAlignToSlope: 'false',
+      terrainCollisionRadius: String(
+        modelDocumentPlacementRadius(this.session.project, modelDocumentId),
+      ),
+    };
+    this.session.document.dirty = true;
   }
 
   private tryPlaceModelAtPointer(e: PointerEvent, paneId: ViewId): boolean {
     if (!this.modelPlacement || !this.session || this.session.document.kind !== 'level') return false;
     if (e.button !== 0 || e.ctrlKey || e.metaKey || e.altKey) return false;
 
-    const surface =
+    const input = this.pointerInput(e, paneId);
+    const faceSurface =
       this.workspace?.getDrawOnSurfaces() ? this.faceConstructionPlane(e, paneId) : null;
-    const point = surface
-      ? { ...surface.plane.origin }
-      : this.groundRayHit(e, paneId);
+    const terrainSurface = this.modelPlacementSurface(input);
+    const point = faceSurface
+      ? { ...faceSurface.plane.origin }
+      : terrainSurface
+        ? { ...terrainSurface.point }
+        : null;
     if (!point) return false;
+    const surface = {
+      terrainObjectId: faceSurface ? null : terrainSurface?.terrainObjectId ?? null,
+    };
 
     const snap = this.session.document.settings.snapIncrement ?? 0.25;
-    if (snap > 0 && !surface) {
+    if (snap > 0 && !faceSurface && !surface.terrainObjectId) {
       point.x = Math.round(point.x / snap) * snap;
       point.y = Math.round(point.y / snap) * snap;
       point.z = Math.round(point.z / snap) * snap;
     }
 
     const request = this.modelPlacement;
+    point.y += modelDocumentBaseOffset(this.session.project, request.modelDocumentId);
     const objectId = commitPlaceModelInLevel(this.session, request.modelDocumentId, { position: point });
     if (!objectId) return false;
+    this.markPlacedModelTerrainMetadata(
+      objectId,
+      request.modelDocumentId,
+      surface.terrainObjectId,
+    );
 
     this.session.tools.setActive('select', this.session.context());
     this.setModelPlacement(null);
@@ -4767,6 +5323,30 @@ export class ViewportEngine {
 
 /** App-wide viewport singleton. */
 export const viewportEngine = new ViewportEngine();
+
+function crossSectionHandlePoint(
+  operation: CurveOperation,
+  kind: Extract<CurveControlTarget['kind'], 'scale-start' | 'scale-mid' | 'scale-end'>,
+): Vec3 {
+  const index =
+    kind === 'scale-start'
+      ? 0
+      : kind === 'scale-mid'
+        ? Math.floor((operation.points.length - 1) / 2)
+        : operation.points.length - 1;
+  const scale =
+    kind === 'scale-start'
+      ? operation.startScale
+      : kind === 'scale-mid'
+        ? operation.midScale
+        : operation.endScale;
+  const point = operation.points[index]!;
+  return v3(
+    point.x + operation.radius * operation.profileWidth * scale,
+    point.y,
+    point.z,
+  );
+}
 
 function createTerrainBrushPreview(): LineLoop {
   const points: Vector3[] = [];

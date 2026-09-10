@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { createEmptyProject, buildModelDocumentView } from '@/core/document/ViperProject';
-import { commitMeshObject } from '@/core/document/ModelDocument';
+import { addDocumentToProject, createEmptyProject, buildModelDocumentView, createViperDocument } from '@/core/document/ViperProject';
+import { addObjectToDocument, commitMeshObject, createSceneObject } from '@/core/document/ModelDocument';
 import { EditorSession } from '@/core/editor/EditorSession';
-import { commitPlaceModelInLevel, collectInstanceRenderParts, modelHasPlaceableGeometry } from '@/core/editor/ModelInstances';
+import {
+  commitPlaceModelInLevel,
+  collectInstanceRenderParts,
+  modelDocumentBaseOffset,
+  modelDocumentPlacementRadius,
+  modelHasPlaceableGeometry,
+} from '@/core/editor/ModelInstances';
 import { buildBox } from '@/core/mesh/builders/BoxBuilder';
 
 describe('ModelInstances', () => {
@@ -32,5 +38,32 @@ describe('ModelInstances', () => {
     const project = createEmptyProject();
     const modelDoc = project.documents.get(project.modelDocumentIds[0]!)!;
     expect(modelHasPlaceableGeometry(modelDoc)).toBe(false);
+  });
+
+  it('renders every object from nested reusable models', () => {
+    const project = createEmptyProject();
+    const parentId = project.modelDocumentIds[0]!;
+    const child = createViperDocument('Nested Model', 'model');
+    addDocumentToProject(project, child);
+    const childView = buildModelDocumentView(project, child.id);
+    commitMeshObject(childView, buildBox({ width: 1, height: 1, depth: 1, name: 'Nested Mesh' }), { name: 'Nested Mesh' });
+
+    const parentView = buildModelDocumentView(project, parentId);
+    const nestedInstance = createSceneObject('Nested Model', null, [], { kind: 'instance' });
+    nestedInstance.instanceSourceModelId = child.id;
+    nestedInstance.transform.position.x = 3;
+    addObjectToDocument(parentView, nestedInstance);
+
+    const session = new EditorSession(project);
+    const levelId = project.levelDocumentIds[0]!;
+    session.openDocument(levelId);
+    const placedId = commitPlaceModelInLevel(session, parentId);
+    const placed = session.document.objects.get(placedId!)!;
+    const parts = collectInstanceRenderParts(project, levelId, placed);
+
+    expect(parts).toHaveLength(1);
+    expect(parts[0]!.worldMatrix.elements[12]).toBeCloseTo(3);
+    expect(modelDocumentBaseOffset(project, parentId)).toBeCloseTo(0.5);
+    expect(modelDocumentPlacementRadius(project, parentId)).toBeGreaterThan(3);
   });
 });

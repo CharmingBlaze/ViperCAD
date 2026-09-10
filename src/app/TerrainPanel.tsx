@@ -64,18 +64,35 @@ type Props = {
   workspace: WorkspaceController;
   onRefresh: () => void;
   onOpenSceneObjects: () => void;
+  onOpenOutliner: () => void;
   sceneObjectsOpen: boolean;
+  outlinerOpen: boolean;
   focusTab?: TerrainPanelTab | null;
 };
 
 export type TerrainPanelTab = 'terrain' | 'sculpt' | 'height' | 'surface' | 'water' | 'objects';
+type TerrainCheckpoint = { id: string; name: string; heights: number[]; vertexCount?: number };
+
+function readTerrainCheckpoints(value: string | undefined): TerrainCheckpoint[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as TerrainCheckpoint[];
+    return Array.isArray(parsed)
+      ? parsed.filter((item) => item && typeof item.id === 'string' && Array.isArray(item.heights))
+      : [];
+  } catch {
+    return [];
+  }
+}
 
 export function TerrainPanel({
   session,
   workspace,
   onRefresh,
   onOpenSceneObjects,
+  onOpenOutliner,
   sceneObjectsOpen,
+  outlinerOpen,
   focusTab,
 }: Props) {
   const [activeTab, setActiveTab] = useState<TerrainPanelTab>('sculpt');
@@ -133,6 +150,7 @@ export function TerrainPanel({
     ? session.document.images.get(effectiveHeightmapId) ?? null
     : null;
   const heights = terrain ? terrainHeightRange(terrain.mesh) : { min: 0, max: 0 };
+  const terrainCheckpoints = readTerrainCheckpoints(terrain?.object.metadata.terrainCheckpoints);
 
   const activateTerrain = (objectId: string) => {
     session.selection.setMode('object');
@@ -269,6 +287,40 @@ export function TerrainPanel({
     });
     session.document.dirty = true;
     session.requestRedraw();
+    onRefresh();
+  };
+
+  const saveTerrainCheckpoint = () => {
+    if (!terrain) return;
+    const checkpoint: TerrainCheckpoint = {
+      id: `terrain-state-${Date.now()}`,
+      name: `Sculpt state ${terrainCheckpoints.length + 1}`,
+      vertexCount: terrain.mesh.vertices.size,
+      heights: [...terrain.mesh.vertices.values()].map((vertex) =>
+        Number(vertex.position.y.toFixed(5))),
+    };
+    terrain.object.metadata.terrainCheckpoints = JSON.stringify(
+      [...terrainCheckpoints, checkpoint].slice(-8),
+    );
+    session.document.dirty = true;
+    pushToast(`${checkpoint.name} saved`, 'success');
+    onRefresh();
+  };
+
+  const restoreTerrainCheckpoint = (checkpoint: TerrainCheckpoint) => {
+    if (checkpoint.heights.length !== terrain?.mesh.vertices.size) {
+      pushToast('This sculpt state belongs to a different terrain resolution', 'error');
+      return;
+    }
+    editAllHeights(`Restore ${checkpoint.name}`, () => checkpoint.heights);
+  };
+
+  const removeTerrainCheckpoint = (id: string) => {
+    if (!terrain) return;
+    terrain.object.metadata.terrainCheckpoints = JSON.stringify(
+      terrainCheckpoints.filter((checkpoint) => checkpoint.id !== id),
+    );
+    session.document.dirty = true;
     onRefresh();
   };
 
@@ -526,8 +578,17 @@ export function TerrainPanel({
               >
                 {sceneObjectsOpen ? 'Library is open' : 'Open object library'}
               </button>
+              <button
+                type="button"
+                className="tool uv-btn-block"
+                onClick={onOpenOutliner}
+              >
+                {outlinerOpen ? 'Show Models in Outliner' : 'Open Models Outliner'}
+              </button>
               <p className="uv-hint">
-                Place / Scatter / Erase on the terrain. Select then G/R/S to move props. The library window holds presets and imports.
+                Place / Scatter / Erase on the terrain. Select then G/R/S to move props.
+                Choose reusable models from the Outliner, then place or scatter linked
+                copies across the terrain. The library window holds presets and imports.
               </p>
             </section>
 
@@ -644,6 +705,36 @@ export function TerrainPanel({
                 >
                   Paint biomes
                 </button>
+              </div>
+            </section>
+
+            <section className="uv-section" hidden={activeTab !== 'sculpt'}>
+              <h3 className="uv-section-title">Sculpt states</h3>
+              <button type="button" className="tool uv-btn-block" onClick={saveTerrainCheckpoint}>
+                Save current shape
+              </button>
+              <div className="terrain-checkpoint-list">
+                {terrainCheckpoints.map((checkpoint) => (
+                  <div key={checkpoint.id} className="terrain-checkpoint-row">
+                    <span>{checkpoint.name}</span>
+                    <button
+                      type="button"
+                      disabled={checkpoint.heights.length !== terrain.mesh.vertices.size}
+                      title={
+                        checkpoint.heights.length === terrain.mesh.vertices.size
+                          ? 'Restore this terrain shape'
+                          : 'Unavailable after changing terrain resolution'
+                      }
+                      onClick={() => restoreTerrainCheckpoint(checkpoint)}
+                    >
+                      Restore
+                    </button>
+                    <button type="button" className="danger" onClick={() => removeTerrainCheckpoint(checkpoint.id)}>×</button>
+                  </div>
+                ))}
+                {!terrainCheckpoints.length ? (
+                  <p className="uv-hint">Save up to eight shapes and return to any of them without losing later undo history.</p>
+                ) : null}
               </div>
             </section>
 
@@ -1123,6 +1214,13 @@ export function TerrainPanel({
                       <p className="uv-hint">
                         {stats.hiddenLibraryObjects} library/palette source
                         {stats.hiddenLibraryObjects === 1 ? '' : 's'} omitted from engine export.
+                      </p>
+                    )}
+                    {(stats.brokenModelLinks > 0 || stats.missingColliderMeshes > 0) && (
+                      <p className="uv-meta is-error">
+                        {stats.brokenModelLinks
+                          ? `${stats.brokenModelLinks} broken linked model${stats.brokenModelLinks === 1 ? '' : 's'}`
+                          : 'No collider assigned to render geometry'}
                       </p>
                     )}
                   </>

@@ -43,6 +43,7 @@ import { createEmptyProject, clearProjectDirty, projectIsDirty } from '@/core/do
 import { DocumentTabs } from '@/app/DocumentTabs';
 import { enterGroupFocus, exitGroupFocus, exitToDocumentRoot } from '@/core/editor/GroupFocus';
 import { placeModelQuick } from '@/app/outliner/placeModelWorkflow';
+import { renameProjectDocument } from '@/app/outliner/documentActions';
 import { modelHasPlaceableGeometry } from '@/core/editor/ModelInstances';
 import { getViperDocument } from '@/core/document/ViperProject';
 import { isGroupObject } from '@/core/editor/Hierarchy';
@@ -119,7 +120,7 @@ export default function App() {
   const animation = useMemo(() => new AnimationSession(session), [session]);
   const [, setTick] = useState(0);
   const [outlinerOpen, setOutlinerOpen] = useState(false);
-  const [outlinerTab, setOutlinerTab] = useState<'scene' | 'models' | 'levels'>('scene');
+  const [outlinerTab, setOutlinerTab] = useState<'scene' | 'assets' | 'models' | 'levels'>('scene');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [zenMode, setZenMode] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -221,10 +222,25 @@ export default function App() {
   });
   const [recoveryModalOpen, setRecoveryModalOpen] = useState(false);
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
+  const [renderQuality, setRenderQuality] = useState<'performance' | 'balanced' | 'high'>('balanced');
   const [exportProfileId, setExportProfileId] = useState<ExportProfile['id']>('godot');
   const projectFileToken = useRef<FileToken | null>(null);
   const toasts = useToasts();
   const refresh = () => setTick((t) => t + 1);
+  const chooseRenderQuality = (quality: 'performance' | 'balanced' | 'high') => {
+    setRenderQuality(quality);
+    viewportEngine.setRenderQuality(
+      quality === 'performance' ? 0.6 : quality === 'high' ? 1.35 : 1,
+    );
+    pushToast(
+      quality === 'performance'
+        ? 'Performance viewport enabled'
+        : quality === 'high'
+          ? 'High-quality viewport enabled'
+          : 'Balanced viewport enabled',
+      'info',
+    );
+  };
 
   useEffect(() => session.onRedraw(refresh), [session]);
   useEffect(() => workspace.subscribe(refresh), [workspace]);
@@ -927,7 +943,8 @@ export default function App() {
           label: 'New Model',
           action: () => {
             const id = session.projectEditor.newModel(`Model ${session.project.modelDocumentIds.length + 1}`);
-            openDocumentById(id);
+            session.openDocument(id);
+            refresh();
             pushToast('New Model — edit reusable assets here', 'success');
           },
         },
@@ -936,7 +953,8 @@ export default function App() {
           label: 'New Level',
           action: () => {
             const id = session.projectEditor.newLevel(`Level ${session.project.levelDocumentIds.length + 1}`);
-            openDocumentById(id);
+            session.openDocument(id);
+            refresh();
             pushToast('New Level — place content in the environment', 'success');
           },
         },
@@ -1102,7 +1120,8 @@ export default function App() {
           label: 'New Model',
           action: () => {
             const id = session.projectEditor.newModel(`Model ${session.project.modelDocumentIds.length + 1}`);
-            openDocumentById(id);
+            session.openDocument(id);
+            refresh();
             pushToast('New Model — edit reusable assets here', 'success');
           },
         },
@@ -1111,7 +1130,8 @@ export default function App() {
           label: 'New Level',
           action: () => {
             const id = session.projectEditor.newLevel(`Level ${session.project.levelDocumentIds.length + 1}`);
-            openDocumentById(id);
+            session.openDocument(id);
+            refresh();
             pushToast('New Level — place content in the environment', 'success');
           },
         },
@@ -1123,7 +1143,7 @@ export default function App() {
                 return {
                   kind: 'command' as const,
                   label: `Place ${modelDoc.name} in Level`,
-                  disabled: !modelHasPlaceableGeometry(modelDoc),
+                  disabled: !modelHasPlaceableGeometry(modelDoc, session.project),
                   action: () => placeModelInActiveLevel(modelId),
                 };
               }),
@@ -1139,8 +1159,7 @@ export default function App() {
             if (!doc) return;
             const next = window.prompt('Rename', doc.name);
             if (!next?.trim()) return;
-            session.projectEditor.renameDocument(docId, next.trim());
-            refresh();
+            renameProjectDocument(session, docId, next, refresh);
           },
         },
         {
@@ -1239,7 +1258,10 @@ export default function App() {
           kind: 'command',
           label: 'Outliner',
           checked: outlinerOpen,
-          disabled: workspace.shellMode !== 'model' && workspace.shellMode !== 'blockout',
+          disabled:
+            workspace.shellMode !== 'model' &&
+            workspace.shellMode !== 'blockout' &&
+            workspace.shellMode !== 'terrain',
           action: toggleOutliner,
         },
         { kind: 'separator' },
@@ -1249,6 +1271,15 @@ export default function App() {
           checked: outlinerOpen && outlinerTab === 'scene',
           action: () => {
             setOutlinerTab('scene');
+            setOutlinerOpen(true);
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Assets in Outliner',
+          checked: outlinerOpen && outlinerTab === 'assets',
+          action: () => {
+            setOutlinerTab('assets');
             setOutlinerOpen(true);
           },
         },
@@ -1427,6 +1458,25 @@ export default function App() {
           label: 'X-Ray',
           checked: sel.xRay,
           action: toggleXRay,
+        },
+        { kind: 'separator' },
+        {
+          kind: 'command',
+          label: 'Viewport Quality: Performance',
+          checked: renderQuality === 'performance',
+          action: () => chooseRenderQuality('performance'),
+        },
+        {
+          kind: 'command',
+          label: 'Viewport Quality: Balanced',
+          checked: renderQuality === 'balanced',
+          action: () => chooseRenderQuality('balanced'),
+        },
+        {
+          kind: 'command',
+          label: 'Viewport Quality: High',
+          checked: renderQuality === 'high',
+          action: () => chooseRenderQuality('high'),
         },
       ],
     },
@@ -2182,7 +2232,12 @@ export default function App() {
                 workspace={workspace}
                 onRefresh={refresh}
                 onOpenSceneObjects={() => setTerrainObjectsOpen(true)}
+                onOpenOutliner={() => {
+                  setOutlinerTab('models');
+                  setOutlinerOpen(true);
+                }}
                 sceneObjectsOpen={terrainObjectsOpen}
+                outlinerOpen={outlinerOpen}
                 focusTab={terrainFocusTab}
               />
             )}
@@ -2202,7 +2257,7 @@ export default function App() {
         )}
       </main>
 
-      {(workspace.shellMode === 'model' || workspace.shellMode === 'blockout') && outlinerOpen && (
+      {(workspace.shellMode === 'model' || workspace.shellMode === 'blockout' || workspace.shellMode === 'terrain') && outlinerOpen && (
         <FloatingOutliner
           session={session}
           activeTab={outlinerTab}
@@ -2214,8 +2269,11 @@ export default function App() {
       {workspace.shellMode === 'terrain' && terrainObjectsOpen && (
         <FloatingTerrainObjects
           session={session}
-          workspace={workspace}
           onClose={() => setTerrainObjectsOpen(false)}
+          onOpenOutliner={() => {
+            setOutlinerTab('models');
+            setOutlinerOpen(true);
+          }}
           onRefresh={refresh}
         />
       )}

@@ -226,7 +226,18 @@ export function reprojectTerrainPlacedObjects(
   if (!terrain || terrain.metadata.terrain !== 'true' || !mesh) return [];
 
   const moved: ObjectId[] = [];
-  for (const placed of terrainPlacedObjects(document, terrainObjectId)) {
+  const placedObjects = terrainPlacedObjects(document, terrainObjectId);
+  const stackDepth = (object: SceneObject, seen = new Set<ObjectId>()): number => {
+    const targetId = object.metadata.terrainStackedOnId;
+    if (!targetId || seen.has(targetId)) return 0;
+    const target = document.objects.get(targetId);
+    if (!target) return 0;
+    const nextSeen = new Set(seen);
+    nextSeen.add(targetId);
+    return 1 + stackDepth(target, nextSeen);
+  };
+  placedObjects.sort((a, b) => stackDepth(a) - stackDepth(b));
+  for (const placed of placedObjects) {
     if (groundObjectToTerrain(document, placed.id, terrainObjectId, {
       alignToSlope: options.alignToSlope ?? placed.metadata.terrainAlignToSlope === 'true',
     })) {
@@ -253,6 +264,25 @@ export function groundObjectToTerrain(
   const placed = document.objects.get(objectId);
   if (!terrain || !mesh || !placed || terrain.metadata.terrain !== 'true') return false;
 
+  const stackedOnId = placed.metadata.terrainStackedOnId;
+  const stackedOn = stackedOnId ? document.objects.get(stackedOnId) : null;
+  if (stackedOn) {
+    placed.transform.position = {
+      x: stackedOn.transform.position.x + (Number(placed.metadata.terrainStackOffsetX) || 0),
+      y: stackedOn.transform.position.y + (Number(placed.metadata.terrainStackOffsetY) || 0),
+      z: stackedOn.transform.position.z + (Number(placed.metadata.terrainStackOffsetZ) || 0),
+    };
+    document.dirty = true;
+    return true;
+  }
+  if (stackedOnId) {
+    delete placed.metadata.terrainStacked;
+    delete placed.metadata.terrainStackedOnId;
+    delete placed.metadata.terrainStackOffsetX;
+    delete placed.metadata.terrainStackOffsetY;
+    delete placed.metadata.terrainStackOffsetZ;
+  }
+
   const local = inverseTransformPointApprox(placed.transform.position, terrain.transform);
   const height = terrainHeightAtLocalPoint(terrain, mesh, local.x, local.z);
   const ground = transformPoint({ x: local.x, y: height, z: local.z }, terrain.transform);
@@ -262,6 +292,7 @@ export function groundObjectToTerrain(
     : null;
   const sourceMesh = source?.meshId ? document.meshes.get(source.meshId) : null;
   const sourceBase =
+    Number(placed.metadata.terrainBaseOffset) ||
     Number(source?.metadata.terrainBaseOffset) ||
     (sourceMesh?.vertices.size
       ? -Math.min(...[...sourceMesh.vertices.values()].map((vertex) => vertex.position.y))

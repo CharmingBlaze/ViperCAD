@@ -6,6 +6,8 @@ import type { EditorSession } from '@/core/editor/EditorSession';
 import { runMeshTransaction } from '@/core/history/Transaction';
 import { pushToast } from '@/app/Toast';
 import { beginInteractiveLoopCut } from '@/app/LoopCutHotkey';
+import { beginInteractivePushPull } from '@/app/PushPullHotkey';
+import { PushPullTool } from '@/core/tools/PushPullTool';
 import { fillHoles, makeFaceFromVertices } from '@/core/mesh/ops/draw';
 import {
   bridgeEdgeLoops,
@@ -13,6 +15,7 @@ import {
   dissolveFaces,
   flipFaces,
   mergeVertices,
+  relaxVertices,
   splitEdge,
   triangulateFaces,
   weldVerticesByDistance,
@@ -28,7 +31,11 @@ import {
 import { pokeFaces, subdivideFaces } from '@/core/mesh/ops/subdivide';
 import { validateMeshFull } from '@/core/mesh/Validation';
 import { duplicateObject } from '@/core/document/ModelDocument';
-import { cloneMeshPreserveIds, isBoundaryEdge } from '@/core/mesh/EditableMesh';
+import {
+  cloneMeshPreserveIds,
+  faceVertexIds,
+  isBoundaryEdge,
+} from '@/core/mesh/EditableMesh';
 import { bevelEdges } from '@/core/mesh/ops/bevel';
 import { solidifyMesh } from '@/core/mesh/ops/solidify';
 import { applyObjectTransform } from '@/core/document/ObjectTransforms';
@@ -42,8 +49,11 @@ import {
   hasLightmapUv,
   createMirroredInstance,
   createRadialInstances,
+  createRigMarker,
   centreObjectOrigin,
+  combineMeshObjects,
   joinMeshObjects,
+  rootMeshObjectIds,
   separateFacesToObject,
   ungroupObject,
 } from '@/core/editor/GameAssetTools';
@@ -61,19 +71,23 @@ import {
   setModellingProfile,
 } from '@/core/symmetry/Symmetry';
 import { gameReadiness } from '@/app/GameExportProfiles';
+import { makeModelInstanceUnique } from '@/core/editor/ModelInstances';
 import { PRIMITIVE_KINDS, PRIMITIVE_LABELS, type PrimitiveKind } from '@/core/primitives/PrimitiveFactory';
 import { ModifierStackPanel } from '@/app/inspector/ModifierStackPanel';
 import { PrimitiveOperationPanel } from '@/app/inspector/PrimitiveOperationPanel';
 import { CurveOperationPanel } from '@/app/inspector/CurveOperationPanel';
+import { WorkflowOperationPanel } from '@/app/inspector/WorkflowOperationPanel';
 import { ExactCoordinateInput } from '@/app/inspector/ExactCoordinateInput';
 import {
   PathSettingsControls,
+  CapButtons,
   type PathSettingsValue,
 } from '@/app/inspector/PathSettingsControls';
 import {
   curveOperationLabel,
   evaluateCurveOperation,
   isPathStyle,
+  isWorkflowOperation,
   readCurveOperation,
   serializeCurveOperation,
   type CurveOperation,
@@ -106,7 +120,9 @@ import { PrimitiveIcon } from '@/components/PrimitiveIcon';
 import { formatAutosaveTime, type AutosavePayload } from '@/app/autosave';
 import { projectIsDirty } from '@/core/document/ViperProject';
 
-type CreateMode = 'primitive' | 'doodle' | 'draw';
+type CreateMode = 'primitive' | 'doodle' | 'workflows' | 'draw';
+type BlockoutInputMode = 'freehand' | 'points';
+type BlockoutShapeMode = 'volume' | 'flow' | 'patch';
 type SceneToolMode = 'construct' | 'modifiers' | 'output' | 'recovery';
 
 export type RecoveryControlsState = {
@@ -168,12 +184,60 @@ export function AppInspectorPanel({
   const sel = session.selection.state;
   const primitiveTool = session.tools.get('create-primitive') as CreatePrimitiveTool;
   const doodleTool = session.tools.get('create-doodle') as CreateDoodleTool;
+
+  const runCombineMeshes = () => {
+    session.selection.setMode('object');
+    const result = combineMeshObjects(
+      session.document,
+      sel.selectedObjectIds,
+    );
+    if (!result.ok) {
+      pushToast(result.message, 'info');
+      session.tools.setActive('select', session.context());
+      session.requestRedraw();
+      onRefresh();
+      return;
+    }
+    session.selection.selectObjects([result.objectId], 'replace');
+    session.tools.setActive('select', session.context());
+    pushToast(`Combined ${result.sourceCount} objects into one mesh`, 'success');
+    session.requestRedraw();
+    onRefresh();
+  };
+
+  const runAttachBlockout = () => {
+    session.selection.setMode('object');
+    const result = combineMeshObjects(session.document, sel.selectedObjectIds, {
+      name: 'Attached Blockout',
+      allowCombineAll: false,
+    });
+    if (!result.ok) {
+      pushToast(result.message, 'info');
+      return;
+    }
+    const object = session.document.objects.get(result.objectId);
+    const mesh = object?.meshId ? session.document.meshes.get(object.meshId) : null;
+    if (mesh) {
+      weldVerticesByDistance(mesh, [...mesh.vertices.keys()], 0.025);
+      object!.metadata.blockoutAttached = 'true';
+    }
+    session.selection.selectObjects([result.objectId], 'replace');
+    session.tools.setActive('select', session.context());
+    pushToast('Joined pieces and welded matching seam vertices', 'success');
+    session.requestRedraw();
+    onRefresh();
+  };
+
   const drawTool = session.tools.get('draw-poly') as DrawPolyTool;
   const activeTool = session.tools.getActive();
   const isCreatingPrimitive = activeTool === primitiveTool;
   const isDoodling = activeTool === doodleTool;
   const isDrawing = activeTool === drawTool;
   const [createModePref, setCreateModePref] = useState<CreateMode>('primitive');
+  const [blockoutInputPref, setBlockoutInputPref] =
+    useState<BlockoutInputMode>('freehand');
+  const [blockoutShapePref, setBlockoutShapePref] =
+    useState<BlockoutShapeMode>('volume');
   const [arrayCount, setArrayCount] = useState(4);
   const [arraySpacing, setArraySpacing] = useState(2);
   const [arrayAxis, setArrayAxis] = useState<'x' | 'y' | 'z'>('x');
@@ -197,11 +261,80 @@ export function AppInspectorPanel({
   const createMode: CreateMode = isDrawing
     ? 'draw'
     : isDoodling
-      ? 'doodle'
+      ? createModePref === 'workflows'
+        ? 'workflows'
+        : 'doodle'
       : isCreatingPrimitive
         ? 'primitive'
         : createModePref;
   const dimensions = primitiveTool.getDimensions();
+
+  const activateWorkflow = (
+    shape: BlockoutShapeMode = blockoutShapePref,
+    input: BlockoutInputMode = blockoutInputPref,
+  ) => {
+    setCreateModePref('workflows');
+    setBlockoutShapePref(shape);
+    setBlockoutInputPref(input);
+    if (drawTool.blockoutPoly.enabled) {
+      drawTool.setBlockoutPolySettings({ enabled: false }, session.context());
+    }
+    session.tools.setActive('create-doodle', session.context());
+    doodleTool.setSolidMode('extrude', session.context());
+    if (shape === 'patch') {
+      doodleTool.blockoutPolyMode = true;
+      doodleTool.setCreateContext('workflows', 'sketch', session.context());
+      doodleTool.setInputMode('pen', session.context());
+      doodleTool.setCurveType('polyline', session.context());
+      doodleTool.setAutoConnect(true, session.context());
+      doodleTool.setStyle('profile-solid', session.context());
+      doodleTool.setRadius(0.28, session.context());
+      doodleTool.setPathSettings(
+        {
+          startScale: 1,
+          midScale: 1,
+          profileWidth: 1,
+          profileHeight: 1,
+          blobInflation: 0.55,
+          count: 8,
+          radialSegments: 10,
+        },
+        session.context(),
+      );
+      onRefresh();
+      return;
+    }
+    doodleTool.blockoutPolyMode = false;
+    const workflowKind = shape === 'flow' ? 'segmented-sweep' : 'profile-solid';
+    doodleTool.setCreateContext('workflows', workflowKind, session.context());
+    if (input === 'freehand') {
+      doodleTool.setInputMode('sketch', session.context());
+    } else {
+      doodleTool.setInputMode('pen', session.context());
+      doodleTool.setCurveType('polyline', session.context());
+      doodleTool.setAutoConnect(true, session.context());
+    }
+    doodleTool.setStyle(
+      shape === 'flow' ? 'segmented-sweep' : 'profile-solid',
+      session.context(),
+    );
+    onRefresh();
+  };
+
+  const workflowHint = (() => {
+    if (blockoutShapePref === 'volume') {
+      return blockoutInputPref === 'freehand'
+        ? 'Draw a closed silhouette to create a rounded solid with editable depth loops.'
+        : 'Place silhouette corners, then close the loop for an exact low-poly solid.';
+    }
+    if (blockoutShapePref === 'flow') {
+      return blockoutInputPref === 'freehand'
+        ? 'Draw an open gesture to create a continuous quad-ring form.'
+        : 'Place cross-section joints for precise bends and controlled topology.';
+    }
+    return 'Place corners for a flat-sided solid that is easy to extrude and refine.';
+  })();
+
   const chainLen = drawTool.state.chain.length;
   const canCloseChain = chainLen >= 3;
   const canCommitDraw =
@@ -220,6 +353,23 @@ export function AppInspectorPanel({
   const activeMesh = activeObject?.meshId
     ? session.document.meshes.get(activeObject.meshId)
     : null;
+  const blockoutTopology = activeMesh
+    ? [...activeMesh.faces.keys()].reduce(
+        (summary, faceId) => {
+          const corners = faceVertexIds(activeMesh, faceId).length;
+          if (corners === 3) summary.triangles += 1;
+          else if (corners === 4) summary.quads += 1;
+          else summary.ngons += 1;
+          return summary;
+        },
+        { quads: 0, triangles: 0, ngons: 0 },
+      )
+    : null;
+  const selectedBlockoutOperation = (() => {
+    if (!activeObject) return null;
+    const operation = readCurveOperation(activeObject.metadata.curveOperation);
+    return operation && isWorkflowOperation(operation) ? operation : null;
+  })();
   const makeFaceReady = !!activeMesh && sel.mode === 'vertex' && sel.selectedVertexIds.size >= 3;
   const fillReady =
     !!activeMesh &&
@@ -236,6 +386,18 @@ export function AppInspectorPanel({
   const selectedEdgeKey = [...sel.selectedEdgeIds].sort().join('|');
   const solidifyReady = !!activeMesh && activeMesh.faces.size > 0;
   const gameStats = gameReadiness(session.document);
+  const workflowNextSteps = [
+    !gameStats.objects ? 'Create or place a model to begin the scene.' : '',
+    gameStats.invalidMeshes ? 'Repair invalid topology before export.' : '',
+    gameStats.ngons ? 'Triangulate n-gons or rebuild them as quad loops.' : '',
+    gameStats.missingUvMeshes ? 'Open UV / Pixel and unwrap meshes that need textures.' : '',
+    gameStats.unappliedScales ? 'Apply object scale before adding final modifiers or colliders.' : '',
+    gameStats.missingColliderMeshes ? 'Add a box, convex, or mesh collider for gameplay.' : '',
+    gameStats.missingLightmapUvs ? 'Generate lightmap UVs for engine-ready lighting.' : '',
+    gameStats.brokenModelLinks ? 'Open Assets and repair or replace broken model links.' : '',
+    gameStats.invalidLodObjects ? 'Give each LOD a valid level and screen threshold.' : '',
+    gameStats.orphanRigMarkers ? 'Parent loose joints or sockets in the Outliner.' : '',
+  ].filter(Boolean).slice(0, 3);
   const symmetry = session.document.settings.symmetry;
   const selectedSimpleTexture = activeObject?.metadata.simpleTexture;
 
@@ -501,6 +663,13 @@ export function AppInspectorPanel({
     onRefresh();
   };
 
+  const addPushPull = () => {
+    if (!beginInteractivePushPull(session, workspace)) {
+      pushToast('Push/Pull tool unavailable', 'error');
+    }
+    onRefresh();
+  };
+
   const knifeSelectedEdges = () => {
     if (!activeMesh || sel.mode !== 'edge' || sel.selectedEdgeIds.size !== 2) return;
     const [edgeA, edgeB] = [...sel.selectedEdgeIds];
@@ -558,6 +727,15 @@ export function AppInspectorPanel({
       const result = weldVerticesByDistance(mesh, vertices, weldDistance);
       if (!result.ok) throw new Error(result.error?.message ?? 'Weld failed');
       session.selection.applyTopologyChange(result.change);
+    });
+  };
+
+  const relaxSelectedVertices = () => {
+    if (!activeMesh || sel.mode !== 'vertex' || sel.selectedVertexIds.size === 0) return;
+    const vertices = [...sel.selectedVertexIds];
+    runDrawOp('Relax Vertices', (mesh) => {
+      const result = relaxVertices(mesh, vertices, 0.35, 2, true);
+      if (!result.ok) throw new Error(result.error?.message ?? 'Relax failed');
     });
   };
 
@@ -721,6 +899,15 @@ export function AppInspectorPanel({
       >
         Weld Distance
       </button>
+      <button
+        type="button"
+        className="tool"
+        disabled={!activeMesh || sel.mode !== 'vertex' || sel.selectedVertexIds.size === 0}
+        onClick={relaxSelectedVertices}
+        title="Smooth the selected patch while preserving open silhouettes"
+      >
+        Relax Surface
+      </button>
     </div>
   );
 
@@ -798,7 +985,7 @@ export function AppInspectorPanel({
           <>
             <section className="uv-section">
               <h3 className="uv-section-title">Mode</h3>
-              <div className="inspector-segmented" role="group" aria-label="Create mode">
+              <div className="inspector-segmented uv-btn-grid uv-btn-grid-4" role="group" aria-label="Create mode">
                 <button
                   type="button"
                   className={createMode === 'primitive' ? 'is-active' : ''}
@@ -815,12 +1002,24 @@ export function AppInspectorPanel({
                 </button>
                 <button
                   type="button"
+                  className={`tool${createMode === 'workflows' ? ' is-active' : ''}`}
+                  aria-pressed={createMode === 'workflows'}
+                  onClick={() => {
+                    cancelCreateTools();
+                    activateWorkflow();
+                  }}
+                >
+                  Blockout
+                </button>
+                <button
+                  type="button"
                   className={createMode === 'doodle' ? 'is-active' : ''}
                   aria-pressed={createMode === 'doodle'}
                   onClick={() => {
                     cancelCreateTools();
                     setCreateModePref('doodle');
-                    session.tools.setActive('select', session.context());
+                    session.tools.setActive('create-doodle', session.context());
+                    doodleTool.setCreateContext('curves', null, session.context());
                     onRefresh();
                   }}
                 >
@@ -833,6 +1032,9 @@ export function AppInspectorPanel({
                   aria-pressed={createMode === 'draw'}
                   onClick={() => {
                     cancelCreateTools();
+                    if (drawTool.blockoutPoly.enabled) {
+                      drawTool.setBlockoutPolySettings({ enabled: false }, session.context());
+                    }
                     setCreateModePref('draw');
                     session.tools.setActive('draw-poly', session.context());
                     drawTool.startNewMesh(session.context());
@@ -844,6 +1046,769 @@ export function AppInspectorPanel({
                 </button>
               </div>
             </section>
+
+            {createMode === 'workflows' && (
+              <>
+                <section className="uv-section">
+                  <h3 className="uv-section-title">Blockout</h3>
+                  <span className="uv-field-label">Draw with</span>
+                  <div className="uv-btn-grid uv-btn-grid-2">
+                    <button
+                      type="button"
+                      className={`tool${blockoutInputPref === 'freehand' ? ' is-active' : ''}`}
+                      aria-pressed={blockoutInputPref === 'freehand'}
+                      disabled={blockoutShapePref === 'patch'}
+                      onClick={() => activateWorkflow(blockoutShapePref, 'freehand')}
+                    >
+                      Freehand
+                    </button>
+                    <button
+                      type="button"
+                      className={`tool${blockoutInputPref === 'points' ? ' is-active' : ''}`}
+                      aria-pressed={blockoutInputPref === 'points'}
+                      onClick={() => activateWorkflow(blockoutShapePref, 'points')}
+                    >
+                      Points
+                    </button>
+                  </div>
+                  <span className="uv-field-label">Build shape</span>
+                  <div className="uv-btn-grid uv-btn-grid-3">
+                    <button
+                      type="button"
+                      className={`tool${blockoutShapePref === 'volume' ? ' is-active' : ''}`}
+                      aria-pressed={blockoutShapePref === 'volume'}
+                      onClick={() => activateWorkflow('volume')}
+                    >
+                      Volume
+                    </button>
+                    <button
+                      type="button"
+                      className={`tool${blockoutShapePref === 'flow' ? ' is-active' : ''}`}
+                      aria-pressed={blockoutShapePref === 'flow'}
+                      onClick={() => activateWorkflow('flow')}
+                    >
+                      Flow
+                    </button>
+                    <button
+                      type="button"
+                      className={`tool${blockoutShapePref === 'patch' ? ' is-active' : ''}`}
+                      aria-pressed={blockoutShapePref === 'patch'}
+                      onClick={() => activateWorkflow('patch', 'points')}
+                    >
+                      Patch
+                    </button>
+                  </div>
+                  <div className="uv-btn-grid uv-btn-grid-2">
+                    <button
+                      type="button"
+                      className="tool"
+                      onClick={runCombineMeshes}
+                      title="Join selected blockout pieces into one editable mesh"
+                    >
+                      Join selected pieces
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      onClick={runAttachBlockout}
+                      title="Join selected blockout pieces and weld coincident topology rings"
+                    >
+                      Attach + weld
+                    </button>
+                  </div>
+                  <p className="uv-hint">{workflowHint}</p>
+                </section>
+
+                {selectedBlockoutOperation && activeObject && activeMesh ? (
+                  <WorkflowOperationPanel
+                    session={session}
+                    workspace={workspace}
+                    object={activeObject}
+                    mesh={activeMesh}
+                    onRefresh={onRefresh}
+                    allowAnySelectionMode
+                  />
+                ) : (
+                  <section className="uv-section">
+                    <p className="uv-hint">
+                      Create a Volume or Flow, then select it to reshape its cross-sections and topology live.
+                    </p>
+                  </section>
+                )}
+
+                {blockoutShapePref === 'patch' && (
+                  <section className="uv-section">
+                    <div className="path-settings-panel capsule-settings-panel">
+                      <div className="simple-texture-card-heading">
+                          <strong>PATCH</strong>
+                          <span>Corner outline → editable solid</span>
+                      </div>
+                      <div className="uv-btn-grid uv-btn-grid-2" style={{ marginBottom: '0.6rem' }}>
+                        <button
+                          type="button"
+                          className="tool"
+                          disabled={!doodleTool.canCloseLoop()}
+                          onClick={() => {
+                            if (doodleTool.closeLoop(session.context())) onRefresh();
+                          }}
+                        >
+                          Close &amp; solidify
+                        </button>
+                        <button
+                          type="button"
+                          className={`tool${doodleTool.autoConnect ? ' is-active' : ''}`}
+                          aria-pressed={doodleTool.autoConnect}
+                          onClick={() => {
+                            doodleTool.setAutoConnect(!doodleTool.autoConnect, session.context());
+                            onRefresh();
+                          }}
+                        >
+                          Snap ends
+                        </button>
+                      </div>
+                      <label className="uv-field">
+                        <span>Thickness · {doodleTool.radius.toFixed(2)}</span>
+                        <input
+                            aria-label="Patch thickness"
+                          type="range"
+                          min={0.04}
+                          max={1.2}
+                          step={0.01}
+                          value={doodleTool.radius}
+                          onChange={(event) => {
+                            doodleTool.setRadius(Number(event.target.value), session.context());
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                      <label className="uv-field">
+                        <span>Roundness · {Math.round(doodleTool.blobInflation * 100)}%</span>
+                        <input
+                            aria-label="Patch roundness"
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          value={doodleTool.blobInflation}
+                          onChange={(event) => {
+                            doodleTool.setPathSettings(
+                              { blobInflation: Number(event.target.value) },
+                              session.context(),
+                            );
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                      <label className="uv-field">
+                        <span>
+                          Depth slices ·{' '}
+                          {Math.max(1, Math.min(6, Math.round(doodleTool.pathCount / 2)))}
+                        </span>
+                        <input
+                            aria-label="Patch depth slices"
+                          type="range"
+                          min={1}
+                          max={6}
+                          step={1}
+                          value={Math.max(1, Math.min(6, Math.round(doodleTool.pathCount / 2)))}
+                          onChange={(event) => {
+                            doodleTool.setPathSettings(
+                              { count: Number(event.target.value) * 2 },
+                              session.context(),
+                            );
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                      <p className="uv-hint">
+                        {doodleTool.state.stage === 'drawing'
+                          ? `${doodleTool.state.points.length} corners · click first point or Close & solidify`
+                          : 'Click any silhouette. Builds a solid volume — not a flat fan face.'}
+                      </p>
+                    </div>
+                  </section>
+                )}
+
+                {blockoutShapePref !== 'patch' && (
+                  <section className="uv-section">
+                    <h3 className="uv-section-title">
+                      {selectedBlockoutOperation ? 'Next stroke' : 'Stroke settings'}
+                    </h3>
+                    {(blockoutInputPref === 'points' || doodleTool.inputMode === 'pen') &&
+                      doodleTool.style === 'profile-solid' && (
+                      <div className="uv-btn-grid uv-btn-grid-2" style={{ marginBottom: '0.6rem' }}>
+                        <button
+                          type="button"
+                          className="tool"
+                          disabled={!doodleTool.canCloseLoop()}
+                          onClick={() => {
+                            if (doodleTool.closeLoop(session.context())) {
+                              onRefresh();
+                            }
+                          }}
+                          title="Connect the last point to the first and create the outline"
+                        >
+                          Close loop
+                        </button>
+                        <button
+                          type="button"
+                          className={`tool${doodleTool.autoConnect ? ' is-active' : ''}`}
+                          aria-pressed={doodleTool.autoConnect}
+                          onClick={() => {
+                            doodleTool.setAutoConnect(!doodleTool.autoConnect, session.context());
+                            onRefresh();
+                          }}
+                          title="Snap the cursor to the first point when nearby"
+                        >
+                          Snap ends
+                        </button>
+                      </div>
+                    )}
+                    {doodleTool.style === 'profile-solid' && (
+                      <div className="path-settings-panel capsule-settings-panel">
+                        <div className="simple-texture-card-heading">
+                          <strong>VOLUME</strong>
+                          <span>Silhouette · quad depth loops</span>
+                        </div>
+                        <label className="uv-field">
+                          <span>Thickness · {doodleTool.radius.toFixed(2)}</span>
+                          <input
+                            aria-label="Volume thickness"
+                            type="range"
+                            min={0.02}
+                            max={1.2}
+                            step={0.01}
+                            value={doodleTool.radius}
+                            onChange={(event) => {
+                              doodleTool.setRadius(Number(event.target.value), session.context());
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Width · {doodleTool.profileWidth.toFixed(2)}</span>
+                          <input
+                            aria-label="Volume width scale"
+                            type="range"
+                            min={0.25}
+                            max={2.5}
+                            step={0.01}
+                            value={doodleTool.profileWidth}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { profileWidth: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Height · {doodleTool.profileHeight.toFixed(2)}</span>
+                          <input
+                            aria-label="Volume height scale"
+                            type="range"
+                            min={0.25}
+                            max={2.5}
+                            step={0.01}
+                            value={doodleTool.profileHeight}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { profileHeight: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Scale · {doodleTool.startScale.toFixed(2)}</span>
+                          <input
+                            aria-label="Volume overall scale"
+                            type="range"
+                            min={0.25}
+                            max={2.5}
+                            step={0.01}
+                            value={doodleTool.startScale}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { startScale: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Roundness · {Math.round(doodleTool.blobInflation * 100)}%</span>
+                          <input
+                            aria-label="Volume roundness"
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={doodleTool.blobInflation}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { blobInflation: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Depth slices · {Math.max(1, Math.min(6, Math.round(doodleTool.pathCount / 2)))}</span>
+                          <input
+                            aria-label="Volume depth slices"
+                            type="range"
+                            min={1}
+                            max={6}
+                            step={1}
+                            value={Math.max(1, Math.min(6, Math.round(doodleTool.pathCount / 2)))}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { count: Number(event.target.value) * 2 },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Outline corners · {Math.max(8, doodleTool.pathRadialSegments * 2)}</span>
+                          <input
+                            aria-label="Outline corner count"
+                            type="range"
+                            min={4}
+                            max={24}
+                            step={1}
+                            value={doodleTool.pathRadialSegments}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { radialSegments: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <p className="uv-hint">
+                          {doodleTool.inputMode === 'pen'
+                            ? 'Click silhouette corners on the side view, then close. Keep it to 8–16 corners.'
+                            : 'Draw a closed side outline. Freehand is simplified to Outline corners. Select the object after create for live tweaks.'}
+                        </p>
+                      </div>
+                    )}
+                    {doodleTool.style === 'segmented-sweep' && (
+                      <div className="path-settings-panel capsule-settings-panel">
+                        <div className="simple-texture-card-heading">
+                          <strong>FLOW</strong>
+                          <span>Continuous cross-section rings</span>
+                        </div>
+                        <label className="uv-field">
+                          <span>Thickness · {doodleTool.radius.toFixed(2)}</span>
+                          <input
+                            aria-label="Flow thickness"
+                            type="range"
+                            min={0.02}
+                            max={1.2}
+                            step={0.01}
+                            value={doodleTool.radius}
+                            onChange={(event) => {
+                              doodleTool.setRadius(Number(event.target.value), session.context());
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Width · {doodleTool.profileWidth.toFixed(2)}</span>
+                          <input
+                            aria-label="Flow width scale"
+                            type="range"
+                            min={0.25}
+                            max={2.5}
+                            step={0.01}
+                            value={doodleTool.profileWidth}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { profileWidth: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Height · {doodleTool.profileHeight.toFixed(2)}</span>
+                          <input
+                            aria-label="Flow height scale"
+                            type="range"
+                            min={0.25}
+                            max={2.5}
+                            step={0.01}
+                            value={doodleTool.profileHeight}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { profileHeight: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Start scale · {doodleTool.startScale.toFixed(2)}</span>
+                          <input
+                            aria-label="Flow start scale"
+                            type="range"
+                            min={0.25}
+                            max={2.5}
+                            step={0.01}
+                            value={doodleTool.startScale}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { startScale: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Middle scale · {doodleTool.midScale.toFixed(2)}</span>
+                          <input
+                            aria-label="Flow middle scale"
+                            type="range"
+                            min={0.1}
+                            max={2.5}
+                            step={0.01}
+                            value={doodleTool.midScale}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { midScale: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>End scale · {doodleTool.endScale.toFixed(2)}</span>
+                          <input
+                            aria-label="Flow end scale"
+                            type="range"
+                            min={0.25}
+                            max={2.5}
+                            step={0.01}
+                            value={doodleTool.endScale}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { endScale: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Twist · {Math.round(doodleTool.twist)}°</span>
+                          <input
+                            aria-label="Flow twist"
+                            type="range"
+                            min={-180}
+                            max={180}
+                            step={5}
+                            value={doodleTool.twist}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { twist: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Sections · {doodleTool.pathCount}</span>
+                          <input
+                            aria-label="Flow section count"
+                            type="range"
+                            min={2}
+                            max={12}
+                            step={1}
+                            value={doodleTool.pathCount}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { count: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <label className="uv-field">
+                          <span>Round sides · {doodleTool.pathRadialSegments}</span>
+                          <input
+                            aria-label="Flow cross-section sides"
+                            type="range"
+                            min={8}
+                            max={16}
+                            step={1}
+                            value={doodleTool.pathRadialSegments}
+                            onChange={(event) => {
+                              doodleTool.setPathSettings(
+                                { radialSegments: Number(event.target.value) },
+                                session.context(),
+                              );
+                              onRefresh();
+                            }}
+                          />
+                        </label>
+                        <CapButtons
+                          label="Start cap"
+                          selected={doodleTool.pathStartCap}
+                          onChange={(startCap) => {
+                            doodleTool.setPathSettings({ startCap }, session.context());
+                            session.requestRedraw();
+                            onRefresh();
+                          }}
+                        />
+                        <CapButtons
+                          label="End cap"
+                          selected={doodleTool.pathEndCap}
+                          onChange={(endCap) => {
+                            doodleTool.setPathSettings({ endCap }, session.context());
+                            session.requestRedraw();
+                            onRefresh();
+                          }}
+                        />
+                      </div>
+                    )}
+                    {doodleTool.style !== 'segmented-sweep' && (
+                    <label className="curve-option-toggle">
+                      <input
+                        type="checkbox"
+                        checked={doodleTool.autoConnect}
+                        onChange={(event) => {
+                          doodleTool.setAutoConnect(event.target.checked, session.context());
+                          onRefresh();
+                        }}
+                      />
+                      <span>
+                        <strong>Auto Connect</strong>
+                        Snap to the first point and close the stroke when the path loops back
+                      </span>
+                    </label>
+                    )}
+                    <label className="uv-field">
+                      <span>Radius / width</span>
+                      <input
+                        className="uv-text"
+                        type="number"
+                        min={0.01}
+                        max={2}
+                        step={0.01}
+                        value={Number(doodleTool.radius.toFixed(3))}
+                        onChange={(e) => {
+                          doodleTool.setRadius(Number(e.target.value), session.context());
+                          onRefresh();
+                        }}
+                      />
+                    </label>
+                    <label className="uv-field">
+                      <span>Resolution</span>
+                      <select
+                        className="uv-select"
+                        aria-label="Workflow resolution preset"
+                        value={doodleTool.preset}
+                        onChange={(e) => {
+                          doodleTool.setPreset(e.target.value as DoodlePolyPreset, session.context());
+                          onRefresh();
+                        }}
+                      >
+                        <option value="low">Low-poly</option>
+                        <option value="medium">Medium</option>
+                      </select>
+                    </label>
+                    <p className="uv-meta">
+                      {doodleTool.state.stage === 'drawing'
+                        ? `${doodleTool.state.points.length} points${doodleTool.isClosedStroke() ? ' · closed' : ''}`
+                        : `${blockoutInputPref} ${blockoutShapePref} · ready`}
+                    </p>
+                  </section>
+                )}
+
+                <section className="uv-section">
+                  <h3 className="uv-section-title">Refine</h3>
+                  <div className="path-settings-panel capsule-settings-panel">
+                    <div className="simple-texture-card-heading">
+                      <strong>TOPOLOGY</strong>
+                      <span>Predictable loops for game meshes</span>
+                    </div>
+                    <button
+                      type="button"
+                      className={`tool${symmetry.x && symmetry.liveMirror ? ' is-active' : ''}`}
+                      aria-pressed={symmetry.x && symmetry.liveMirror}
+                      onClick={() =>
+                        updateSymmetry({
+                          x: !(symmetry.x && symmetry.liveMirror),
+                          liveMirror: !(symmetry.x && symmetry.liveMirror),
+                        })
+                      }
+                      title="Apply matching edits across the X axis when matching topology exists"
+                    >
+                      Mirror X edits
+                    </button>
+                    <p className="uv-meta">
+                      {blockoutTopology
+                        ? `${blockoutTopology.quads} quads · ${blockoutTopology.triangles} triangles · ${blockoutTopology.ngons} n-gons`
+                        : 'Select a blockout mesh to inspect its face flow.'}
+                    </p>
+                    <p className="uv-hint">
+                      Volume creates silhouette and depth loops. Flow creates continuous
+                      cross-section rings. Keep low density while shaping, then subdivide
+                      only the areas that need deformation.
+                    </p>
+                  </div>
+                  <div className="uv-btn-grid uv-btn-grid-4">
+                    {([
+                      ['face', 'Face'],
+                      ['edge', 'Edge'],
+                      ['vertex', 'Vert'],
+                      ['object', 'Object'],
+                    ] as const).map(([mode, label]) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={`tool${sel.mode === mode ? ' is-active' : ''}`}
+                        aria-pressed={sel.mode === mode}
+                        onClick={() => {
+                          chooseMode(mode);
+                          onRefresh();
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="uv-btn-grid uv-btn-grid-3">
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!activeMesh}
+                      onClick={subdivideSelectedFaces}
+                      title="Split selected faces into denser quads"
+                    >
+                      Subdivide
+                    </button>
+                    <button
+                      type="button"
+                      className={`tool${session.tools.getActive() instanceof PushPullTool ? ' is-active' : ''}`}
+                      aria-pressed={session.tools.getActive() instanceof PushPullTool}
+                      disabled={!activeMesh}
+                      onClick={addPushPull}
+                      title="SketchUp-style: click a face, move to extrude, click to finish"
+                    >
+                      Push/Pull
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!faceEditReady}
+                      onClick={() => editFaces('extrude')}
+                      title="Push selected faces out"
+                    >
+                      Extrude
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!faceEditReady}
+                      onClick={() => editFaces('inset')}
+                      title="Inset selected faces"
+                    >
+                      Inset
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!activeMesh}
+                      onClick={addLoopCut}
+                      title="Add an edge loop across a face ring"
+                    >
+                      Loop Cut
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!activeMesh}
+                      onClick={pokeSelectedFaces}
+                      title="Add a center vertex on selected faces"
+                    >
+                      Poke
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!activeMesh || sel.mode !== 'edge' || sel.selectedEdgeIds.size === 0}
+                      onClick={() => editFaces('bevel')}
+                      title="Bevel selected edges"
+                    >
+                      Bevel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!dissolveReady}
+                      onClick={dissolveSelection}
+                      title="Dissolve selected edges or faces"
+                    >
+                      Dissolve
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!faceEditReady}
+                      onClick={flipSelectedFaces}
+                      title="Flip face normals"
+                    >
+                      Flip
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!separateReady}
+                      onClick={separateSelectedFaces}
+                      title="Separate selected faces into a new object"
+                    >
+                      Separate
+                    </button>
+                  </div>
+                  <label className="uv-field">
+                    <span>Subdivide cuts · {subdivideCuts}</span>
+                    <input
+                      aria-label="Blockout subdivide cuts"
+                      type="range"
+                      min={1}
+                      max={3}
+                      step={1}
+                      value={subdivideCuts}
+                      onChange={(event) => setSubdivideCuts(Number(event.target.value))}
+                    />
+                  </label>
+                  <p className="uv-hint">
+                    {faceEditReady
+                      ? `${sel.selectedFaceIds.size} face${sel.selectedFaceIds.size === 1 ? '' : 's'} selected · Subdivide / Extrude / Inset`
+                      : sel.mode === 'edge' && sel.selectedEdgeIds.size > 0
+                        ? `${sel.selectedEdgeIds.size} edge${sel.selectedEdgeIds.size === 1 ? '' : 's'} · Bevel / Dissolve / Loop Cut`
+                        : 'Pick Face mode, select faces on your blockout, then Subdivide or Extrude.'}
+                  </p>
+                </section>
+
+                {/* Selected live props already shown above when a Blockout object is active. */}
+              </>
+            )}
 
             {createMode === 'doodle' && (
               <>
@@ -859,7 +1824,7 @@ export function AppInspectorPanel({
                         armCurveDraw();
                       }}
                     >
-                      Sketch · Freehand
+                      Freehand
                     </button>
                     <button
                       type="button"
@@ -918,7 +1883,9 @@ export function AppInspectorPanel({
                     doodleTool.solidMode === 'extrude' && (
                     <p className="uv-hint">
                       {doodleTool.style === 'sharp'
-                        ? 'Draw a closed loop for a flat-shoulder outline dome, or an open stroke for a ribbon extrusion.'
+                        ? doodleTool.inputMode === 'pen'
+                          ? 'Click corners for an exact flat outline, then connect back to the start. The shape extrudes slightly like a thin box.'
+                          : 'Draw a closed loop for a flat-shoulder outline dome, or an open stroke for a ribbon extrusion.'
                         : 'Draw a closed loop for a soft pillow blob, or an open stroke for a rounded tube.'}
                     </p>
                   )}
@@ -954,7 +1921,8 @@ export function AppInspectorPanel({
                         ['ribbon', 'Ribbon'],
                         ['tapered-tube', 'Tapered Tube'],
                         ['rope', 'Rope'],
-                        ['square-sweep', 'Profile Sweep'],
+                        ['square-sweep', 'Square Sweep'],
+                        ['rail-sweep', 'Rail Sweep'],
                       ] as [DoodleStyle, string][]
                     ).map(([style, label]) => (
                       <button
@@ -1004,7 +1972,8 @@ export function AppInspectorPanel({
                       onStartDrawing={armCurveDraw}
                     />
                   )}
-                  {doodleTool.style === 'capsule' && doodleTool.solidMode === 'extrude' && (
+                  {(doodleTool.style === 'capsule') &&
+                    doodleTool.solidMode === 'extrude' && (
                     <div className="path-settings-panel capsule-settings-panel">
                       <div className="simple-texture-card-heading">
                         <strong>CAPSULE SETTINGS</strong>
@@ -1064,7 +2033,7 @@ export function AppInspectorPanel({
                       />
                       <span>
                         <strong>Auto Connect</strong>
-                        Snap to the first point and fill a capsule solid when the outline closes
+                        Snap to the first point and close the stroke when the path loops back
                       </span>
                     </label>
                   )}
@@ -2249,12 +3218,9 @@ export function AppInspectorPanel({
                   type="button"
                   className="tool"
                   disabled={sel.mode !== 'object' && !activeMesh}
+                  title="Select all in the current mode (A toggles)"
                   onClick={() => {
-                    if (sel.mode === 'object') {
-                      session.selection.selectObjects([...session.document.objects.keys()], 'replace');
-                    } else {
-                      session.selection.selectAll(activeMesh!);
-                    }
+                    session.selection.selectAll(activeMesh ?? undefined, session.document);
                     session.requestRedraw();
                     onRefresh();
                   }}
@@ -2264,16 +3230,22 @@ export function AppInspectorPanel({
                 <button
                   type="button"
                   className="tool"
+                  disabled={!session.selection.hasModeSelection()}
+                  title="Clear selection in the current mode (Alt+A)"
+                  onClick={() => {
+                    session.selection.deselectAll();
+                    session.requestRedraw();
+                    onRefresh();
+                  }}
+                >
+                  Deselect All
+                </button>
+                <button
+                  type="button"
+                  className="tool"
                   disabled={sel.mode !== 'object' && !activeMesh}
                   onClick={() => {
-                    if (sel.mode === 'object') {
-                      session.selection.selectObjects(
-                        [...session.document.objects.keys()].filter((id) => !sel.selectedObjectIds.has(id)),
-                        'replace',
-                      );
-                    } else {
-                      session.selection.invert(activeMesh!);
-                    }
+                    session.selection.invert(activeMesh ?? undefined, session.document);
                     session.requestRedraw();
                     onRefresh();
                   }}
@@ -2364,6 +3336,15 @@ export function AppInspectorPanel({
                 <button
                   type="button"
                   className="tool"
+                  disabled={[...sel.selectedObjectIds].filter((id) => session.document.objects.get(id)?.meshId).length < 2 &&
+                    rootMeshObjectIds(session.document).length < 2}
+                  onClick={runCombineMeshes}
+                >
+                  Combine Meshes
+                </button>
+                <button
+                  type="button"
+                  className="tool"
                   disabled={[...sel.selectedObjectIds].filter((id) => session.document.objects.get(id)?.meshId).length < 2}
                   onClick={() => {
                     const id = joinMeshObjects(session.document, [...sel.selectedObjectIds], 'Joined Level Chunk');
@@ -2405,6 +3386,14 @@ export function AppInspectorPanel({
               object={activeObject ?? null}
               mesh={activeMesh ?? null}
               onRefresh={onRefresh}
+            />}
+            {editSection === 'geometry' && <WorkflowOperationPanel
+              session={session}
+              workspace={workspace}
+              object={activeObject ?? null}
+              mesh={activeMesh ?? null}
+              onRefresh={onRefresh}
+              allowAnySelectionMode
             />}
 
             {editSection === 'transform' && activeObject && sel.mode === 'object' && (
@@ -2789,6 +3778,16 @@ export function AppInspectorPanel({
               <div className="uv-btn-grid uv-btn-grid-2">
                 <button
                   type="button"
+                  className={`tool${session.tools.getActive() instanceof PushPullTool ? ' is-active' : ''}`}
+                  aria-pressed={session.tools.getActive() instanceof PushPullTool}
+                  disabled={!activeMesh}
+                  onClick={addPushPull}
+                  title="SketchUp-style: click a face, move to extrude, click to finish"
+                >
+                  Push/Pull
+                </button>
+                <button
+                  type="button"
                   className="tool"
                   disabled={!faceEditReady}
                   onClick={() => editFaces('extrude')}
@@ -2825,9 +3824,11 @@ export function AppInspectorPanel({
                 </button>
               </div>
               <p className="uv-hint">
-                {faceEditReady
-                  ? `${sel.selectedFaceIds.size} face${sel.selectedFaceIds.size === 1 ? '' : 's'} · E extrude · Flip reverses normals`
-                  : `Face mode + pick faces${sel.selectBackfaces ? ' · back-face picking on' : ''}`}
+                {session.tools.getActive() instanceof PushPullTool
+                  ? 'Click a face → move mouse to push/pull → click or Enter to finish'
+                  : faceEditReady
+                    ? `${sel.selectedFaceIds.size} face${sel.selectedFaceIds.size === 1 ? '' : 's'} · Push/Pull (P) · E extrude · Flip reverses normals`
+                    : `Push/Pull needs a mesh · or Face mode + pick faces${sel.selectBackfaces ? ' · back-face picking on' : ''}`}
               </p>
             </section>}
 
@@ -3339,6 +4340,8 @@ export function AppInspectorPanel({
                       <option value="collision">Collision</option>
                       <option value="spawn">Spawn</option>
                       <option value="marker">Marker</option>
+                      <option value="joint">Rig joint</option>
+                      <option value="socket">Attachment socket</option>
                     </select>
                   </label>
                   <label className="uv-field">
@@ -3358,12 +4361,118 @@ export function AppInspectorPanel({
                       <option value="mesh">Mesh</option>
                     </select>
                   </label>
+                  <div className="uv-btn-grid uv-btn-grid-2">
+                    <label className="uv-field">
+                      <span>LOD slot</span>
+                      <select
+                        className="uv-select"
+                        value={activeObject.metadata.lodLevel ?? ''}
+                        onChange={(event) => {
+                          if (event.target.value) activeObject.metadata.lodLevel = event.target.value;
+                          else delete activeObject.metadata.lodLevel;
+                          session.document.dirty = true;
+                          onRefresh();
+                        }}
+                      >
+                        <option value="">Not an LOD</option>
+                        <option value="0">LOD 0 · closest</option>
+                        <option value="1">LOD 1</option>
+                        <option value="2">LOD 2</option>
+                        <option value="3">LOD 3 · farthest</option>
+                      </select>
+                    </label>
+                    <label className="uv-field">
+                      <span>Screen threshold</span>
+                      <input
+                        className="uv-text"
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        disabled={!activeObject.metadata.lodLevel}
+                        value={activeObject.metadata.lodScreenSize ?? '0.5'}
+                        onChange={(event) => {
+                          activeObject.metadata.lodScreenSize = event.target.value;
+                          session.document.dirty = true;
+                          onRefresh();
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <div className="uv-btn-grid uv-btn-grid-2">
+                    <button
+                      type="button"
+                      className="tool"
+                      onClick={() => {
+                        const id = createRigMarker(session.document, activeObject.id, 'joint');
+                        session.selection.selectObjects([id], 'replace');
+                        session.requestRedraw();
+                        onRefresh();
+                      }}
+                    >
+                      Add Child Joint
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      onClick={() => {
+                        const id = createRigMarker(session.document, activeObject.id, 'socket');
+                        session.selection.selectObjects([id], 'replace');
+                        session.requestRedraw();
+                        onRefresh();
+                      }}
+                    >
+                      Add Child Socket
+                    </button>
+                  </div>
+                  {activeObject.kind === 'instance' && activeObject.instanceSourceModelId ? (
+                    <div className="instance-variant-card">
+                      <label className="uv-field">
+                        <span>Instance variant</span>
+                        <input
+                          className="uv-text"
+                          value={activeObject.metadata.variantName ?? ''}
+                          placeholder="Default"
+                          onChange={(event) => {
+                            activeObject.metadata.variantName = event.target.value;
+                            session.document.dirty = true;
+                            onRefresh();
+                          }}
+                        />
+                      </label>
+                      <div className="uv-btn-grid uv-btn-grid-2">
+                        <button
+                          type="button"
+                          className="tool"
+                          onClick={() => {
+                            session.openDocument(activeObject.instanceSourceModelId!);
+                            onRefresh();
+                          }}
+                        >
+                          Open source
+                        </button>
+                        <button
+                          type="button"
+                          className="tool"
+                          onClick={() => {
+                            makeModelInstanceUnique(session, activeObject.id);
+                            onRefresh();
+                          }}
+                        >
+                          Make unique
+                        </button>
+                      </div>
+                      <p className="uv-hint">Variants stay linked to the source model until you make them unique.</p>
+                    </div>
+                  ) : null}
                 </>
               )}
               <p className="uv-meta">
                 {gameStats.objects} objects · {gameStats.vertices} verts · {gameStats.triangles} tris
                 {` · ${gameStats.drawCalls} draw calls`}
                 {gameStats.collisionObjects ? ` · ${gameStats.collisionObjects} collision` : ''}
+                {gameStats.lodObjects ? ` · ${gameStats.lodObjects} LOD` : ''}
+                {gameStats.rigMarkers ? ` · ${gameStats.rigMarkers} rig markers` : ''}
               </p>
               <p className={`uv-meta${gameStats.invalidMeshes ? ' is-error' : ''}`}>
                 {gameStats.invalidMeshes
@@ -3373,6 +4482,23 @@ export function AppInspectorPanel({
                   ? ` · ${gameStats.missingLightmapUvs} need lightmap UV`
                   : ' · lightmap UVs ready'}
               </p>
+              {(gameStats.ngons > 0 ||
+                gameStats.missingUvMeshes > 0 ||
+                gameStats.missingColliderMeshes > 0 ||
+                gameStats.brokenModelLinks > 0 ||
+                gameStats.invalidLodObjects > 0 ||
+                gameStats.orphanRigMarkers > 0) && (
+                <p className="uv-meta is-error">
+                  {[
+                    gameStats.ngons ? `${gameStats.ngons} n-gon${gameStats.ngons === 1 ? '' : 's'}` : '',
+                    gameStats.missingUvMeshes ? `${gameStats.missingUvMeshes} missing UVs` : '',
+                    gameStats.missingColliderMeshes ? 'no collider assigned' : '',
+                    gameStats.brokenModelLinks ? `${gameStats.brokenModelLinks} broken model link${gameStats.brokenModelLinks === 1 ? '' : 's'}` : '',
+                    gameStats.invalidLodObjects ? `${gameStats.invalidLodObjects} incomplete LOD${gameStats.invalidLodObjects === 1 ? '' : 's'}` : '',
+                    gameStats.orphanRigMarkers ? `${gameStats.orphanRigMarkers} orphan rig marker${gameStats.orphanRigMarkers === 1 ? '' : 's'}` : '',
+                  ].filter(Boolean).join(' · ')}
+                </p>
+              )}
               {(gameStats.unappliedScales > 0 || gameStats.oversizedMeshes > 0) && (
                 <p className="uv-meta is-error">
                   {gameStats.unappliedScales
@@ -3385,6 +4511,16 @@ export function AppInspectorPanel({
                 </p>
               )}
               <p className="uv-hint">Prefab groups and arrays preserve hierarchy · GLB exports UV2, transforms, collision roles, and game metadata</p>
+              <div className="workflow-next-steps">
+                <strong>{workflowNextSteps.length ? 'Recommended next' : 'Ready for export'}</strong>
+                {workflowNextSteps.length ? (
+                  <ol>
+                    {workflowNextSteps.map((step) => <li key={step}>{step}</li>)}
+                  </ol>
+                ) : (
+                  <p>No blocking scene issues were found.</p>
+                )}
+              </div>
               </>}
 
               {sceneToolMode === 'recovery' && (
@@ -3543,6 +4679,17 @@ export function AppInspectorPanel({
                   </div>
                 </div>
               )}
+              <ol className="history-timeline" aria-label="Recent editing history">
+                {session.history.getTimeline(8).map((entry) => (
+                  <li key={entry.id} className={entry.state === 'redo' ? 'is-redo' : ''}>
+                    <span aria-hidden="true">{entry.state === 'redo' ? '○' : '●'}</span>
+                    <span>{entry.name}</span>
+                  </li>
+                ))}
+                {session.history.getTimeline(1).length === 0 ? (
+                  <li className="is-empty">Your recent edits will appear here</li>
+                ) : null}
+              </ol>
             </section>
           </>
         )}

@@ -767,6 +767,117 @@ export function SculptPanel({ session, onRefresh }: Props) {
                   ))}
                 </div>
               </div>
+              <label className="sculpt-slider">
+                <span className="sculpt-slider-label">
+                  Hardness
+                  <b>{Math.round(tool.hardness * 100)}%</b>
+                </span>
+                <input
+                  className="sculpt-range"
+                  aria-label="Brush hardness"
+                  type="range"
+                  min={0}
+                  max={0.9}
+                  step={0.05}
+                  value={tool.hardness}
+                  onChange={(event) => {
+                    tool.hardness = Number(event.target.value);
+                    tool.revision += 1;
+                    session.requestRedraw();
+                    onRefresh();
+                  }}
+                />
+              </label>
+              <label className="sculpt-slider">
+                <span className="sculpt-slider-label">
+                  Stroke spacing
+                  <b>{Math.round(tool.spacing * 100)}%</b>
+                </span>
+                <input
+                  className="sculpt-range"
+                  aria-label="Stroke spacing"
+                  type="range"
+                  min={0.05}
+                  max={0.5}
+                  step={0.01}
+                  value={tool.spacing}
+                  onChange={(event) => {
+                    tool.spacing = Number(event.target.value);
+                    tool.revision += 1;
+                    onRefresh();
+                  }}
+                />
+              </label>
+              {(tool.mode === 'clay' || tool.mode === 'inflate' || tool.mode === 'noise') && (
+                <label className="sculpt-slider">
+                  <span className="sculpt-slider-label">
+                    Build-up
+                    <b>{tool.buildUp.toFixed(2)}</b>
+                  </span>
+                  <input
+                    className="sculpt-range"
+                    aria-label="Brush build-up"
+                    type="range"
+                    min={0.2}
+                    max={2}
+                    step={0.05}
+                    value={tool.buildUp}
+                    onChange={(event) => {
+                      tool.buildUp = Number(event.target.value);
+                      tool.revision += 1;
+                      onRefresh();
+                    }}
+                  />
+                </label>
+              )}
+              {tool.mode === 'smooth' && (
+                <label className="sculpt-slider">
+                  <span className="sculpt-slider-label">
+                    Preserve volume
+                    <b>{Math.round(tool.preserveVolume * 100)}%</b>
+                  </span>
+                  <input
+                    className="sculpt-range"
+                    aria-label="Smooth preserve volume"
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={tool.preserveVolume}
+                    onChange={(event) => {
+                      tool.preserveVolume = Number(event.target.value);
+                      tool.revision += 1;
+                      onRefresh();
+                    }}
+                  />
+                </label>
+              )}
+              <div className="sculpt-toggle-grid">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={tool.frontFacesOnly}
+                    onChange={(event) => {
+                      tool.frontFacesOnly = event.target.checked;
+                      tool.revision += 1;
+                      onRefresh();
+                    }}
+                  />
+                  Front faces
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={tool.usePressure}
+                    onChange={(event) => {
+                      tool.usePressure = event.target.checked;
+                      tool.revision += 1;
+                      onRefresh();
+                    }}
+                  />
+                  Pen pressure
+                </label>
+              </div>
               <label className="sculpt-checkbox-label">
                 <input
                   type="checkbox"
@@ -791,7 +902,9 @@ export function SculptPanel({ session, onRefresh }: Props) {
           <span><kbd>Shift</kbd> Smooth</span>
           <span><kbd>Ctrl</kbd> Invert</span>
           <span><kbd>Wheel</kbd> Size</span>
+          <span><kbd>Ctrl+Wheel</kbd> Strength</span>
           <span><kbd>Alt</kbd> Sample</span>
+          <span><kbd>RMB</kbd> Orbit</span>
         </footer>
       </div>
     </aside>

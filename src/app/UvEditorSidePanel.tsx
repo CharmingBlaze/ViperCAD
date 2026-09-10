@@ -1,9 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { BlenderIcon } from '@/components/BlenderIcon';
+import { GradientToolControls } from '@/app/GradientToolControls';
 import { MaterialEditor } from '@/app/MaterialEditor';
+import { PixelateToolControls } from '@/app/PixelateToolControls';
 import { IMAGE_FILES, openNativeFile } from '@/app/platform/FileDialogs';
 import { createMaterial } from '@/core/document/ModelDocument';
 import type { EditorSession } from '@/core/editor/EditorSession';
+import {
+  applyBayerDitherToImage,
+  applyPixelOutlineToImage,
+  flipImageAsset,
+} from '@/core/image/ImageFilters';
 import { importImageFile } from '@/core/image/ImageImport';
 import type { ImageAsset } from '@/core/document/types';
 import {
@@ -25,7 +32,7 @@ import {
 } from '@/core/image/PaintLayers';
 import { resolveActiveTexture } from '@/core/texture/resolveActiveTexture';
 import { boundsOfUvs, cornersForFaces, resolveUvLayerId, snapshotUvs } from '@/core/uv/UvEdit';
-import type { UvUnwrapMode } from '@/core/uv/UvOperations';
+import { markUvSeamsByAngle, clearAllUvSeams, type UvUnwrapMode } from '@/core/uv/UvOperations';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';
 import type { UvDiagnostics } from '@/core/uv/UvDiagnostics';
 import type {
@@ -402,6 +409,15 @@ export function UvEditorSidePanel({
 
             <section className="uv-section">
               <h3 className="uv-section-title">Unwrap</h3>
+              <button
+                type="button"
+                className="tool primary uv-btn-block"
+                style={{ marginBottom: '0.4rem', fontWeight: 600 }}
+                title="Smart Conformal Unwrap: Auto seam sharp edges & pack islands"
+                onClick={() => onUnwrap('smart')}
+              >
+                ⚡ Smart Unwrap & Pack
+              </button>
               <div className="uv-btn-grid uv-btn-grid-3">
                 <button
                   type="button"
@@ -476,8 +492,42 @@ export function UvEditorSidePanel({
                   Fit
                 </button>
               </div>
+              <div className="uv-btn-grid uv-btn-grid-2" style={{ marginTop: '0.35rem' }}>
+                <button
+                  type="button"
+                  className="tool"
+                  title="Auto-mark seams on sharp edges > 45°"
+                  onClick={() => {
+                    const objectId = session.selection.state.activeObjectId;
+                    const obj = objectId ? session.document.objects.get(objectId) : null;
+                    const mesh = obj?.meshId ? session.document.meshes.get(obj.meshId) : null;
+                    if (mesh) {
+                      markUvSeamsByAngle(mesh, 45);
+                      session.requestRedraw();
+                    }
+                  }}
+                >
+                  Auto Seams (45°)
+                </button>
+                <button
+                  type="button"
+                  className="tool"
+                  title="Remove all seams"
+                  onClick={() => {
+                    const objectId = session.selection.state.activeObjectId;
+                    const obj = objectId ? session.document.objects.get(objectId) : null;
+                    const mesh = obj?.meshId ? session.document.meshes.get(obj.meshId) : null;
+                    if (mesh) {
+                      clearAllUvSeams(mesh);
+                      session.requestRedraw();
+                    }
+                  }}
+                >
+                  Clear All Seams
+                </button>
+              </div>
               <p className="uv-hint">
-                Select faces in either view, then unwrap. Angle keeps smooth faces together and cuts at 66° turns; Box ≈ entity net.
+                Select faces in either view, then unwrap. Angle keeps smooth faces together and cuts at 66° turns; Box ≈ entity net. Smart Unwrap auto-detects seams on sharp edges and packs island charts cleanly.
               </p>
             </section>
 
@@ -1158,6 +1208,81 @@ export function UvEditorSidePanel({
                   </div>
                 </>
               )}
+            </section>
+            <GradientToolControls
+              session={session}
+              workspace={workspace}
+              image={workspace.texture.activeImageId
+                ? session.document.images.get(workspace.texture.activeImageId)
+                : null}
+              material={workspace.texture.activeMaterialId
+                ? session.document.materials.get(workspace.texture.activeMaterialId)
+                : null}
+            />
+            <PixelateToolControls
+              session={session}
+              workspace={workspace}
+              image={workspace.texture.activeImageId
+                ? session.document.images.get(workspace.texture.activeImageId)
+                : null}
+              material={workspace.texture.activeMaterialId
+                ? session.document.materials.get(workspace.texture.activeMaterialId)
+                : null}
+            />
+            <section className="uv-section">
+              <h3 className="uv-section-title">Pixel Art FX & Filters</h3>
+              <div className="uv-btn-grid uv-btn-grid-2">
+                <button
+                  type="button"
+                  className="tool"
+                  title="Draw 1px pixel art border around sprites/islands"
+                  onClick={() => {
+                    const img = workspace.texture.activeImageId
+                      ? session.document.images.get(workspace.texture.activeImageId)
+                      : null;
+                    if (img) applyPixelOutlineToImage(session, img, tex.foreground);
+                  }}
+                >
+                  Outline 1px
+                </button>
+                <button
+                  type="button"
+                  className="tool"
+                  title="Apply retro Bayer 4x4 dither matrix"
+                  onClick={() => {
+                    const img = workspace.texture.activeImageId
+                      ? session.document.images.get(workspace.texture.activeImageId)
+                      : null;
+                    if (img) applyBayerDitherToImage(session, img);
+                  }}
+                >
+                  Bayer Dither
+                </button>
+                <button
+                  type="button"
+                  className="tool"
+                  onClick={() => {
+                    const img = workspace.texture.activeImageId
+                      ? session.document.images.get(workspace.texture.activeImageId)
+                      : null;
+                    if (img) flipImageAsset(session, img, 'horizontal');
+                  }}
+                >
+                  Flip Horiz
+                </button>
+                <button
+                  type="button"
+                  className="tool"
+                  onClick={() => {
+                    const img = workspace.texture.activeImageId
+                      ? session.document.images.get(workspace.texture.activeImageId)
+                      : null;
+                    if (img) flipImageAsset(session, img, 'vertical');
+                  }}
+                >
+                  Flip Vert
+                </button>
+              </div>
             </section>
           </>
         )}

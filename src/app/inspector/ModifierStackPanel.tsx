@@ -10,6 +10,9 @@ import {
 import {
   createDefaultMirrorModifier,
   createDefaultSubdivisionModifier,
+  createDefaultArrayModifier,
+  createDefaultBevelModifier,
+  createDefaultSolidifyModifier,
   createEmptyModifierStack,
   MODIFIER_STACK_METADATA_KEY,
   type MirrorAxis,
@@ -84,6 +87,13 @@ export function ModifierStackPanel({ session, object, mesh, onRefresh }: Props) 
     );
   };
 
+  const addModifier = (modifier: ModifierSpec, name: string) => {
+    commitStack(
+      { ...stack, modifiers: [...stack.modifiers, modifier] },
+      name,
+    );
+  };
+
   const removeModifier = (index: number) => {
     commitStack(
       { ...stack, modifiers: stack.modifiers.filter((_, modifierIndex) => modifierIndex !== index) },
@@ -132,18 +142,21 @@ export function ModifierStackPanel({ session, object, mesh, onRefresh }: Props) 
   return (
     <section className="uv-section">
       <h3 className="uv-section-title">Modifier Stack</h3>
-      <p className="uv-meta">Non-destructive mirror and subdivision — edit the base mesh, viewport shows the result.</p>
-      <div className="uv-btn-grid uv-btn-grid-2">
+      <p className="uv-meta">Edit the base mesh while the viewport shows the complete non-destructive result.</p>
+      <div className="uv-btn-grid uv-btn-grid-3">
         <button type="button" className="tool" onClick={() => addMirror('x')}>+ Mirror</button>
         <button type="button" className="tool" onClick={addSubdivision}>+ Subdivision</button>
+        <button type="button" className="tool" onClick={() => addModifier(createDefaultSolidifyModifier(), 'Add Solidify')}>+ Solidify</button>
+        <button type="button" className="tool" onClick={() => addModifier(createDefaultBevelModifier(), 'Add Bevel')}>+ Bevel</button>
+        <button type="button" className="tool" onClick={() => addModifier(createDefaultArrayModifier(), 'Add Array')}>+ Array</button>
       </div>
       {stack.modifiers.length === 0 && (
-        <p className="uv-hint">Add Mirror or Subdivision Surface modifiers like Blender.</p>
+        <p className="uv-hint">Build a live stack with Mirror, Subdivision, Solidify, Bevel, and Array.</p>
       )}
       {stack.modifiers.map((modifier, index) => (
         <div key={`${modifier.kind}-${index}`} className="uv-subsection">
           <div className="uv-btn-grid uv-btn-grid-2">
-            <strong>{modifier.kind === 'mirror' ? 'Mirror' : 'Subdivision Surface'}</strong>
+            <strong>{modifierLabel(modifier)}</strong>
             <label className="uv-check">
               <input
                 type="checkbox"
@@ -217,6 +230,54 @@ export function ModifierStackPanel({ session, object, mesh, onRefresh }: Props) 
               </label>
             </>
           )}
+          {modifier.kind === 'solidify' && (
+            <>
+              <label className="uv-field">
+                <span>Thickness</span>
+                <input className="uv-text" type="number" step={0.01} value={modifier.thickness} onChange={(event) => updateModifier(index, { thickness: Number(event.target.value) || 0.01 })} />
+              </label>
+              <label className="uv-field">
+                <span>Offset · {modifier.offset.toFixed(2)}</span>
+                <input className="uv-range" type="range" min={-1} max={1} step={0.05} value={modifier.offset} onChange={(event) => updateModifier(index, { offset: Number(event.target.value) })} />
+              </label>
+            </>
+          )}
+          {modifier.kind === 'bevel' && (
+            <>
+              <label className="uv-field">
+                <span>Width</span>
+                <input className="uv-text" type="number" min={0.0001} step={0.01} value={modifier.width} onChange={(event) => updateModifier(index, { width: Math.max(0.0001, Number(event.target.value) || 0.0001) })} />
+              </label>
+              <label className="uv-field">
+                <span>Segments · {modifier.segments}</span>
+                <input className="uv-range" type="range" min={1} max={8} step={1} value={modifier.segments} onChange={(event) => updateModifier(index, { segments: Number(event.target.value) })} />
+              </label>
+              <label className="uv-field">
+                <span>Profile · {modifier.profile.toFixed(2)}</span>
+                <input className="uv-range" type="range" min={0.05} max={0.95} step={0.05} value={modifier.profile} onChange={(event) => updateModifier(index, { profile: Number(event.target.value) })} />
+              </label>
+            </>
+          )}
+          {modifier.kind === 'array' && (
+            <>
+              <label className="uv-field">
+                <span>Axis</span>
+                <select className="uv-text" value={modifier.axis} onChange={(event) => updateModifier(index, { axis: event.target.value as MirrorAxis })}>
+                  <option value="x">X</option>
+                  <option value="y">Y</option>
+                  <option value="z">Z</option>
+                </select>
+              </label>
+              <label className="uv-field">
+                <span>Count · {modifier.count}</span>
+                <input className="uv-range" type="range" min={1} max={32} step={1} value={modifier.count} onChange={(event) => updateModifier(index, { count: Number(event.target.value) })} />
+              </label>
+              <label className="uv-field">
+                <span>Spacing</span>
+                <input className="uv-text" type="number" step={0.1} value={modifier.spacing} onChange={(event) => updateModifier(index, { spacing: Number(event.target.value) || 0 })} />
+              </label>
+            </>
+          )}
           <div className="uv-btn-grid uv-btn-grid-3">
             <button type="button" className="tool" disabled={index === 0} onClick={() => moveModifier(index, -1)}>↑</button>
             <button type="button" className="tool" disabled={index === stack.modifiers.length - 1} onClick={() => moveModifier(index, 1)}>↓</button>
@@ -234,6 +295,11 @@ export function ModifierStackPanel({ session, object, mesh, onRefresh }: Props) 
       </button>
     </section>
   );
+}
+
+function modifierLabel(modifier: ModifierSpec): string {
+  if (modifier.kind === 'subdivision') return 'Subdivision Surface';
+  return modifier.kind[0]!.toUpperCase() + modifier.kind.slice(1);
 }
 
 function restoreAppliedMesh(

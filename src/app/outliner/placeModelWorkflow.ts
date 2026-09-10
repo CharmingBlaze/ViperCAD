@@ -21,7 +21,7 @@ export function placeModelQuick(
   { onRefresh, onPlaced }: PlaceOptions,
 ): boolean {
   const modelDoc = getViperDocument(session.project, modelDocumentId);
-  if (!modelHasPlaceableGeometry(modelDoc)) {
+  if (!modelHasPlaceableGeometry(modelDoc, session.project)) {
     pushToast(`Add geometry to ${modelDoc.name} first`, 'error');
     return false;
   }
@@ -52,7 +52,7 @@ export function startPlaceModelInViewport(
   { onRefresh, onPlaced }: PlaceOptions,
 ): boolean {
   const modelDoc = getViperDocument(session.project, modelDocumentId);
-  if (!modelHasPlaceableGeometry(modelDoc)) {
+  if (!modelHasPlaceableGeometry(modelDoc, session.project)) {
     pushToast(`Add geometry to ${modelDoc.name} first`, 'error');
     return false;
   }

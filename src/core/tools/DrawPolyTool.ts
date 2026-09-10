@@ -34,6 +34,7 @@ import {
   makeFaceFromVertices,
   type MakeFaceMode,
 } from '@/core/mesh/ops/draw';
+import { solidifyBlockoutPolyFace } from '@/core/mesh/ops/blockoutPolySolidify';
 import type { EditableMesh, EdgeId, VertexId } from '@/core/mesh/types';
 import { cloneSelection, type SelectionState } from '@/core/selection/SelectionManager';
 import { SNAP_TARGET_LABELS, rayPlaneIntersection, resolveSnap, type ConstructionPlane } from '@/core/snap/SnapEngine';
@@ -68,6 +69,13 @@ export type DrawPolyToolState = {
   revision: number;
 };
 
+export type BlockoutPolySettings = {
+  enabled: boolean;
+  thickness: number;
+  roundness: number;
+  subdivideCuts: number;
+};
+
 export type DrawPreviewInfo = {
   points: Vec3[];
   chainCount: number;
@@ -91,6 +99,8 @@ export type DrawPreviewInfo = {
  * 3D Poly & Surface draw tool: click to place points in 3D or select/snap to old vertices.
  * Automatically forms Quad faces (default at 4 points) or Tri faces (at 3 points),
  * with full support for N-gons and loose 3D vertices.
+ * SketchUp-like close via click start / Enter / Close. Staged verts undo as one "Draw Face".
+ * Blockout Poly mode can extrude + round + subdivide on close.
  */
 export class DrawPolyTool implements Tool {
   id = 'draw-poly' as const;
@@ -101,6 +111,13 @@ export class DrawPolyTool implements Tool {
   autoCommitOnTargetCount = true;
   /** `view` follows the clicked viewport (including perspective). Axis locks stay on that world plane. */
   planeLock: DrawPlaneLock = 'view';
+  /** When enabled (Blockout → Poly), closing a face solidifies it. */
+  blockoutPoly: BlockoutPolySettings = {
+    enabled: false,
+    thickness: 0.35,
+    roundness: 0.35,
+    subdivideCuts: 2,
+  };
   state: DrawPolyToolState = this.emptyState();
   private previousSelection: SelectionState | null = null;
   /** Mesh snapshot before the current chain — restored on Esc / used for single undo. */
@@ -138,6 +155,7 @@ export class DrawPolyTool implements Tool {
 
   deactivate(context: ModellingContext): void {
     this.abortChain(context, false);
+    this.blockoutPoly.enabled = false;
   }
 
   setFaceMode(mode: MakeFaceMode, context: ModellingContext): void {
@@ -185,6 +203,45 @@ export class DrawPolyTool implements Tool {
       this.topologyMode = 'points';
     } else if (this.topologyMode === 'points') {
       this.topologyMode = 'quad';
+    }
+    this.state.lastError = null;
+    this.state.revision += 1;
+    context.requestRedraw();
+  }
+
+  setBlockoutPolySettings(
+    settings: Partial<BlockoutPolySettings>,
+    context: ModellingContext,
+  ): void {
+    if (settings.enabled != null) this.blockoutPoly.enabled = settings.enabled;
+    if (settings.thickness != null) {
+      this.blockoutPoly.thickness = Math.max(0, Math.min(4, settings.thickness));
+    }
+    if (settings.roundness != null) {
+      this.blockoutPoly.roundness = Math.max(0, Math.min(1, settings.roundness));
+    }
+    if (settings.subdivideCuts != null) {
+      this.blockoutPoly.subdivideCuts = Math.max(0, Math.min(3, Math.round(settings.subdivideCuts)));
+    }
+    this.state.revision += 1;
+    context.requestRedraw();
+  }
+
+  /** Enter Blockout Poly: SketchUp face draw with solidify on close. */
+  enableBlockoutPoly(context: ModellingContext): void {
+    this.blockoutPoly.enabled = true;
+    this.buildMode = 'faces';
+    // Two-sided so flat faces aren't invisible from the back before solidify.
+    this.faceMode = 'double';
+    this.abortChain(context, true);
+    this.state.meshObjectId = null;
+    context.selection.clear();
+    this.previousSelection = cloneSelection(context.selection.state);
+    const target = this.ensureTarget(context);
+    if (target) {
+      const object = context.document.objects.get(target.objectId);
+      if (object) object.name = 'Blockout Poly';
+      if (target.created) target.mesh.name = 'Blockout Poly';
     }
     this.state.lastError = null;
     this.state.revision += 1;
@@ -287,7 +344,9 @@ export class DrawPolyTool implements Tool {
     this.lastClickMs = now;
     this.lastClickScreen = { x: input.screenX, y: input.screenY };
 
-    if (this.topologyMode === 'ngon' && isDouble && this.state.chain.length >= 3) {
+    // Ngon double-click close only. Rapid corner clicks in Blockout Poly must
+    // not close a square into a triangle — use an earlier chain vert, Enter, or Finish.
+    if (this.topologyMode === 'ngon' && !this.blockoutPoly.enabled && isDouble && this.state.chain.length >= 3) {
       this.closeFace(context);
       return;
     }
@@ -547,6 +606,20 @@ export class DrawPolyTool implements Tool {
       if (!n) return 'Points (3D) · click to place loose vertices · Enter commits';
       return `Points (3D) · ${created} new · Enter commits · Backspace undo`;
     }
+    if (this.blockoutPoly.enabled) {
+      const solid =
+        this.blockoutPoly.thickness > 0
+          ? `thickness ${this.blockoutPoly.thickness.toFixed(2)}`
+          : 'flat';
+      if (n === 0) {
+        return `Blockout Poly · click corners · close to solidify (${solid})`;
+      }
+      if (this.state.canClose || n >= 3) {
+        return `Blockout Poly · ${n} pts · click start / Enter to solidify`;
+      }
+      if (this.state.axisLocked) return `Blockout Poly · ${n} pts · axis locked`;
+      return `Blockout Poly · ${n} pts · click next · Shift axis · Esc cancel`;
+    }
     const sides = this.faceMode === 'double' ? 'double' : 'single';
     if (this.topologyMode === 'quad') {
       if (n === 0) return `Quad (0/4) · ${sides} · click 3D point or pick old vertex`;
@@ -614,7 +687,7 @@ export class DrawPolyTool implements Tool {
         ? cloneVec3(this.state.previewPoint)
         : null,
       hoverKind: this.state.hoverKind,
-      showFaceGhost: this.topologyMode !== 'points',
+      showFaceGhost: this.topologyMode !== 'points' && !this.blockoutPoly.enabled,
       topologyMode: this.topologyMode,
       targetCount: this.topologyMode === 'quad' ? 4 : this.topologyMode === 'tri' ? 3 : 0,
     };
@@ -642,13 +715,18 @@ export class DrawPolyTool implements Tool {
     return true;
   }
 
-  /** Index of a chain vert that can close a face (≥3 verts from that index to end). */
+  /**
+   * Index of a chain vert that can close a face.
+   * Blockout Poly needs ≥4 corners before click-to-close (squares); triangles use Enter / Finish.
+   * Regular Draw still allows closing at ≥3.
+   */
   private closableChainIndex(vertexId: VertexId): number {
-    if (this.state.chain.length < 3) return -1;
+    const minLoop = this.blockoutPoly.enabled ? 4 : 3;
+    if (this.state.chain.length < minLoop) return -1;
     const idx = this.state.chain.indexOf(vertexId);
     if (idx < 0) return -1;
     if (idx === this.state.chain.length - 1) return -1;
-    if (this.state.chain.length - idx < 3) return -1;
+    if (this.state.chain.length - idx < minLoop) return -1;
     return idx;
   }
 
@@ -671,7 +749,10 @@ export class DrawPolyTool implements Tool {
         : cloneSelection(context.selection.state));
     const originBefore = captureOriginSnapshot(context.document, target.objectId);
 
-    const result = makeFaceFromVertices(target.mesh, chain, { mode: this.faceMode });
+    const result = makeFaceFromVertices(target.mesh, chain, {
+      // Always double-sided in Blockout Poly so paper-thin faces aren't see-through from behind.
+      mode: this.blockoutPoly.enabled ? 'double' : this.faceMode,
+    });
     if (!result.ok) {
       this.setError(result.error?.message ?? 'Could not create that face.', context);
       return;
@@ -679,12 +760,32 @@ export class DrawPolyTool implements Tool {
 
     context.selection.applyTopologyChange(result.change);
     this.applyCommittedLook(context, target.objectId);
+    const createdFaces = result.value?.faceIds ?? [];
+
+    if (this.blockoutPoly.enabled && createdFaces.length > 0) {
+      const solid = solidifyBlockoutPolyFace(target.mesh, createdFaces, {
+        thickness: this.blockoutPoly.thickness,
+        roundness: this.blockoutPoly.roundness,
+        subdivideCuts: this.blockoutPoly.subdivideCuts,
+      });
+      if (!solid.ok) {
+        this.setError(solid.error?.message ?? 'Could not solidify that face.', context);
+        // Keep the flat face — still useful.
+      } else {
+        context.selection.applyTopologyChange(solid.change);
+      }
+    }
+
     const originAfter = captureOriginSnapshot(context.document, target.objectId);
     const after = cloneMeshPreserveIds(target.mesh);
     const selectionAfter = cloneSelection(context.selection.state);
     let applied = true;
     const faceType = chain.length === 4 ? 'Quad' : chain.length === 3 ? 'Tri' : 'Poly';
-    const name = this.faceMode === 'double' ? `Draw Double ${faceType} Face` : `Draw ${faceType} Face`;
+    const name = this.blockoutPoly.enabled
+      ? 'Blockout Poly'
+      : this.faceMode === 'double'
+        ? `Draw Double ${faceType} Face`
+        : `Draw ${faceType} Face`;
 
     context.history.execute({
       name,
@@ -776,7 +877,7 @@ export class DrawPolyTool implements Tool {
 
   private ensureTarget(context: ModellingContext) {
     const locked = this.getTarget(context);
-    if (this.state.meshObjectId && locked) return locked;
+    if (this.state.meshObjectId && locked) return { ...locked, created: false };
     const ensured = ensureDrawMesh(context.document, context.selection);
     if (ensured.created) {
       const object = context.document.objects.get(ensured.objectId)!;
@@ -824,7 +925,7 @@ export class DrawPolyTool implements Tool {
     this.state.meshObjectId = ensured.objectId;
     const object = context.document.objects.get(ensured.objectId);
     if (!object) return null;
-    return { mesh: ensured.mesh, object, objectId: ensured.objectId };
+    return { mesh: ensured.mesh, object, objectId: ensured.objectId, created: ensured.created };
   }
 
   private getTarget(context: ModellingContext) {

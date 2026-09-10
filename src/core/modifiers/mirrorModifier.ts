@@ -12,7 +12,6 @@ import { weldVerticesByDistance } from '@/core/mesh/ops/basic';
 import type { EditableMesh, FaceId, VertexId } from '@/core/mesh/types';
 import type { MirrorModifierSpec } from '@/core/modifiers/types';
 
-
 function axisCoord(position: Vec3, axis: MirrorModifierSpec['axis']): number {
   return axis === 'x' ? position.x : axis === 'y' ? position.y : position.z;
 }

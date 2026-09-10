@@ -15,6 +15,17 @@ export type StandardLikeMaterial = (MeshStandardMaterial | MeshPhysicalMaterial 
   map: Texture | null;
 };
 
+type StyledMaterial = Material & {
+  wireframe: boolean;
+  color: Color;
+  map: Texture | null;
+  flatShading?: boolean;
+  normalMap?: Texture | null;
+  roughnessMap?: Texture | null;
+  metalnessMap?: Texture | null;
+  emissiveMap?: Texture | null;
+};
+
 type MaterialBaseline = {
   wireframe: boolean;
   flatShading: boolean;
@@ -33,7 +44,14 @@ function asStandardLike(material: Material): StandardLikeMaterial | null {
   return null;
 }
 
-function ensureBaseline(material: Material): MaterialBaseline {
+function asStyledMaterial(material: Material): StyledMaterial | null {
+  if ('wireframe' in material && 'color' in material && 'map' in material) {
+    return material as StyledMaterial;
+  }
+  return null;
+}
+
+function ensureBaseline(material: StyledMaterial): MaterialBaseline {
   const existing = material.userData.viperRenderBaseline as MaterialBaseline | undefined;
   const std = asStandardLike(material);
   if (existing) {
@@ -42,28 +60,35 @@ function ensureBaseline(material: Material): MaterialBaseline {
   }
 
   const baseline: MaterialBaseline = {
-    wireframe: std?.wireframe ?? false,
-    flatShading: std && 'flatShading' in std ? Boolean((std as unknown as { flatShading: boolean }).flatShading) : false,
-    color: std?.color ? std.color.getHex() : 0xffffff,
-    map: std?.map ?? null,
-    normalMap: std && 'normalMap' in std ? (std as unknown as { normalMap: Texture | null }).normalMap : null,
-    roughnessMap: std && 'roughnessMap' in std ? (std as unknown as { roughnessMap: Texture | null }).roughnessMap : null,
-    metalnessMap: std && 'metalnessMap' in std ? (std as unknown as { metalnessMap: Texture | null }).metalnessMap : null,
-    emissiveMap: std && 'emissiveMap' in std ? (std as unknown as { emissiveMap: Texture | null }).emissiveMap : null,
+    wireframe: std?.wireframe ?? material.wireframe,
+    flatShading: std && 'flatShading' in std
+      ? Boolean((std as unknown as { flatShading: boolean }).flatShading)
+      : material.flatShading ?? false,
+    color: std?.color ? std.color.getHex() : material.color.getHex(),
+    map: std?.map ?? material.map,
+    normalMap: std && 'normalMap' in std
+      ? (std as unknown as { normalMap: Texture | null }).normalMap
+      : material.normalMap ?? null,
+    roughnessMap: std && 'roughnessMap' in std
+      ? (std as unknown as { roughnessMap: Texture | null }).roughnessMap
+      : material.roughnessMap ?? null,
+    metalnessMap: std && 'metalnessMap' in std
+      ? (std as unknown as { metalnessMap: Texture | null }).metalnessMap
+      : material.metalnessMap ?? null,
+    emissiveMap: std && 'emissiveMap' in std
+      ? (std as unknown as { emissiveMap: Texture | null }).emissiveMap
+      : material.emissiveMap ?? null,
   };
   material.userData.viperRenderBaseline = baseline;
   return baseline;
 }
 
-function restoreMaps(material: Material, baseline: MaterialBaseline): void {
-  const std = asStandardLike(material);
-  if (!std) return;
-
-  std.map = baseline.map;
-  if ('normalMap' in std) (std as unknown as { normalMap: Texture | null }).normalMap = baseline.normalMap;
-  if ('roughnessMap' in std) (std as unknown as { roughnessMap: Texture | null }).roughnessMap = baseline.roughnessMap;
-  if ('metalnessMap' in std) (std as unknown as { metalnessMap: Texture | null }).metalnessMap = baseline.metalnessMap;
-  if ('emissiveMap' in std) (std as unknown as { emissiveMap: Texture | null }).emissiveMap = baseline.emissiveMap;
+function restoreMaps(material: StyledMaterial, baseline: MaterialBaseline): void {
+  material.map = baseline.map;
+  if ('normalMap' in material) material.normalMap = baseline.normalMap;
+  if ('roughnessMap' in material) material.roughnessMap = baseline.roughnessMap;
+  if ('metalnessMap' in material) material.metalnessMap = baseline.metalnessMap;
+  if ('emissiveMap' in material) material.emissiveMap = baseline.emissiveMap;
 }
 
 export function applyViewportRenderStyle(
@@ -74,7 +99,9 @@ export function applyViewportRenderStyle(
   const mode = normalizeShadingMode(modeInput);
   const displayTextures = options.displayTextures !== false;
 
-  for (const material of handle.materials) {
+  for (const rawMaterial of handle.materials) {
+    const material = asStyledMaterial(rawMaterial);
+    if (!material) continue;
     const baseline = ensureBaseline(material);
     const std = asStandardLike(material);
 
@@ -92,11 +119,17 @@ export function applyViewportRenderStyle(
       restoreMaps(material, baseline);
     }
 
-    // Studio preview is a lit asset view, not a topology-debug view. Preserve
-    // the material/face shading authored by the user so curved assets read
-    // smoothly while modelling.
+    // Preserve authored face shading in every preview. Game mode is an engine
+    // look (overlays off), not a forced-flat override — artists who want flat
+    // set it on the material. Skyboxes stay smooth so the dome does not facet.
     if (std && 'flatShading' in std) {
-      (std as unknown as { flatShading: boolean }).flatShading = baseline.flatShading;
+      const isSky = handle.mesh.name.toLowerCase().includes('sky');
+      (std as unknown as { flatShading: boolean }).flatShading = isSky
+        ? false
+        : baseline.flatShading;
+    } else if ('flatShading' in material) {
+      const isSky = handle.mesh.name.toLowerCase().includes('sky');
+      material.flatShading = isSky ? false : baseline.flatShading;
     }
 
     material.needsUpdate = true;

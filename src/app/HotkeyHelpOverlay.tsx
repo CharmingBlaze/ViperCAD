@@ -1,16 +1,20 @@
-type Props = {
+type HotkeyHelpOverlayProps = {
   open: boolean;
   onClose: () => void;
 };
 
-const MODEL_KEYS = [
+const MODEL_KEYS: ReadonlyArray<readonly [string, string]> = [
   ['G / R / S', 'Move / Rotate / Scale'],
   ['Ctrl', 'Hold to snap G/R/S (increment, angle, vertices)'],
   ['1 / 2 / 3', 'Vertex / Edge / Face mode'],
   ['Ctrl+= / Ctrl+-', 'Grow / shrink component selection'],
   ['Ctrl+L', 'Select connected components'],
   ['. / ,', 'Cycle orientation / pivot'],
+  ['A', 'Select / Deselect all (current mode)'],
+  ['Alt+A', 'Deselect all'],
+  ['Ctrl+A', 'Select all'],
   ['E', 'Extrude selection'],
+  ['P', 'Push/Pull · click face · move · click finish'],
   ['I', 'Inset faces'],
   ['K', 'Knife · click start/end · Enter confirm'],
   ['Ctrl+B', 'Bevel edges'],
@@ -35,9 +39,9 @@ const MODEL_KEYS = [
   ['MMB', 'Orbit · Shift pan · Ctrl zoom (ortho pans)'],
   ['LMB click', 'Select · tools · gizmo'],
   ['?', 'Toggle this help'],
-] as const;
+];
 
-const UV_KEYS = [
+const UV_KEYS: ReadonlyArray<readonly [string, string]> = [
   ['Tab', 'Hide 3D view / restore 3D | UV split'],
   ['N', 'Hide / show the UV inspector'],
   ['3D · LMB drag', 'Orbit · click picks a face'],
@@ -108,9 +112,9 @@ const ANIMATE_KEYS = [
   ['RMB drag', 'Pan the view'],
   ['F / Home', 'Frame selection / frame all'],
   ['?', 'Toggle this help'],
-] as const;
+];
 
-export function HotkeyHelpOverlay({ open, onClose }: Props) {
+export function HotkeyHelpOverlay({ open, onClose }: HotkeyHelpOverlayProps) {
   if (!open) return null;
   return (
     <div className="app-modal-backdrop" role="presentation" onClick={onClose}>
@@ -131,7 +135,7 @@ export function HotkeyHelpOverlay({ open, onClose }: Props) {
             <h3>Model</h3>
             <dl className="hotkey-list">
               {MODEL_KEYS.map(([key, label]) => (
-                <div key={key}>
+                <div key={`${key}-${label}`}>
                   <dt>{key}</dt>
                   <dd>{label}</dd>
                 </div>
@@ -142,7 +146,7 @@ export function HotkeyHelpOverlay({ open, onClose }: Props) {
             <h3>UV / Pixel</h3>
             <dl className="hotkey-list">
               {UV_KEYS.map(([key, label]) => (
-                <div key={key}>
+                <div key={`${key}-${label}`}>
                   <dt>{key}</dt>
                   <dd>{label}</dd>
                 </div>

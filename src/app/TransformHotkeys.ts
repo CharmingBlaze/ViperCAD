@@ -1,3 +1,4 @@
+import { beginInteractivePushPull } from '@/app/PushPullHotkey';
 import {
   handleBlenderControlKey,
   type BlenderControlContext,
@@ -5,6 +6,7 @@ import {
 } from '@/app/blender/BlenderControlEngine';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import type { PointerSample } from '@/core/transform/TransformSystem';
+import { isTypingTarget } from '@/workspace/InputRouter';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';
 import type { ViewId } from '@/workspace/types';
 
@@ -12,6 +14,7 @@ export type { CameraAxes };
 
 /**
  * Modelling keymap entry. All Blender modal operators live in BlenderControlEngine.
+ * SketchUp Push/Pull stays available when a face selection is active (P).
  */
 export function handleTransformHotkey(
   e: KeyboardEvent,
@@ -20,6 +23,17 @@ export function handleTransformHotkey(
   getCameraAxes: (viewId: ViewId) => CameraAxes | null,
   getPointerSample?: (viewId: ViewId) => PointerSample | null,
 ): boolean {
+  if (isTypingTarget(e.target)) return false;
+  if (workspace.input.owner === 'divider') return false;
+
+  const key = e.key;
+  if ((key === 'p' || key === 'P') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+    if (session.selection.state.mode === 'face' && session.selection.state.selectedFaceIds.size > 0) {
+      e.preventDefault();
+      return beginInteractivePushPull(session, workspace);
+    }
+  }
+
   const ctx: BlenderControlContext = {
     session,
     workspace,

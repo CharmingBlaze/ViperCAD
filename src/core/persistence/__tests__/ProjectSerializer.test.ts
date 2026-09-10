@@ -96,4 +96,22 @@ describe('ProjectSerializer migrations', () => {
     encoded.checksum = '00000000';
     expect(() => deserializeProject(JSON.stringify(encoded))).toThrow(/integrity check/);
   });
+
+  it('serializes and deserializes level lighting settings and presets', () => {
+    const doc = createEmptyDocument();
+    (doc.settings as Record<string, unknown>).lighting = {
+      sunEnabled: true,
+      sunColor: '#ff0000',
+      sunAzimuth: 180,
+      sunElevation: 45,
+      fogEnabled: true,
+      preset: 'sunset',
+    };
+    const serialized = serializeProject(doc, 'test');
+    const deserialized = deserializeProject(serialized);
+    const lighting = (deserialized.settings as Record<string, unknown>).lighting as Record<string, unknown>;
+    expect(lighting).toBeDefined();
+    expect(lighting.sunColor).toBe('#ff0000');
+    expect(lighting.preset).toBe('sunset');
+  });
 });

@@ -271,7 +271,7 @@ function pathOutputLabel(output: PathSettingsValue['pathOutput']): string {
   return output === 'cards' ? '2D Cards' : output === 'object-array' ? 'Object Array' : output === 'profile-sweep' ? 'Profile Sweep' : `${output[0]!.toUpperCase()}${output.slice(1)}`;
 }
 
-function CapButtons({
+export function CapButtons({
   label,
   selected,
   onChange,

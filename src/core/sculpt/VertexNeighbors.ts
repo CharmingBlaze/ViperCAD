@@ -19,6 +19,16 @@ export function getCachedVertexNeighborMap(mesh: EditableMesh): Map<VertexId, Ve
   return map;
 }
 
+export function pruneVertexNeighborMaps(liveMeshIds: Set<string>): void {
+  for (const id of neighborMapCache.keys()) {
+    if (!liveMeshIds.has(id)) neighborMapCache.delete(id);
+  }
+}
+
+export function clearVertexNeighborMaps(): void {
+  neighborMapCache.clear();
+}
+
 export function buildVertexNeighborMap(mesh: EditableMesh): Map<VertexId, VertexId[]> {
   const neighbors = new Map<VertexId, Set<VertexId>>();
   for (const vertex of mesh.vertices.values()) {

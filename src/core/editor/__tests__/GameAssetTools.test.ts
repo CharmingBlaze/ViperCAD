@@ -6,6 +6,7 @@ import {
   generateLightmapUv,
   createMirroredInstance,
   createRadialInstances,
+  createRigMarker,
   centreObjectOrigin,
   groupObjects,
   hasLightmapUv,
@@ -55,6 +56,24 @@ describe('game asset tools', () => {
     const render = editableMeshToRenderData(mesh);
     expect(render.geometry.getAttribute('uv1')).toBeDefined();
     expect(render.geometry.getAttribute('uv1').count).toBe(render.geometry.getAttribute('position').count);
+  });
+
+  it('creates exportable joint and socket markers as children', () => {
+    const document = createEmptyDocument();
+    const source = commitMeshObject(document, buildBox({ width: 1, height: 2, depth: 1 }));
+    const jointId = createRigMarker(document, source.objectId, 'joint');
+    const socketId = createRigMarker(document, jointId, 'socket', 'Hand Item');
+    const joint = document.objects.get(jointId)!;
+    const socket = document.objects.get(socketId)!;
+
+    expect(joint.kind).toBe('empty');
+    expect(joint.parentId).toBe(source.objectId);
+    expect(joint.metadata.gameRole).toBe('joint');
+    expect(socket.parentId).toBe(jointId);
+    expect(socket.metadata).toMatchObject({
+      gameRole: 'socket',
+      exportTransform: 'true',
+    });
   });
 
   it('groups selected objects into an explicit group hierarchy', () => {

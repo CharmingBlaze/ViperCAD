@@ -20,7 +20,7 @@ export function PlaceModelPanel({ session, onRefresh, onPlaced, compact = false 
   const editingLevel = session.document.kind === 'level';
   const placeable = getPlaceableModels(session);
   const emptyModels = session.project.modelDocumentIds.filter(
-    (id) => !modelHasPlaceableGeometry(getViperDocument(session.project, id)),
+    (id) => !modelHasPlaceableGeometry(getViperDocument(session.project, id), session.project),
   );
 
   const goToLevel = () => {

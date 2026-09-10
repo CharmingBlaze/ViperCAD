@@ -85,6 +85,8 @@ export type TextureWorkspaceState = {
   showUvGrid: boolean;
   /** Snap UV translations to texel boundaries without holding Shift. */
   uvSnapToPixels: boolean;
+  showUvCheckerboard: boolean;
+  pixelGridSnap: boolean;
   showPixelGrid: boolean;
   pixelTool: 'pencil' | 'eraser' | 'eyedropper' | 'fill' | 'line' | 'rectangle' | 'ellipse' | 'replace';
   activePaletteId: string;
@@ -179,6 +181,8 @@ export function createDefaultTextureWorkspace(): TextureWorkspaceState {
     showUvOverlay: true,
     showUvGrid: true,
     uvSnapToPixels: false,
+    showUvCheckerboard: false,
+    pixelGridSnap: false,
     showPixelGrid: true,
     pixelTool: 'pencil',
     activePaletteId: 'pico8',

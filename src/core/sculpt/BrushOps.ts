@@ -39,12 +39,27 @@ export function collectBrushVertices(
   center: Vec3,
   radius: number,
   falloff: SculptFalloff,
+  options: {
+    hardness?: number;
+    frontFacesOnly?: boolean;
+    surfaceNormal?: Vec3;
+  } = {},
 ): BrushAffected[] {
   const index = getOrCreateSpatialIndex(mesh);
   const near = index.querySphere(mesh, center, radius);
   const affected: BrushAffected[] = [];
+  const hardness = Math.max(0, Math.min(0.95, options.hardness ?? 0));
+  const vertexNormals = options.frontFacesOnly ? computeVertexNormals(mesh) : null;
   for (const item of near) {
-    const weight = falloffWeight(item.distance / radius, falloff);
+    if (vertexNormals && options.surfaceNormal) {
+      const normal = vertexNormals.get(item.id);
+      if (normal && dotVec3(normal, options.surfaceNormal) < -0.05) continue;
+    }
+    const normalizedDistance = item.distance / Math.max(1e-8, radius);
+    const shapedDistance = normalizedDistance <= hardness
+      ? 0
+      : (normalizedDistance - hardness) / Math.max(1e-6, 1 - hardness);
+    const weight = falloffWeight(shapedDistance, falloff);
     if (weight > 0) {
       affected.push({
         id: item.id,
@@ -64,6 +79,12 @@ export type BrushApplyOptions = {
   strokeBase?: Map<VertexId, Vec3>;
   contactNormal?: Vec3;
   mask?: Map<VertexId, number>;
+  hardness?: number;
+  pressure?: number;
+  buildUp?: number;
+  frontFacesOnly?: boolean;
+  surfaceNormal?: Vec3;
+  preserveVolume?: number;
 };
 
 export function applyMeshBrush(
@@ -76,16 +97,22 @@ export function applyMeshBrush(
   invert: boolean,
   options: BrushApplyOptions = {},
 ): void {
-  const affected = collectBrushVertices(mesh, center, radius, falloff);
+  const affected = collectBrushVertices(mesh, center, radius, falloff, {
+    hardness: options.hardness,
+    frontFacesOnly: options.frontFacesOnly,
+    surfaceNormal: options.surfaceNormal,
+  });
   if (!affected.length) return;
   const sign = invert ? -1 : 1;
+  const pressure = Math.max(0.05, Math.min(1, options.pressure ?? 1));
+  const buildUp = Math.max(0.05, Math.min(3, options.buildUp ?? 1));
 
   // Masking brushes modify vertex mask weights and return without modifying geometry
   if (mode === 'mask' || mode === 'unmask') {
     if (!options.mask) return;
     for (const item of affected) {
       const current = options.mask.get(item.id) ?? 0;
-      const delta = (mode === 'mask' ? 1 : -1) * strength * item.weight * sign;
+      const delta = (mode === 'mask' ? 1 : -1) * strength * item.weight * sign * pressure;
       options.mask.set(item.id, Math.max(0, Math.min(1, current + delta)));
     }
     return;
@@ -113,7 +140,7 @@ export function applyMeshBrush(
     if (maskVal >= 1) continue;
     const vertex = mesh.vertices.get(item.id)!;
     const effWeight = item.weight * (1 - maskVal);
-    const amount = strength * effWeight * sign;
+    const amount = strength * effWeight * sign * pressure * buildUp;
     const normal = vertexNormals.get(item.id) ?? contactNormal;
 
     if (mode === 'draw') {
@@ -136,9 +163,13 @@ export function applyMeshBrush(
     } else if (mode === 'smooth') {
       const average = neighborAverage(mesh, item.id, neighborMap);
       if (!average) continue;
+      const delta = subVec3(average, vertex.position);
+      const preserveVolume = Math.max(0, Math.min(1, options.preserveVolume ?? 0));
+      const normalOffset = dotVec3(delta, normal);
+      const relaxed = subVec3(delta, scaleVec3(normal, normalOffset * preserveVolume));
       vertex.position = addVec3(
         vertex.position,
-        scaleVec3(subVec3(average, vertex.position), Math.min(1, Math.abs(amount))),
+        scaleVec3(relaxed, Math.min(1, Math.abs(amount))),
       );
     } else if (mode === 'flatten') {
       const planePoint = options.flattenPlanePoint ?? center;

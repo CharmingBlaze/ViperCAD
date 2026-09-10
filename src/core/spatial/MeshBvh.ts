@@ -81,7 +81,34 @@ function buildNode(triangles: Triangle[]): Node | null {
   triangles.sort((a, b) => a.centre[axis] - b.centre[axis]); const mid = Math.floor(triangles.length / 2);
   return { bounds, left: buildNode(triangles.slice(0, mid))!, right: buildNode(triangles.slice(mid))! };
 }
-function boundsOf(points: Vec3[]): Bounds { return { min: { x: Math.min(...points.map((p) => p.x)), y: Math.min(...points.map((p) => p.y)), z: Math.min(...points.map((p) => p.z)) }, max: { x: Math.max(...points.map((p) => p.x)), y: Math.max(...points.map((p) => p.y)), z: Math.max(...points.map((p) => p.z)) } }; }
-function mergeBounds(bounds: Bounds[]): Bounds { return { min: { x: Math.min(...bounds.map((b) => b.min.x)), y: Math.min(...bounds.map((b) => b.min.y)), z: Math.min(...bounds.map((b) => b.min.z)) }, max: { x: Math.max(...bounds.map((b) => b.max.x)), y: Math.max(...bounds.map((b) => b.max.y)), z: Math.max(...bounds.map((b) => b.max.z)) } }; }
+function boundsOf(points: Vec3[]): Bounds {
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i]!;
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+    if (p.z < minZ) minZ = p.z;
+    if (p.z > maxZ) maxZ = p.z;
+  }
+  return { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } };
+}
+
+function mergeBounds(bounds: Bounds[]): Bounds {
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < bounds.length; i++) {
+    const b = bounds[i]!;
+    if (b.min.x < minX) minX = b.min.x;
+    if (b.max.x > maxX) maxX = b.max.x;
+    if (b.min.y < minY) minY = b.min.y;
+    if (b.max.y > maxY) maxY = b.max.y;
+    if (b.min.z < minZ) minZ = b.min.z;
+    if (b.max.z > maxZ) maxZ = b.max.z;
+  }
+  return { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } };
+}
 function rayBounds(o: Vec3, d: Vec3, b: Bounds, max: number) { let near = 0, far = max; for (const axis of ['x', 'y', 'z'] as const) { const inv = Math.abs(d[axis]) < 1e-12 ? Infinity : 1 / d[axis]; let t0 = (b.min[axis] - o[axis]) * inv, t1 = (b.max[axis] - o[axis]) * inv; if (t0 > t1) [t0, t1] = [t1, t0]; near = Math.max(near, t0); far = Math.min(far, t1); if (far < near) return false; } return true; }
 function rayTriangle(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3): Omit<MeshRayHit, 'faceId'> | null { const e1 = subVec3(b, a), e2 = subVec3(c, a), p = crossVec3(d, e2), det = dotVec3(e1, p); if (Math.abs(det) < 1e-12) return null; const inv = 1 / det, tvec = subVec3(o, a), u = dotVec3(tvec, p) * inv; if (u < 0 || u > 1) return null; const q = crossVec3(tvec, e1), v = dotVec3(d, q) * inv; if (v < 0 || u + v > 1) return null; const distance = dotVec3(e2, q) * inv; if (distance < 0) return null; return { distance, position: { x: o.x + d.x * distance, y: o.y + d.y * distance, z: o.z + d.z * distance }, barycentric: { x: 1 - u - v, y: u, z: v } }; }

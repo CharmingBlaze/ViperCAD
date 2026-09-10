@@ -282,6 +282,58 @@ export function weldVerticesByDistance(
   return { ok: true, value: change, change, warnings: change.warnings };
 }
 
+/**
+ * Smooth a selected patch without changing its topology. Boundary vertices stay
+ * on the silhouette by default, making this useful for character blockouts.
+ */
+export function relaxVertices(
+  mesh: EditableMesh,
+  vertexIds: VertexId[],
+  factor = 0.35,
+  iterations = 1,
+  preserveBoundary = true,
+): GeometryOpResult<TopologyChangeResult> {
+  const change = emptyTopologyChangeResult();
+  const selected = [...new Set(vertexIds)].filter((id) => mesh.vertices.has(id));
+  if (!selected.length) return failure(change, 'EMPTY_SELECTION', 'Select vertices to relax', []);
+  const amount = Math.max(0, Math.min(1, factor));
+  const passes = Math.max(1, Math.min(20, Math.round(iterations)));
+  const neighbours = new Map<VertexId, Set<VertexId>>();
+  const boundaryVertices = new Set<VertexId>();
+  for (const edge of mesh.edges.values()) {
+    const pair = getEdgeVertices(mesh, edge.id);
+    if (!pair) continue;
+    const [a, b] = pair;
+    if (!neighbours.has(a)) neighbours.set(a, new Set());
+    if (!neighbours.has(b)) neighbours.set(b, new Set());
+    neighbours.get(a)!.add(b);
+    neighbours.get(b)!.add(a);
+    if (edge.halfEdgeBId == null) {
+      boundaryVertices.add(a);
+      boundaryVertices.add(b);
+    }
+  }
+  for (let pass = 0; pass < passes; pass++) {
+    const next = new Map<VertexId, Vec3>();
+    for (const id of selected) {
+      if (preserveBoundary && boundaryVertices.has(id)) continue;
+      const adjacent = [...(neighbours.get(id) ?? [])];
+      if (adjacent.length < 2) continue;
+      const average = adjacent.reduce(
+        (sum, neighbourId) => {
+          const p = mesh.vertices.get(neighbourId)!.position;
+          return { x: sum.x + p.x / adjacent.length, y: sum.y + p.y / adjacent.length, z: sum.z + p.z / adjacent.length };
+        },
+        { x: 0, y: 0, z: 0 },
+      );
+      next.set(id, lerpVec3(mesh.vertices.get(id)!.position, average, amount));
+    }
+    for (const [id, position] of next) mesh.vertices.get(id)!.position = position;
+  }
+  change.recommendedSelection = { mode: 'vertex', vertexIds: selected };
+  return { ok: true, value: change, change, warnings: [] };
+}
+
 function orderedEdgeLoops(mesh: EditableMesh, edgeIds: EdgeId[]): VertexId[][] | null {
   const remaining = new Set(edgeIds);
   const loops: VertexId[][] = [];

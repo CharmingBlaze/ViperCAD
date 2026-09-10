@@ -19,7 +19,35 @@ export type SubdivisionModifierSpec = {
   useCrease: boolean;
 };
 
-export type ModifierSpec = MirrorModifierSpec | SubdivisionModifierSpec;
+export type SolidifyModifierSpec = {
+  kind: 'solidify';
+  enabled: boolean;
+  thickness: number;
+  offset: number;
+};
+
+export type BevelModifierSpec = {
+  kind: 'bevel';
+  enabled: boolean;
+  width: number;
+  segments: number;
+  profile: number;
+};
+
+export type ArrayModifierSpec = {
+  kind: 'array';
+  enabled: boolean;
+  axis: MirrorAxis;
+  count: number;
+  spacing: number;
+};
+
+export type ModifierSpec =
+  | MirrorModifierSpec
+  | SubdivisionModifierSpec
+  | SolidifyModifierSpec
+  | BevelModifierSpec
+  | ArrayModifierSpec;
 
 export type ModifierStack = {
   version: 1;
@@ -45,6 +73,18 @@ export function createDefaultSubdivisionModifier(levels = 2): SubdivisionModifie
     levels: Math.max(1, Math.min(6, Math.round(levels))),
     useCrease: true,
   };
+}
+
+export function createDefaultSolidifyModifier(): SolidifyModifierSpec {
+  return { kind: 'solidify', enabled: true, thickness: 0.1, offset: 0 };
+}
+
+export function createDefaultBevelModifier(): BevelModifierSpec {
+  return { kind: 'bevel', enabled: true, width: 0.05, segments: 1, profile: 0.5 };
+}
+
+export function createDefaultArrayModifier(): ArrayModifierSpec {
+  return { kind: 'array', enabled: true, axis: 'x', count: 3, spacing: 1.25 };
 }
 
 export function createEmptyModifierStack(): ModifierStack {

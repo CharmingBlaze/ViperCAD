@@ -24,7 +24,7 @@ import type { ObjectRenderHandle } from '@/renderer/MeshRenderAdapter';
 import { addVec3 } from '@/core/math/Vec3';
 
 export type CurveControlTarget = {
-  kind: 'anchor' | 'handle-in' | 'handle-out';
+  kind: 'anchor' | 'handle-in' | 'handle-out' | 'scale-start' | 'scale-mid' | 'scale-end';
   index: number;
 };
 
@@ -45,6 +45,7 @@ export class CurveControlOverlay {
   private anchors = makePoints(anchorTexture(), 15);
   private anchorHighlight = makePoints(anchorSelectedTexture(), 18);
   private tangentPoints = makePoints(handleTexture(), 10);
+  private crossSectionPoints = makeColorPoints(0x61f0b5, 12);
   private operation: CurveOperation | null = null;
   private meshBezier = false;
 
@@ -59,6 +60,7 @@ export class CurveControlOverlay {
       this.anchors,
       this.anchorHighlight,
       this.tangentPoints,
+      this.crossSectionPoints,
     );
     this.root.visible = false;
   }
@@ -213,6 +215,31 @@ export class CurveControlOverlay {
       this.handles.visible = false;
       this.tangentPoints.visible = false;
     }
+    const showCrossSections =
+      editNodes &&
+      operation.style === 'segmented-sweep' &&
+      operation.points.length >= 2;
+    if (showCrossSections) {
+      const indices = [
+        0,
+        Math.floor((operation.points.length - 1) / 2),
+        operation.points.length - 1,
+      ];
+      const scales = [operation.startScale, operation.midScale, operation.endScale];
+      setPoints(
+        this.crossSectionPoints.geometry,
+        indices.map((index, scaleIndex) => ({
+          x:
+            operation.points[index]!.x +
+            operation.radius * operation.profileWidth * scales[scaleIndex]!,
+          y: operation.points[index]!.y,
+          z: operation.points[index]!.z,
+        })),
+      );
+      this.crossSectionPoints.visible = true;
+    } else {
+      this.crossSectionPoints.visible = false;
+    }
   }
 
   private hide(): void {
@@ -231,9 +258,20 @@ export class CurveControlOverlay {
     const highlightHit = this.anchorHighlight.visible
       ? raycaster.intersectObject(this.anchorHighlight, false)[0]
       : undefined;
-    const tangentHit = this.tangentPoints.visible
-      ? raycaster.intersectObject(this.tangentPoints, false)[0]
+    const tangentHit =
+      this.operation.curveType === 'bezier' && this.tangentPoints.visible
+        ? raycaster.intersectObject(this.tangentPoints, false)[0]
+        : undefined;
+    const scaleHit = this.crossSectionPoints.visible
+      ? raycaster.intersectObject(this.crossSectionPoints, false)[0]
       : undefined;
+    if (scaleHit && (!anchorHit || scaleHit.distance < anchorHit.distance)) {
+      const index = scaleHit.index ?? 0;
+      return {
+        kind: index === 0 ? 'scale-start' : index === 1 ? 'scale-mid' : 'scale-end',
+        index,
+      };
+    }
     const bestAnchor =
       anchorHit && highlightHit
         ? anchorHit.distance <= highlightHit.distance
@@ -266,6 +304,7 @@ export class CurveControlOverlay {
       this.anchors,
       this.anchorHighlight,
       this.tangentPoints,
+      this.crossSectionPoints,
     ]) {
       object.geometry.dispose();
       disposeMaterial(object);
@@ -286,6 +325,22 @@ function makeSegments(color: number, opacity: number, renderBias: number): LineS
   );
   result.renderOrder = 120 + renderBias;
   result.raycast = () => {};
+  return result;
+}
+
+function makeColorPoints(color: number, size: number): Points {
+  const result = new Points(
+    new BufferGeometry(),
+    new PointsMaterial({
+      color: new Color(color),
+      size,
+      sizeAttenuation: false,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  );
+  result.renderOrder = 124;
   return result;
 }
 

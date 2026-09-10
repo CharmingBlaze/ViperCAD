@@ -8,6 +8,9 @@ import { catmullClarkSubdivide, catmullClarkSubdivideOnce } from '@/core/modifie
 import {
   createDefaultMirrorModifier,
   createDefaultSubdivisionModifier,
+  createDefaultArrayModifier,
+  createDefaultBevelModifier,
+  createDefaultSolidifyModifier,
   createEmptyModifierStack,
 } from '@/core/modifiers/types';
 
@@ -54,6 +57,19 @@ describe('modifier stack evaluation', () => {
     stack.modifiers.push(createDefaultSubdivisionModifier(1));
     const result = evaluateModifierStack(cube, stack);
     expect(result.faces.size).toBeGreaterThan(cube.faces.size);
+    expect(validateMeshFull(result).ok).toBe(true);
+  });
+
+  it('evaluates solidify, bevel, and array modifiers without changing the source', () => {
+    const source = buildPlane({ width: 1, depth: 1 });
+    const stack = createEmptyModifierStack();
+    stack.modifiers.push(createDefaultSolidifyModifier());
+    stack.modifiers.push({ ...createDefaultBevelModifier(), width: 0.02 });
+    stack.modifiers.push({ ...createDefaultArrayModifier(), count: 3, spacing: 2 });
+    const result = evaluateModifierStack(source, stack);
+
+    expect(source.faces.size).toBe(1);
+    expect(result.faces.size).toBeGreaterThan(source.faces.size * 3);
     expect(validateMeshFull(result).ok).toBe(true);
   });
 });

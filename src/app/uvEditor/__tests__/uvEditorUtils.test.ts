@@ -18,6 +18,6 @@ describe('zoomCameraAt', () => {
     const cam = { panX: 0, panY: 0, zoom: 1 };
     expect(zoomCameraAt(cam, 10, 10, 0.97).zoom).toBeCloseTo(0.97);
     expect(zoomCameraAt(cam, 10, 10, 0.0001).zoom).toBe(UV_ZOOM_MIN);
-    expect(zoomCameraAt({ ...cam, zoom: 30 }, 10, 10, 8).zoom).toBe(UV_ZOOM_MAX);
+    expect(zoomCameraAt({ ...cam, zoom: 200 }, 10, 10, 8).zoom).toBe(UV_ZOOM_MAX);
   });
 });

@@ -31,13 +31,19 @@ export function createProjectDocument(
 export function renameProjectDocument(
   session: EditorSession,
   documentId: DocumentId,
+  name: string,
   onRefresh: () => void,
-): void {
+): boolean {
+  const next = name.trim();
+  if (!next) return false;
   const doc = getViperDocument(session.project, documentId);
-  const next = window.prompt('Rename', doc.name);
-  if (!next?.trim()) return;
-  session.projectEditor.renameDocument(documentId, next.trim());
+  if (doc.name === next) {
+    onRefresh();
+    return true;
+  }
+  session.projectEditor.renameDocument(documentId, next);
   onRefresh();
+  return true;
 }
 
 export function deleteProjectDocument(

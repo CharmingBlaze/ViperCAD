@@ -34,7 +34,7 @@ export function buildSoftInflateDome(options: SoftInflateDomeOptions): EditableM
   if (n < 3) return new MeshBuilder(options.name ?? 'Soft Inflate', false).build();
 
   const { u: cx, v: cy } = polygonCentroid(polygon);
-  const depth = Math.max(4, options.depth);
+  const depth = Math.max(1e-4, options.depth);
   const sliceCount = Math.max(4, options.rings ?? 6);
   const inflation = Math.max(0, Math.min(1, options.inflation ?? 0.65));
   const capScale = 0.34 + (0.08 - 0.34) * inflation;
