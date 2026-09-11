@@ -6,6 +6,7 @@ import {
   type MeshBasicMaterial,
   type MeshPhysicalMaterial,
   type MeshStandardMaterial,
+  type Side,
   type Texture,
 } from 'three';
 import { normalizeShadingMode, type ShadingMode } from '@/workspace/types';
@@ -40,7 +41,7 @@ type MaterialBaseline = {
   opacity: number;
   transparent: boolean;
   depthWrite: boolean;
-  side: number;
+  side: Side;
 };
 
 /** Blender Alt+Z solid X-Ray: see-through faces, back geometry still pickable. */
@@ -101,7 +102,7 @@ function ensureBaseline(material: StyledMaterial): MaterialBaseline {
       (std as { depthWrite?: boolean } | null)?.depthWrite ??
       material.depthWrite ??
       true,
-    side: readNumber((std as { side?: number } | null)?.side ?? material.side, FrontSide),
+    side: (readNumber((std as { side?: number } | null)?.side ?? material.side, FrontSide) as Side),
   };
   material.userData.viperRenderBaseline = baseline;
   return baseline;

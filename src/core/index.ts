@@ -41,3 +41,5 @@ export * from '@/core/image/PixelEditor';
 export * from '@/core/derived/DependencyGraph';
 export * from '@/core/spatial/MeshBvh';
 export * from '@/core/spatial/SnapSpatialIndex';
+export * from '@/core/solid/ManifoldBridge';
+export * from '@/core/solid/BooleanOperations';

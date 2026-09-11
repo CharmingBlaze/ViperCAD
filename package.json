@@ -22,6 +22,7 @@
   "dependencies": {
     "@voluma/three-transform-gizmo": "^1.0.0",
     "cad-camera-controls": "^0.2.0",
+    "manifold-3d": "^3.5.3",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "three": "^0.185.1",

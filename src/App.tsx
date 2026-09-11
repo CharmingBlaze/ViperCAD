@@ -56,6 +56,7 @@ import { renameProjectDocument, deleteProjectDocument } from '@/app/outliner/doc
 import { modelHasPlaceableGeometry } from '@/core/editor/ModelInstances';
 import { getViperDocument } from '@/core/document/ViperProject';
 import { isGroupObject } from '@/core/editor/Hierarchy';
+import { faceCornerIds } from '@/core/mesh/EditableMesh';
 import { ensurePaintableUvs } from '@/core/uv/EnsurePaintableUvs';
 import { commitCopySelection, commitPasteClipboard } from '@/core/editor/Clipboard';
 import {
@@ -1006,7 +1007,7 @@ export default function App() {
           for (const fId of faceIds) {
             const face = mesh.faces.get(fId);
             if (!face) continue;
-            for (const cId of face.cornerIds) {
+            for (const cId of faceCornerIds(mesh, fId)) {
               const corner = mesh.faceCorners.get(cId);
               if (!corner || !mesh.defaultUvLayerId) continue;
               const uv = corner.uvs.get(mesh.defaultUvLayerId);
@@ -1521,6 +1522,44 @@ export default function App() {
     pushToast(`Snapped ${targetIds.length} object(s) to ground level (Y=0)`, 'success');
   };
 
+  const handleModelSolidBoolean = async (op: 'difference' | 'union' | 'intersection', keepCutters: boolean) => {
+    const selectedIds = session.selection.state.selectedObjectIds.size > 0
+      ? [...session.selection.state.selectedObjectIds]
+      : session.selection.state.activeObjectId
+        ? [session.selection.state.activeObjectId]
+        : [];
+
+    if (selectedIds.length < 2) {
+      pushToast('Select at least 2 objects for boolean operations', 'error');
+      return;
+    }
+
+    const activeId = session.selection.state.activeObjectId || selectedIds[0]!;
+    const targetId = activeId;
+    const cutterIds = selectedIds.filter((id) => id !== targetId);
+
+    const { applySolidBoolean } = await import('@/core/solid/BooleanOperations');
+    const result = await applySolidBoolean(
+      session.document,
+      session.history,
+      session.selection,
+      targetId,
+      cutterIds,
+      op,
+      { keepCutters },
+    );
+
+    if (result.ok) {
+      session.requestRedraw();
+      viewportEngine.invalidate();
+      refresh();
+      const opLabel = op === 'difference' ? 'Cut' : op === 'union' ? 'Union' : 'Intersection';
+      pushToast(`Solid ${opLabel} applied successfully`, 'success');
+    } else {
+      pushToast(result.message || 'Solid boolean operation failed', 'error');
+    }
+  };
+
   const menus: DesktopMenuDefinition[] = [
     {
       label: 'File',
@@ -1740,7 +1779,8 @@ export default function App() {
           kind: 'command',
           label: 'Delete',
           action: () => {
-            void deleteProjectDocument(session, session.documentId, session.document.kind, refresh);
+            const docKind = session.document.kind === 'level' ? 'level' : 'model';
+            void deleteProjectDocument(session, session.documentId, docKind, refresh);
           },
         },
       ],
@@ -2723,6 +2763,7 @@ export default function App() {
           onRotateDegrees={handleModelRotateDegrees}
           onCenterAxis={handleModelCenterAxis}
           onSnapToGround={handleModelSnapToGround}
+          onSolidBoolean={handleModelSolidBoolean}
           onClose={() => setModelQuickToolsOpen(false)}
         />
       )}

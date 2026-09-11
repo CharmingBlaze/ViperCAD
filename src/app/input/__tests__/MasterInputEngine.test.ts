@@ -61,6 +61,8 @@ function setupTest() {
     openProject: vi.fn(),
     hotkeysOpen: false,
     zenMode: false,
+    modelQuickToolsOpen: false,
+    setModelQuickToolsOpen: vi.fn(),
   };
 
   masterInputEngine.setContext({

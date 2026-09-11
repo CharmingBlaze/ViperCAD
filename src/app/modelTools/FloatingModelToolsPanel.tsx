@@ -16,6 +16,7 @@ export type FloatingModelToolsPanelProps = {
   onRotateDegrees: (axis: 'x' | 'y' | 'z', degrees: number) => void;
   onCenterAxis: (axis: 'x' | 'y' | 'z') => void;
   onSnapToGround: () => void;
+  onSolidBoolean?: (op: 'difference' | 'union' | 'intersection', keepCutters: boolean) => void;
   onClose: () => void;
 };
 
@@ -33,11 +34,13 @@ export function FloatingModelToolsPanel({
   onRotateDegrees,
   onCenterAxis,
   onSnapToGround,
+  onSolidBoolean,
   onClose,
 }: FloatingModelToolsPanelProps) {
   const [acrossWorld, setAcrossWorld] = useState(false);
   const [customAngle, setCustomAngle] = useState(45);
   const [rotAxis, setRotAxis] = useState<'x' | 'y' | 'z'>('y');
+  const [keepCutters, setKeepCutters] = useState(false);
 
   const selectionLabel = isEditMode
     ? selectedFaceCount > 0
@@ -271,6 +274,63 @@ export function FloatingModelToolsPanel({
             </button>
           </div>
         </div>
+
+        {/* Solid / Boolean Operations (manifold-3d) */}
+        {onSolidBoolean && !isEditMode && (
+          <div className="model-quick-section" style={{ borderTop: '1px solid var(--border-subtle, #333)', paddingTop: '0.5rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
+              <span style={{ fontSize: '0.72rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-muted, #888)' }}>
+                CAD Booleans (Solid)
+              </span>
+              <label style={{ fontSize: '0.72rem', display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer', color: 'var(--text-muted, #888)' }}>
+                <input
+                  type="checkbox"
+                  checked={keepCutters}
+                  onChange={(e) => setKeepCutters(e.target.checked)}
+                />
+                Keep Cutters
+              </label>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.35rem' }}>
+              <button
+                type="button"
+                className="tool primary"
+                disabled={selectedObjectCount < 2}
+                onClick={() => onSolidBoolean('difference', keepCutters)}
+                title="Subtract secondary object(s) from target object (drill holes / carving)"
+                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontWeight: 500 }}
+              >
+                <BlenderIcon name="mod_boolean" size={14} />
+                Cut
+              </button>
+              <button
+                type="button"
+                className="tool"
+                disabled={selectedObjectCount < 2}
+                onClick={() => onSolidBoolean('union', keepCutters)}
+                title="Fuse objects together into a single watertight solid"
+                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontWeight: 500 }}
+              >
+                Union
+              </button>
+              <button
+                type="button"
+                className="tool"
+                disabled={selectedObjectCount < 2}
+                onClick={() => onSolidBoolean('intersection', keepCutters)}
+                title="Keep only the intersecting volume"
+                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontWeight: 500 }}
+              >
+                Intersect
+              </button>
+            </div>
+            {selectedObjectCount < 2 && (
+              <div style={{ fontSize: '0.68rem', color: 'var(--text-muted, #777)', marginTop: '0.25rem', fontStyle: 'italic' }}>
+                Select 2 or more objects to use Booleans (active object is target).
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </FloatingPanel>
   );

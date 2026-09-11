@@ -157,7 +157,7 @@ export function duplicateAndMirrorFaces(
   mesh: EditableMesh,
   faceIds: Iterable<FaceId>,
   axis: MirrorAxis = 'x',
-  tolerance = 0.001,
+  _tolerance = 0.001,
 ): { newFaceIds: FaceId[]; createdVertexCount: number } {
   const ids = [...faceIds];
   if (!ids.length) return { newFaceIds: [], createdVertexCount: 0 };
@@ -166,7 +166,6 @@ export function duplicateAndMirrorFaces(
   const newFaceIds: FaceId[] = [];
   let createdVertexCount = 0;
 
-  // Cache existing or newly created mirrored vertices
   const vertexMap = new Map<VertexId, VertexId>();
 
   const getOrAddMirroredVertex = (srcVertId: VertexId): VertexId => {
@@ -193,8 +192,6 @@ export function duplicateAndMirrorFaces(
     if (srcVertIds.length < 3) continue;
 
     const srcCornerIds = faceCornerIds(mesh, faceId);
-
-    // Get mirrored vertices
     const mirroredVerts = srcVertIds.map(getOrAddMirroredVertex);
 
     // Extract UVs
@@ -204,18 +201,17 @@ export function duplicateAndMirrorFaces(
       return uv ? { x: 1 - uv.x, y: uv.y } : { x: 0, y: 0 };
     });
 
-    // Reversing the vertex loop is essential when mirroring across 1 axis to preserve outward normal
     mirroredVerts.reverse();
     uvs.reverse();
 
-    const newFaceId = addFace(mesh, mirroredVerts, {
+    const added = addFace(mesh, mirroredVerts, {
       uvs,
       materialSlot: face.materialSlot,
       flatShaded: face.flatShaded,
       edgeLookup,
     });
 
-    newFaceIds.push(newFaceId);
+    newFaceIds.push(added.faceId);
   }
 
   if (newFaceIds.length > 0) {
