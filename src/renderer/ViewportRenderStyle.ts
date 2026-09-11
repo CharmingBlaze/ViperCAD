@@ -1,5 +1,7 @@
 import {
   Color,
+  DoubleSide,
+  FrontSide,
   type Material,
   type MeshBasicMaterial,
   type MeshPhysicalMaterial,
@@ -35,7 +37,18 @@ type MaterialBaseline = {
   roughnessMap: Texture | null;
   metalnessMap: Texture | null;
   emissiveMap: Texture | null;
+  opacity: number;
+  transparent: boolean;
+  depthWrite: boolean;
+  side: number;
 };
+
+/** Blender Alt+Z solid X-Ray: see-through faces, back geometry still pickable. */
+export const VIEWPORT_XRAY_OPACITY = 0.28;
+
+function readNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
 
 function asStandardLike(material: Material): StandardLikeMaterial | null {
   if ('wireframe' in material || 'color' in material) {
@@ -56,6 +69,10 @@ function ensureBaseline(material: StyledMaterial): MaterialBaseline {
   const std = asStandardLike(material);
   if (existing) {
     if (std?.map) existing.map = std.map;
+    if (existing.opacity == null) existing.opacity = 1;
+    if (existing.transparent == null) existing.transparent = false;
+    if (existing.depthWrite == null) existing.depthWrite = true;
+    if (existing.side == null) existing.side = FrontSide;
     return existing;
   }
 
@@ -78,6 +95,13 @@ function ensureBaseline(material: StyledMaterial): MaterialBaseline {
     emissiveMap: std && 'emissiveMap' in std
       ? (std as unknown as { emissiveMap: Texture | null }).emissiveMap
       : material.emissiveMap ?? null,
+    opacity: readNumber((std as { opacity?: number } | null)?.opacity ?? material.opacity, 1),
+    transparent: Boolean((std as { transparent?: boolean } | null)?.transparent ?? material.transparent),
+    depthWrite:
+      (std as { depthWrite?: boolean } | null)?.depthWrite ??
+      material.depthWrite ??
+      true,
+    side: readNumber((std as { side?: number } | null)?.side ?? material.side, FrontSide),
   };
   material.userData.viperRenderBaseline = baseline;
   return baseline;
@@ -94,10 +118,12 @@ function restoreMaps(material: StyledMaterial, baseline: MaterialBaseline): void
 export function applyViewportRenderStyle(
   handle: ObjectRenderHandle,
   modeInput: ShadingMode | unknown,
-  options: { displayTextures?: boolean } = {},
+  options: { displayTextures?: boolean; xRay?: boolean } = {},
 ): void {
   const mode = normalizeShadingMode(modeInput);
   const displayTextures = options.displayTextures !== false;
+  const xRay = options.xRay === true;
+  const isSky = handle.mesh.name.toLowerCase().includes('sky');
 
   for (const rawMaterial of handle.materials) {
     const material = asStyledMaterial(rawMaterial);
@@ -123,13 +149,19 @@ export function applyViewportRenderStyle(
     // look (overlays off), not a forced-flat override — artists who want flat
     // set it on the material. Skyboxes stay smooth so the dome does not facet.
     if (std && 'flatShading' in std) {
-      const isSky = handle.mesh.name.toLowerCase().includes('sky');
       (std as unknown as { flatShading: boolean }).flatShading = isSky
         ? false
         : baseline.flatShading;
     } else if ('flatShading' in material) {
-      const isSky = handle.mesh.name.toLowerCase().includes('sky');
       material.flatShading = isSky ? false : baseline.flatShading;
+    }
+
+    if ('opacity' in material) {
+      const applyXray = xRay && !isSky;
+      material.opacity = applyXray ? VIEWPORT_XRAY_OPACITY : baseline.opacity;
+      material.transparent = applyXray ? true : baseline.transparent;
+      material.depthWrite = applyXray ? false : baseline.depthWrite;
+      material.side = applyXray ? DoubleSide : baseline.side;
     }
 
     material.needsUpdate = true;

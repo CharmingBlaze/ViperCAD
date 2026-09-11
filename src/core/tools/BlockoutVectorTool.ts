@@ -1,3 +1,4 @@
+import { applyDefaultBlockoutLook } from '@/core/blockout/BlockoutMaterial';
 import { commitMeshObject } from '@/core/document/ModelDocument';
 import { buildBlockoutExtrudeMesh, localizeMeshToBoundsCentre, planeNormal } from '@/core/blockout/BlockoutExtrude';
 import {
@@ -393,7 +394,10 @@ export class BlockoutVectorTool implements Tool {
     });
     const object = context.document.objects.get(objectId);
     const meshRef = context.document.meshes.get(meshId);
-    if (object) object.transform.position = origin;
+    if (object) {
+      object.transform.position = origin;
+      applyDefaultBlockoutLook(context.document, objectId);
+    }
     if (object && meshRef) {
       context.selection.setMode('object');
       context.selection.selectObjects([objectId], 'replace');

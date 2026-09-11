@@ -8,6 +8,7 @@ import {
   prepareTilePaint,
   setTileDrawMode,
   setTileDrawPlane,
+  snapTileDrawToNearestVertex,
   tileDrawDepthLabel,
   tileDrawPlaneLabel,
   toggleTileDrawSurfaceLock,
@@ -38,15 +39,19 @@ export function TileDrawHud({
   const toolLabel = tex.atlasDrawMode === 'paint' ? 'Draw' : tex.atlasDrawMode === 'erase' ? 'Delete' : tex.atlasDrawMode[0]!.toUpperCase() + tex.atlasDrawMode.slice(1);
   const shapeLabel = tex.atlasDrawShape[0]!.toUpperCase() + tex.atlasDrawShape.slice(1);
   const hint = building
-    ? tex.atlasDrawShape === 'rectangle'
-      ? 'Rectangle · Drag corners · Shift+Wheel plane · Esc cancel'
-      : tex.atlasDrawShape === 'line'
-        ? 'Line · Drag start to end · Alt pick tile · Esc cancel'
-        : tex.atlasUseFacePlane
-          ? 'Surface · Hover face · L lock · Alt pick tile'
-          : `${toolLabel} · LMB place · Drag ${shapeLabel.toLowerCase()} · Alt pick tile · Q rotate · Esc cancel`
+    ? tex.atlasDrawMode === 'fill'
+      ? `Fill ${tex.atlasFillColumns}×${tex.atlasFillRows} · Click place · Shift+click flood · Esc cancel`
+      : tex.atlasDrawMode === 'pick'
+        ? 'Pick · Click a painted tile · I'
+        : tex.atlasDrawShape === 'rectangle'
+          ? 'Rectangle · Drag corners · Shift+Wheel plane · Esc cancel'
+          : tex.atlasDrawShape === 'line'
+            ? 'Line · Drag start to end · Alt pick tile · Esc cancel'
+            : tex.atlasUseFacePlane
+              ? 'Surface · Hover face · L lock · V snap vertex · Alt pick tile'
+              : `${toolLabel} · LMB place · Drag ${shapeLabel.toLowerCase()} · Alt pick tile · Q rotate · Esc cancel`
     : painting
-      ? 'Paint · Click faces to stamp · Alt pick tile'
+      ? 'Paint · Drag across faces · Alt pick tile'
       : 'Choose a tile, then Build to draw in the 3D view';
 
   return (
@@ -89,6 +94,7 @@ export function TileDrawHud({
               ['erase', 'Delete', 'X'],
               ['replace', 'Replace', 'R'],
               ['fill', 'Fill', 'F'],
+              ['pick', 'Pick', 'I'],
             ] as [TileDrawMode, string, string][]).map(([mode, label, key]) => (
               <button
                 key={mode}
@@ -119,7 +125,44 @@ export function TileDrawHud({
               </button>
             ))}
           </div>
+          {tex.atlasDrawMode === 'fill' && (
+            <div className="tile-draw-hud-group" role="group" aria-label="Fill size">
+              <span className="tile-draw-hud-depth">{tex.atlasFillColumns}×{tex.atlasFillRows}</span>
+              <button type="button" className="tile-draw-hud-btn" title="Fewer fill columns" onClick={() => patchAndSync({ atlasFillColumns: Math.max(1, tex.atlasFillColumns - 1) })}>−W</button>
+              <button type="button" className="tile-draw-hud-btn" title="More fill columns" onClick={() => patchAndSync({ atlasFillColumns: Math.min(64, tex.atlasFillColumns + 1) })}>+W</button>
+              <button type="button" className="tile-draw-hud-btn" title="Fewer fill rows" onClick={() => patchAndSync({ atlasFillRows: Math.max(1, tex.atlasFillRows - 1) })}>−H</button>
+              <button type="button" className="tile-draw-hud-btn" title="More fill rows" onClick={() => patchAndSync({ atlasFillRows: Math.min(64, tex.atlasFillRows + 1) })}>+H</button>
+            </div>
+          )}
         </>
+      )}
+      {painting && (
+        <div className="tile-draw-hud-group" role="group" aria-label="Paint fit">
+          <button
+            type="button"
+            className={`tile-draw-hud-btn${tex.atlasStretchU ? ' is-active' : ''}`}
+            title="Stretch the tile across the face width"
+            onClick={() => patchAndSync({ atlasStretchU: !tex.atlasStretchU })}
+          >
+            Stretch U
+          </button>
+          <button
+            type="button"
+            className={`tile-draw-hud-btn${tex.atlasStretchV ? ' is-active' : ''}`}
+            title="Stretch the tile across the face height"
+            onClick={() => patchAndSync({ atlasStretchV: !tex.atlasStretchV })}
+          >
+            Stretch V
+          </button>
+          <button
+            type="button"
+            className={`tile-draw-hud-btn${tex.atlasHintDown ? ' is-active' : ''}`}
+            title="Lowest or selected edge is the tile bottom"
+            onClick={() => patchAndSync({ atlasHintDown: !tex.atlasHintDown })}
+          >
+            Hint down
+          </button>
+        </div>
       )}
       <div className="tile-draw-hud-group tile-draw-hud-plane" role="group" aria-label="Build plane">
         {([
@@ -160,6 +203,14 @@ export function TileDrawHud({
                 {tex.atlasSurfaceLocked ? 'Locked' : 'Lock'}
               </button>
             )}
+            <button
+              type="button"
+              className="tile-draw-hud-btn"
+              title="Snap the work plane to the nearest vertex (V)"
+              onClick={() => snapTileDrawToNearestVertex(session, workspace)}
+            >
+              Snap V
+            </button>
           </>
         )}
       </div>
@@ -187,6 +238,14 @@ export function TileDrawHud({
           onClick={() => patchAndSync({ atlasFlipV: !tex.atlasFlipV })}
         >
           Flip V
+        </button>
+        <button
+          type="button"
+          className={`tile-draw-hud-btn${tex.atlasJoinMulti ? ' is-active' : ''}`}
+          title="Join a multi-tile pick into one face"
+          onClick={() => patchAndSync({ atlasJoinMulti: !tex.atlasJoinMulti })}
+        >
+          Join Multi
         </button>
       </div>
       <span className="tile-draw-hud-status">

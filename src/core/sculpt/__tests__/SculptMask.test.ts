@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { buildSphere } from '@/core/mesh/builders/SphereBuilder';
 import {
   blurMeshMask,
+  clearAllMeshMasks,
   clearMeshMask,
   extractMaskedGeometry,
   getMeshMask,
   hasMask,
+  hydrateSculptMasks,
   invertMeshMask,
+  peekMeshMask,
 } from '@/core/sculpt/SculptMask';
 import { EditorSession } from '@/core/editor/EditorSession';
 import { commitMeshObject } from '@/core/document/ModelDocument';
@@ -49,5 +52,15 @@ describe('SculptMask', () => {
     expect(extractedObject.name).toContain('Extracted');
     const extractedMesh = session.document.meshes.get(extractedObject.meshId!)!;
     expect(extractedMesh.faces.size).toBeGreaterThan(0);
+  });
+
+  it('hydrates a persisted mask into the session cache', () => {
+    const mesh = buildSphere({ radius: 1, widthSegments: 8, heightSegments: 6 });
+    const vertexId = [...mesh.vertices.keys()][0]!;
+    mesh.sculptMask = new Map([[vertexId, 0.65]]);
+    clearAllMeshMasks();
+    expect(peekMeshMask(mesh.id)).toBeUndefined();
+    hydrateSculptMasks([mesh]);
+    expect(getMeshMask(mesh.id).get(vertexId)).toBeCloseTo(0.65);
   });
 });

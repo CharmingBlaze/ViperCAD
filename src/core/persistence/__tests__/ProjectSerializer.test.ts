@@ -6,10 +6,14 @@ import { createTerrain } from '@/core/terrain/Terrain';
 import { APP_VERSION } from '@/version';
 import {
   deserializeProject,
+  deserializeViperProject,
   PROJECT_FORMAT,
   PROJECT_FORMAT_VERSION,
   serializeProject,
+  serializeViperProject,
 } from '@/core/persistence/ProjectSerializer';
+import { WORLD_XZ_PLANE } from '@/core/snap/SnapEngine';
+import { TileDrawTool } from '@/core/tools/TileDrawTool';
 
 function checksum(text: string): string {
   let hash = 0x811c9dc5;
@@ -138,5 +142,37 @@ describe('ProjectSerializer migrations', () => {
     const sourceCorner = [...(terrainMesh?.faceCorners.values() ?? [])][0];
     const loadedCorner = [...(loadedMesh?.faceCorners.values() ?? [])][0];
     expect(loadedCorner?.vertexColour?.x).toBeCloseTo(sourceCorner?.vertexColour?.x ?? 1);
+  });
+
+  it('round-trips 3D tile-draw object metadata', () => {
+    const session = new EditorSession();
+    session.constructionPlane = WORLD_XZ_PLANE;
+    const tool = session.tools.get('tile-draw') as TileDrawTool;
+    tool.setConfig({ mode: 'paint', cellWidth: 1, cellHeight: 1, layer: 'Geometry' }, session.context());
+    session.tools.setActive('tile-draw', session.context());
+    tool.begin({
+      button: 'left',
+      screenX: 0.2,
+      screenY: 0.2,
+      worldPosition: null,
+      rayOrigin: { x: 0.2, y: 10, z: 0.2 },
+      rayDirection: { x: 0, y: -1, z: 0 },
+      shiftKey: false,
+      ctrlKey: false,
+      altKey: false,
+    }, session.context());
+    tool.confirm(session.context());
+
+    const object = [...session.document.objects.values()][0]!;
+    expect(object.metadata.tileLayer).toBe('Geometry');
+    expect(object.metadata.tileDrawCells).toBeTruthy();
+
+    const loaded = deserializeViperProject(serializeViperProject(session.project, 'test'));
+    const restored = [...loaded.project.documents.values()]
+      .flatMap((doc) => [...doc.objects.values()])
+      .find((candidate) => candidate.metadata.tileLayer === 'Geometry');
+    expect(restored?.metadata.tileLayer).toBe('Geometry');
+    expect(restored?.metadata.tileDrawCells).toBe(object.metadata.tileDrawCells);
+    expect(restored?.metadata.tilePlaneKey).toBe(object.metadata.tilePlaneKey);
   });
 });

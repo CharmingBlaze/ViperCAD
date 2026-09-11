@@ -22,6 +22,27 @@ export function getMeshMask(meshId: string): Map<VertexId, number> {
   return mask;
 }
 
+/** Read the live mask without creating an empty cache entry. */
+export function peekMeshMask(meshId: string): Map<VertexId, number> | undefined {
+  const mask = meshMaskCache.get(meshId);
+  return mask && mask.size > 0 ? mask : undefined;
+}
+
+export function restoreMeshMask(meshId: string, mask: Map<VertexId, number>): void {
+  if (!mask.size) {
+    meshMaskCache.delete(meshId);
+    return;
+  }
+  meshMaskCache.set(meshId, new Map(mask));
+}
+
+/** Copy persisted per-mesh masks into the session cache after a project load. */
+export function hydrateSculptMasks(meshes: Iterable<EditableMesh>): void {
+  for (const mesh of meshes) {
+    if (mesh.sculptMask?.size) restoreMeshMask(mesh.id, mesh.sculptMask);
+  }
+}
+
 export function clearMeshMask(meshId: string): void {
   meshMaskCache.delete(meshId);
 }

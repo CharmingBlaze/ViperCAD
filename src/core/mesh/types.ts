@@ -110,6 +110,8 @@ export type EditableMesh = {
   triangulationHints: Map<FaceId, '0-2' | '1-3'>;
   /** Informal per-mesh records (terrain layers, tool tags). Survives save and undo. */
   metadata?: Record<string, string>;
+  /** Per-vertex sculpt mask (0–1). Restored into the session cache on open. */
+  sculptMask?: Map<VertexId, number>;
 };
 
 export type TopologyChangeResult = {

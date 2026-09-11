@@ -36,7 +36,7 @@ import { BlenderIcon } from '@/components/BlenderIcon';
 
 ---
 
-## 2. Photoshop Dark Theme & Color Integration
+## 2. Dark Theme & Color Integration
 
 All 666 Blender icons are pre-processed to use `fill="currentColor"`. This means icons **automatically adapt** to whichever text color their parent container uses:
 
@@ -51,20 +51,20 @@ All 666 Blender icons are pre-processed to use `fill="currentColor"`. This means
   color: var(--text); /* #ffffff */
 }
 
-/* Active / selected tool: Adobe Photoshop signature blue */
+/* Active / selected tool: accent blue */
 .tool-btn.is-active {
   color: #ffffff;
   background: var(--accent); /* #1473e6 */
 }
 ```
 
-### Key Photoshop Color Tokens (`src/App.css`):
+### Key Color Tokens (`src/App.css`):
 * `--bg: #1e1e1e;` &mdash; Artboard / canvas base neutral dark gray
 * `--bar: #282828;` &mdash; Menu and status bar neutral tone
 * `--panel: #323232;` &mdash; Primary inspector / outliner panel surface
 * `--panel-secondary: #282828;` &mdash; Section headers and nested panels
 * `--line: #3f3f3f;` &mdash; Crisp 1px hairline divider borders
-* `--accent: #1473e6;` &mdash; Photoshop signature blue
+* `--accent: #1473e6;` &mdash; Signature blue
 * `--accent-hover: #2680eb;` &mdash; Vibrant interaction blue
 * `--muted: #9e9e9e;` &mdash; Inactive icons and secondary text
 * `--text: #e6e6e6;` &mdash; Active icons and primary text

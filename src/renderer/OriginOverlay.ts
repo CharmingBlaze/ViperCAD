@@ -13,6 +13,8 @@ import {
   Vector3,
   type Camera,
 } from "three";
+import type { ViewportTheme } from "@/app/theme/themeTokens";
+import { applyThemeHex } from "@/renderer/themeColor";
 
 const COLOR_CENTER = new Color(0xffaa00); // Golden amber
 const COLOR_X = new Color(0xe74c3c);      // Red
@@ -30,6 +32,11 @@ const TARGET_SCREEN_PIXELS = 28;
 export class OriginOverlay {
   readonly root = new Group();
   private visible = false;
+  private centreMat!: MeshBasicMaterial;
+  private ringMat!: MeshBasicMaterial;
+  private xMat!: MeshBasicMaterial;
+  private yMat!: MeshBasicMaterial;
+  private zMat!: MeshBasicMaterial;
 
   constructor() {
     this.root.name = "OriginOverlay";
@@ -37,6 +44,19 @@ export class OriginOverlay {
     this.root.renderOrder = 1001;
     this.root.visible = false;
     this.build();
+  }
+
+  applyPalette(palette: ViewportTheme): void {
+    applyThemeHex(this.centreMat.color, palette.gizmoView);
+    applyThemeHex(this.ringMat.color, palette.gizmoView);
+    applyThemeHex(this.xMat.color, palette.gizmoX);
+    applyThemeHex(this.yMat.color, palette.gizmoY);
+    applyThemeHex(this.zMat.color, palette.gizmoZ);
+    this.centreMat.needsUpdate = true;
+    this.ringMat.needsUpdate = true;
+    this.xMat.needsUpdate = true;
+    this.yMat.needsUpdate = true;
+    this.zMat.needsUpdate = true;
   }
 
   setVisible(visible: boolean): void {
@@ -95,40 +115,32 @@ export class OriginOverlay {
   }
 
   private build(): void {
-    // 1. Center glowing pivot orb (golden amber)
-    const centerMat = new MeshBasicMaterial({
+    this.centreMat = new MeshBasicMaterial({
       color: COLOR_CENTER,
       depthTest: false,
       transparent: true,
       opacity: 0.95,
     });
-    const centerMesh = new Mesh(new SphereGeometry(0.18, 16, 16), centerMat);
+    const centerMesh = new Mesh(new SphereGeometry(0.18, 16, 16), this.centreMat);
     this.root.add(centerMesh);
 
-    // 2. Mini X axis prong (red)
-    this.addProng(COLOR_X, new Vector3(1, 0, 0));
+    this.xMat = this.addProng(COLOR_X, new Vector3(1, 0, 0));
+    this.yMat = this.addProng(COLOR_Y, new Vector3(0, 1, 0));
+    this.zMat = this.addProng(COLOR_Z, new Vector3(0, 0, 1));
 
-    // 3. Mini Y axis prong (green)
-    this.addProng(COLOR_Y, new Vector3(0, 1, 0));
-
-    // 4. Mini Z axis prong (blue)
-    this.addProng(COLOR_Z, new Vector3(0, 0, 1));
-
-    // 5. Origin ring (faint amber outer boundary indicator)
-    const ringMat = new MeshBasicMaterial({
+    this.ringMat = new MeshBasicMaterial({
       color: COLOR_CENTER,
       depthTest: false,
       transparent: true,
       opacity: 0.45,
       side: DoubleSide,
     });
-    const ringMesh = new Mesh(new RingGeometry(0.48, 0.54, 32), ringMat);
-    // Face the ring slightly up/diagonal
+    const ringMesh = new Mesh(new RingGeometry(0.48, 0.54, 32), this.ringMat);
     ringMesh.rotation.x = -Math.PI / 2;
     this.root.add(ringMesh);
   }
 
-  private addProng(color: Color, dir: Vector3): void {
+  private addProng(color: Color, dir: Vector3): MeshBasicMaterial {
     const mat = new MeshBasicMaterial({
       color,
       depthTest: false,
@@ -156,5 +168,6 @@ export class OriginOverlay {
     }
 
     this.root.add(prongGroup);
+    return mat;
   }
 }

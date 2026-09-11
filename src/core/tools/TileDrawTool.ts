@@ -34,6 +34,9 @@ export type TileDrawConfig = {
   pattern: 'repeat' | 'random';
   randomSeed: number;
   layer: string;
+  fillColumns: number;
+  fillRows: number;
+  joinMulti: boolean;
 };
 
 export class TileDrawTool implements Tool {
@@ -45,6 +48,7 @@ export class TileDrawTool implements Tool {
     selectionColumns: 1, selectionRows: 1, padding: 0, quarterTurns: 0,
     flipU: false, flipV: false, cellWidth: 1, cellHeight: 1,
     pattern: 'repeat', randomSeed: 1, layer: 'Geometry',
+    fillColumns: 4, fillRows: 4, joinMulti: true,
   };
   state = {
     drawing: false,
@@ -106,7 +110,11 @@ export class TileDrawTool implements Tool {
     this.cells.clear();
     this.rememberOccupied(context);
     if (this.config.mode === 'fill') {
-      for (const filled of this.floodCells(context, cell)) this.addCell(filled);
+      if (input.shiftKey) {
+        for (const filled of this.floodCells(context, cell)) this.addCell(filled);
+      } else {
+        this.addFillBlock(cell);
+      }
     } else if (this.config.shape === 'single') {
       this.addStamp(cell);
     } else {
@@ -121,7 +129,7 @@ export class TileDrawTool implements Tool {
     this.rememberOccupied(context);
     if (!cell) return this.touch(context);
     if (!this.state.drawing) return this.touch(context);
-    if (this.config.mode === 'fill' || this.config.shape === 'single') return;
+    if (this.config.mode === 'fill' || this.config.shape === 'single' || this.config.mode === 'pick') return;
     if ((this.config.shape === 'rectangle' || this.config.shape === 'line') && this.startCell) {
       this.cells.clear();
       if (this.config.shape === 'line') {
@@ -146,14 +154,16 @@ export class TileDrawTool implements Tool {
     if (!this.state.drawing || !this.cells.size) return;
     const target = this.findTarget(context);
     const beforeRecords = target ? parseCells(target.object.metadata.tileDrawCells) : [];
-    const next = new Map(beforeRecords.map((cell) => [`${cell.column},${cell.row}`, cell]));
+    const next = occupancyFromRecords(beforeRecords);
     let index = 0;
     for (const cell of this.cells.values()) {
-      const key = `${cell.column},${cell.row}`;
-      if (this.config.mode === 'erase') next.delete(key);
-      else if (this.config.mode !== 'replace' || next.has(key)) next.set(key, this.paintRecord(cell, index++));
+      if (this.config.mode === 'erase') {
+        removeOccupied(next, cell);
+      } else if (this.config.mode !== 'replace' || overlapsOccupied(next, cell)) {
+        upsertOccupied(next, this.paintRecord(cell, index++));
+      }
     }
-    const records = this.config.autoTile ? this.applyAutoTiles([...next.values()]) : [...next.values()];
+    const records = this.config.autoTile ? this.applyAutoTiles([...next.byOrigin.values()]) : [...next.byOrigin.values()];
     if (sameCells(beforeRecords, records)) { this.clearStroke(context, true); return; }
     const beforeSelection = cloneSelection(context.selection.state);
     if (target) this.commitExisting(context, target.object, target.mesh, beforeRecords, records, beforeSelection);
@@ -176,7 +186,9 @@ export class TileDrawTool implements Tool {
     const hoverCells = this.state.drawing
       ? [...this.cells.values()]
       : this.state.hoverCell
-        ? this.stampCells(this.state.hoverCell)
+        ? this.config.mode === 'fill'
+          ? this.fillBlockCells(this.state.hoverCell)
+          : this.stampCells(this.state.hoverCell)
         : [];
     return {
       origin: this.tileOrigin(),
@@ -199,8 +211,10 @@ export class TileDrawTool implements Tool {
     if (!this.plane) return null;
     const source = this.state.drawing
       ? [...this.cells.values()]
-      : this.state.hoverCell && this.config.mode !== 'erase'
-        ? this.stampCells(this.state.hoverCell)
+      : this.state.hoverCell && this.config.mode !== 'erase' && this.config.mode !== 'pick'
+        ? this.config.mode === 'fill'
+          ? this.fillBlockCells(this.state.hoverCell)
+          : this.stampCells(this.state.hoverCell)
         : [];
     if (!source.length) return null;
     const cells = this.config.autoTile
@@ -238,6 +252,15 @@ export class TileDrawTool implements Tool {
   }
 
   private paintRecord(cell: AtlasTileCell, index: number): AtlasTileCell {
+    const spanC = Math.max(1, cell.spanColumns ?? (this.shouldJoinStamp() ? this.config.selectionColumns : 1));
+    const spanR = Math.max(1, cell.spanRows ?? (this.shouldJoinStamp() ? this.config.selectionRows : 1));
+    if (spanC > 1 || spanR > 1) {
+      return {
+        column: cell.column, row: cell.row, spanColumns: spanC, spanRows: spanR,
+        tileX: this.config.tileX, tileY: this.config.tileY,
+        quarterTurns: this.config.quarterTurns, flipU: this.config.flipU, flipV: this.config.flipV,
+      };
+    }
     const count = Math.max(1, this.config.selectionColumns * this.config.selectionRows);
     const pattern = this.config.pattern === 'random'
       ? seededIndex(index, this.config.randomSeed, count)
@@ -248,6 +271,10 @@ export class TileDrawTool implements Tool {
       tileY: this.config.tileY + Math.floor(pattern / this.config.selectionColumns) * (this.config.tileHeight + this.config.marginY),
       quarterTurns: this.config.quarterTurns, flipU: this.config.flipU, flipV: this.config.flipV,
     };
+  }
+
+  private shouldJoinStamp(): boolean {
+    return this.config.joinMulti && (this.config.selectionColumns > 1 || this.config.selectionRows > 1);
   }
 
   private applyAutoTiles(cells: AtlasTileCell[]): AtlasTileCell[] {
@@ -379,6 +406,14 @@ export class TileDrawTool implements Tool {
   }
   private addCell(cell: AtlasTileCell): void { this.cells.set(`${cell.column},${cell.row}`, cell); }
   private stampCells(origin: AtlasTileCell): AtlasTileCell[] {
+    if (this.shouldJoinStamp()) {
+      return [{
+        column: origin.column,
+        row: origin.row,
+        spanColumns: this.config.selectionColumns,
+        spanRows: this.config.selectionRows,
+      }];
+    }
     const cells: AtlasTileCell[] = [];
     for (let row = 0; row < Math.max(1, this.config.selectionRows); row++) {
       for (let column = 0; column < Math.max(1, this.config.selectionColumns); column++) {
@@ -387,13 +422,32 @@ export class TileDrawTool implements Tool {
     }
     return cells;
   }
+  private fillBlockCells(origin: AtlasTileCell): AtlasTileCell[] {
+    const cells: AtlasTileCell[] = [];
+    const stepC = this.shouldJoinStamp() ? this.config.selectionColumns : 1;
+    const stepR = this.shouldJoinStamp() ? this.config.selectionRows : 1;
+    const cols = Math.max(1, this.config.fillColumns);
+    const rows = Math.max(1, this.config.fillRows);
+    for (let row = 0; row < rows; row++) {
+      for (let column = 0; column < cols; column++) {
+        cells.push(...this.stampCells({
+          column: origin.column + column * stepC,
+          row: origin.row + row * stepR,
+        }));
+      }
+    }
+    return cells;
+  }
   private addStamp(origin: AtlasTileCell): void {
     for (const cell of this.stampCells(origin)) this.addCell(cell);
+  }
+  private addFillBlock(origin: AtlasTileCell): void {
+    for (const cell of this.fillBlockCells(origin)) this.addCell(cell);
   }
   private occupiedKeys(context?: ModellingContext): Set<string> {
     if (context) {
       const target = this.findTarget(context);
-      return new Set((target ? parseCells(target.object.metadata.tileDrawCells) : []).map((cell) => `${cell.column},${cell.row}`));
+      return new Set((target ? parseCells(target.object.metadata.tileDrawCells) : []).flatMap(cellKeys));
     }
     return this.cachedOccupied ?? new Set();
   }
@@ -406,7 +460,7 @@ export class TileDrawTool implements Tool {
     if (!hover) return false;
     const occupied = this.cachedOccupied;
     if (!occupied?.size) return false;
-    return this.stampCells(hover).some((cell) => occupied.has(`${cell.column},${cell.row}`));
+    return this.stampCells(hover).some((cell) => cellKeys(cell).some((key) => occupied.has(key)));
   }
   private clearStroke(context: ModellingContext, keepPlane = false): void {
     this.state.drawing = false; this.state.hoverCell = null; this.cells.clear();
@@ -432,6 +486,58 @@ function gridLine(from: AtlasTileCell, to: AtlasTileCell): AtlasTileCell[] {
     if (twice <= dx) { error += dx; y += sy; }
   }
   return result;
+}
+
+function cellKeys(cell: AtlasTileCell): string[] {
+  const spanC = Math.max(1, Math.round(cell.spanColumns ?? 1));
+  const spanR = Math.max(1, Math.round(cell.spanRows ?? 1));
+  const keys: string[] = [];
+  for (let row = 0; row < spanR; row++) {
+    for (let column = 0; column < spanC; column++) {
+      keys.push(`${cell.column + column},${cell.row + row}`);
+    }
+  }
+  return keys;
+}
+
+function originKey(cell: AtlasTileCell): string {
+  return `${cell.column},${cell.row}`;
+}
+
+type Occupancy = {
+  byOrigin: Map<string, AtlasTileCell>;
+  covered: Map<string, string>;
+};
+
+function occupancyFromRecords(records: AtlasTileCell[]): Occupancy {
+  const next: Occupancy = { byOrigin: new Map(), covered: new Map() };
+  for (const cell of records) upsertOccupied(next, cell);
+  return next;
+}
+
+function upsertOccupied(occupancy: Occupancy, cell: AtlasTileCell): void {
+  removeOccupied(occupancy, cell);
+  const origin = originKey(cell);
+  occupancy.byOrigin.set(origin, cell);
+  for (const key of cellKeys(cell)) occupancy.covered.set(key, origin);
+}
+
+function removeOccupied(occupancy: Occupancy, cell: AtlasTileCell): void {
+  const origins = new Set<string>();
+  for (const key of cellKeys(cell)) {
+    const origin = occupancy.covered.get(key);
+    if (origin) origins.add(origin);
+  }
+  for (const origin of origins) {
+    const existing = occupancy.byOrigin.get(origin);
+    if (!existing) continue;
+    occupancy.byOrigin.delete(origin);
+    for (const key of cellKeys(existing)) occupancy.covered.delete(key);
+  }
+}
+
+function overlapsOccupied(occupancy: Occupancy, cell: AtlasTileCell): boolean {
+  return cellKeys(cell).some((key) => occupancy.covered.has(key));
 }
 
 function parseCells(value: string | undefined): AtlasTileCell[] {

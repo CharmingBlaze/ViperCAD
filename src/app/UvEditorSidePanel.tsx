@@ -60,6 +60,7 @@ import {
   setAtlasTileSize,
   setTileDrawMode,
   showTilesetPopup,
+  snapTileDrawToNearestVertex,
   snapTileDrawToSelection,
   toggleTilesetPopup,
 } from '@/app/tilesetWorkspace';
@@ -94,6 +95,13 @@ export type UvEditorSidePanelProps = {
   onDistribute: (axis: 'u' | 'v') => void;
   onPixelSnap: () => void;
   onFrame: () => void;
+  onCopyUvs?: () => void;
+  onPasteUvs?: () => void;
+  onPasteAndFlipH?: () => void;
+  onPasteAndFlipV?: () => void;
+  onMirrorToOppositeSide?: () => void;
+  hasUvClipboard?: boolean;
+  uvClipboardCount?: number;
   onArmUv: (patch?: {
     uvEditMode?: UvEditMode;
     uvTransformTool?: UvTransformTool;
@@ -154,6 +162,13 @@ export function UvEditorSidePanel({
   onDistribute,
   onPixelSnap,
   onFrame,
+  onCopyUvs,
+  onPasteUvs,
+  onPasteAndFlipH,
+  onPasteAndFlipV,
+  onMirrorToOppositeSide,
+  hasUvClipboard,
+  uvClipboardCount,
   onArmUv,
   onRefresh,
   embedded = false,
@@ -564,6 +579,32 @@ export function UvEditorSidePanel({
                 </button>
               </div>
               <div className="uv-btn-grid uv-btn-grid-2" style={{ marginTop: '0.35rem' }}>
+                <button
+                  type="button"
+                  className="tool primary"
+                  disabled={!hasUvSelection}
+                  onClick={() => onFlip('u')}
+                  title="Flip selected UVs horizontally across U axis (Shift+H)"
+                  style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontWeight: 500 }}
+                >
+                  <BlenderIcon name="arrow_leftright" size={13} />
+                  Flip Horizontal
+                </button>
+                <button
+                  type="button"
+                  className="tool primary"
+                  disabled={!hasUvSelection}
+                  onClick={() => onFlip('v')}
+                  title="Flip selected UVs vertically across V axis (Shift+V)"
+                  style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontWeight: 500 }}
+                >
+                  <span style={{ display: 'inline-flex', transform: 'rotate(90deg)' }}>
+                    <BlenderIcon name="arrow_leftright" size={13} />
+                  </span>
+                  Flip Vertical
+                </button>
+              </div>
+              <div className="uv-btn-grid uv-btn-grid-2" style={{ marginTop: '0.35rem' }}>
                 <button type="button" className="tool" disabled={!hasUvSelection} onClick={() => onFlatten('left')} title="Flatten selected corners onto one U">
                   Flatten U
                 </button>
@@ -587,8 +628,71 @@ export function UvEditorSidePanel({
                 <BlenderIcon name="snap_increment" size={13} />
                 Snap to pixels
               </button>
+              {onCopyUvs && (
+                <div style={{ marginTop: '0.45rem', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.25rem' }}>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!hasUvSelection}
+                      onClick={onCopyUvs}
+                      title="Copy UV layout of selected faces (Ctrl+Shift+C)"
+                      style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5 }}
+                    >
+                      <BlenderIcon name="duplicate" size={12} />
+                      {hasUvClipboard ? `Copy (${uvClipboardCount})` : 'Copy UVs'}
+                    </button>
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!hasUvClipboard || !hasUvSelection}
+                      onClick={onPasteAndFlipH}
+                      title="Paste copied UVs onto selected faces with horizontal flip"
+                    >
+                      Paste & Flip H
+                    </button>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.25rem' }}>
+                    {onPasteUvs && (
+                      <button
+                        type="button"
+                        className="tool"
+                        disabled={!hasUvClipboard || !hasUvSelection}
+                        onClick={onPasteUvs}
+                        title="Paste copied UVs directly without flipping (Ctrl+Shift+V)"
+                      >
+                        Paste
+                      </button>
+                    )}
+                    {onPasteAndFlipV && (
+                      <button
+                        type="button"
+                        className="tool"
+                        disabled={!hasUvClipboard || !hasUvSelection}
+                        onClick={onPasteAndFlipV}
+                        title="Paste copied UVs with vertical flip"
+                      >
+                        Paste & Flip V
+                      </button>
+                    )}
+                  </div>
+                  {onMirrorToOppositeSide && (
+                    <button
+                      type="button"
+                      className="tool"
+                      disabled={!hasUvSelection}
+                      onClick={onMirrorToOppositeSide}
+                      title="Auto-detect symmetrical faces across center X and mirror UVs to them"
+                      style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: '0.78rem' }}
+                    >
+                      <BlenderIcon name="mod_mirror" size={13} />
+                      Mirror UVs to Other Side (±X)
+                    </button>
+                  )}
+                </div>
+              )}
               <p className="uv-hint">
-                Align moves the island inside 0–1. Flatten pins corners to one axis. Distribute spaces them evenly.
+                Align moves the island inside 0–1. Flip mirrors UVs. Copy & Paste transfers layout between opposite sides.
               </p>
             </section>
 
@@ -1372,7 +1476,7 @@ export function UvEditorSidePanel({
                 {session.tools.getActive()?.id === 'tile-draw'
                   ? 'Build is active in the 3D view. Pick a tile in the palette, then draw on the work plane.'
                   : tex.atlasPaintMode
-                    ? 'Paint is active. Click faces in the 3D view to stamp the selected tile.'
+                    ? 'Paint is active. Drag across faces in the 3D view to stamp the selected tile.'
                     : 'Build draws tiles on a work plane. Paint stamps tiles onto existing faces.'}
               </p>
               <div className="uv-btn-grid">
@@ -2085,6 +2189,30 @@ export function AtlasTilePanel({
         </div>
         <label className="uv-check"><input type="checkbox" checked={tex.atlasPaintMode} onChange={(event) => workspace.patchTexture({ atlasPaintMode: event.target.checked, uvPointerMode: true })} />Tile Brush on 3D faces</label>
         <label className="uv-check"><input type="checkbox" checked={tex.atlasAutoAdvance} onChange={(event) => workspace.patchTexture({ atlasAutoAdvance: event.target.checked })} />Advance tile after brush</label>
+        <div className="uv-btn-grid uv-btn-grid-2">
+          <label className="uv-check"><input type="checkbox" checked={tex.atlasStretchU} onChange={(event) => workspace.patchTexture({ atlasStretchU: event.target.checked })} />Stretch U</label>
+          <label className="uv-check"><input type="checkbox" checked={tex.atlasStretchV} onChange={(event) => workspace.patchTexture({ atlasStretchV: event.target.checked })} />Stretch V</label>
+        </div>
+        <div className="uv-btn-grid uv-btn-grid-2">
+          <label className="uv-field">
+            <span>Align U</span>
+            <select className="uv-select" value={tex.atlasAlignU} onChange={(event) => workspace.patchTexture({ atlasAlignU: event.target.value as 'min' | 'center' | 'max' })}>
+              <option value="min">Min</option>
+              <option value="center">Center</option>
+              <option value="max">Max</option>
+            </select>
+          </label>
+          <label className="uv-field">
+            <span>Align V</span>
+            <select className="uv-select" value={tex.atlasAlignV} onChange={(event) => workspace.patchTexture({ atlasAlignV: event.target.value as 'min' | 'center' | 'max' })}>
+              <option value="min">Min</option>
+              <option value="center">Center</option>
+              <option value="max">Max</option>
+            </select>
+          </label>
+        </div>
+        <label className="uv-check"><input type="checkbox" checked={tex.atlasHintDown} onChange={(event) => workspace.patchTexture({ atlasHintDown: event.target.checked })} />Hint down — selected or lowest edge is tile bottom</label>
+        <label className="uv-check"><input type="checkbox" checked={tex.atlasJoinMulti} onChange={(event) => workspace.patchTexture({ atlasJoinMulti: event.target.checked })} />Join Multi — one face for a multi-tile pick</label>
         <p className="uv-hint">Select faces, then change tile / Repeat U/V — updates live (UV wrap, no subdivision). Apply commits undo. Inset by 0.5 px to reduce atlas bleeding.</p>
       </section>
       <section className="uv-section">
@@ -2161,6 +2289,13 @@ export function AtlasTilePanel({
         <button
           type="button"
           className="tool uv-btn-block"
+          onClick={() => snapTileDrawToNearestVertex(session, workspace)}
+        >
+          Snap plane to nearest vertex (V)
+        </button>
+        <button
+          type="button"
+          className="tool uv-btn-block"
           disabled={!session.selection.state.activeObjectId}
           onClick={() => {
             const objectId = session.selection.state.activeObjectId;
@@ -2175,7 +2310,7 @@ export function AtlasTilePanel({
         >
           Extrude tiles (Push/Pull)
         </button>
-        <p className="uv-hint">Build: B draw · X delete · R replace · F fill · 1–4 plane · L lock surface · Q/E rotate · Alt pick tile · Shift+Wheel depth.</p>
+        <p className="uv-hint">Build: B draw · X delete · R replace · F fill · I pick · V snap vertex · 1–4 plane · L lock · Q/E rotate · Alt pick · Shift+click flood · Shift+Wheel depth.</p>
         <button type="button" className="tool uv-btn-block" disabled={!image} onClick={onCreatePlane}>Create Tile Plane</button>
         <div className="uv-btn-grid uv-btn-grid-2">
           <label className="uv-field"><span>Grid columns</span><input className="uv-text" type="number" min={1} max={256} value={tex.atlasFillColumns} onChange={(event) => workspace.patchTexture({ atlasFillColumns: Math.max(1, Math.round(Number(event.target.value))) })} /></label>

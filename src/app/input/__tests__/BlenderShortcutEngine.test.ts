@@ -10,6 +10,7 @@ import { buildBox } from '@/core/mesh/builders/BoxBuilder';
 import { WorkspaceController } from '@/workspace/WorkspaceController';
 import { prepareTileDraw } from '@/app/tilesetWorkspace';
 import { TileDrawTool } from '@/core/tools/TileDrawTool';
+import { isBoundaryEdge, removeFace } from '@/core/mesh/EditableMesh';
 
 const camera = {
   right: { x: 1, y: 0, z: 0 },
@@ -193,5 +194,47 @@ describe('BlenderShortcutEngine', () => {
       expect(handleBlenderShortcut(key('b'), ctx)).toBe(true);
       expect((session.tools.getActive() as TileDrawTool).config.mode).toBe('paint');
     });
+  });
+
+  describe('Fill (F) and Merge (M)', () => {
+    it('fills a boundary hole with F', () => {
+      const { session, ctx, objectId } = setupTestScene();
+      const mesh = session.document.meshes.get(session.document.objects.get(objectId)!.meshId!)!;
+      const faceId = [...mesh.faces.keys()][0]!;
+      removeFace(mesh, faceId);
+      const seed = [...mesh.edges.keys()].find((id) => isBoundaryEdge(mesh, id));
+      expect(seed).toBeTruthy();
+      session.selection.switchEditMode('edge', mesh);
+      session.selection.selectEdges([seed!], 'replace');
+      expect(mesh.faces.size).toBe(5);
+      expect(handleBlenderShortcut(key('f'), ctx)).toBe(true);
+      expect(mesh.faces.size).toBe(6);
+    });
+
+    it('merges selected vertices with M', () => {
+      const { session, ctx, objectId } = setupTestScene();
+      const mesh = session.document.meshes.get(session.document.objects.get(objectId)!.meshId!)!;
+      const verts = [...mesh.vertices.keys()].slice(0, 2);
+      session.selection.switchEditMode('vertex', mesh);
+      session.selection.selectVertices(verts, 'replace');
+      const before = mesh.vertices.size;
+      expect(handleBlenderShortcut(key('m'), ctx)).toBe(true);
+      expect(mesh.vertices.size).toBe(before - 1);
+    });
+
+    it('does not steal F in object mode so framing can run', () => {
+      const { ctx } = setupTestScene();
+      expect(handleBlenderShortcut(key('f'), ctx)).toBe(false);
+    });
+  });
+
+  it('toggles X-Ray with Alt+Z', () => {
+    const { session, ctx, invalidateViewport } = setupTestScene();
+    expect(session.selection.state.xRay).toBe(false);
+    expect(handleBlenderShortcut(key('z', { altKey: true }), ctx)).toBe(true);
+    expect(session.selection.state.xRay).toBe(true);
+    expect(invalidateViewport).toHaveBeenCalled();
+    expect(handleBlenderShortcut(key('z', { altKey: true }), ctx)).toBe(true);
+    expect(session.selection.state.xRay).toBe(false);
   });
 });

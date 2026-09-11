@@ -62,6 +62,8 @@ func main() {
 
 	mux.HandleFunc("/__viper/bridge.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		_, _ = w.Write([]byte(bridgeJS))
 	})
 	mux.HandleFunc("/__viper/files/open", store.handleOpen)
@@ -98,7 +100,7 @@ func main() {
 	url := fmt.Sprintf("http://%s/", addr)
 	w := webview.New(false)
 	defer w.Destroy()
-	w.SetTitle("ViperCAD")
+	w.SetTitle("ViperCAD 0.1.0")
 	w.SetSize(1440, 900, webview.HintNone)
 	w.Navigate(url)
 	w.Run()
@@ -120,5 +122,7 @@ func serveIndex(w http.ResponseWriter, staticFS fs.FS) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = w.Write([]byte(html))
 }

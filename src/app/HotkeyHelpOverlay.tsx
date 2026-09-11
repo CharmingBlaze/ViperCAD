@@ -6,6 +6,7 @@ type HotkeyHelpOverlayProps = {
 const MODEL_KEYS: ReadonlyArray<readonly [string, string]> = [
   ['G / R / S', 'Move / Rotate / Scale'],
   ['Ctrl', 'Hold to snap G/R/S (increment, angle, vertices)'],
+  ['Alt+Z', 'X-Ray — see and select through the mesh'],
   ['1 / 2 / 3', 'Vertex / Edge / Face mode'],
   ['Ctrl+= / Ctrl+-', 'Grow / shrink component selection'],
   ['Ctrl+L', 'Select connected components'],
@@ -21,7 +22,9 @@ const MODEL_KEYS: ReadonlyArray<readonly [string, string]> = [
   ['Ctrl+R', 'Loop Cut · wheel count · click slide'],
   ['Ctrl+Shift+D', 'Subdivide faces'],
   ['Shift+Alt+S / F', 'Shade Smooth / Shade Flat'],
-  ['F', 'Frame selection'],
+  ['F', 'Fill — make a face or fill a hole'],
+  ['M', 'Merge vertices · collapse edges / faces'],
+  ['Numpad .', 'Frame selection (F in Object mode)'],
   ['Home', 'Frame all'],
   ['Shift+Home', 'Reset view'],
   ['Delete', 'Delete selection'],
@@ -30,8 +33,10 @@ const MODEL_KEYS: ReadonlyArray<readonly [string, string]> = [
   ['Ctrl+G / Ctrl+Shift+G', 'Group / Ungroup objects'],
   ['Double-click object', 'Select parent group'],
   ['Tab', 'Maximize viewport under cursor'],
+  ['Shift+M', 'Flip & Mirror floating tools panel'],
   ['Shift+Space', 'Zen mode — hide side chrome'],
   ['Ctrl+K', 'Command palette'],
+  ['Ctrl+,', 'Properties'],
   ['LMB drag', 'Orbit (perspective) · pan (ortho)'],
   ['RMB drag', 'Pan the view'],
   ['Wheel', 'Zoom · Shift pan · trackpad pinch / two-finger pan'],
@@ -53,12 +58,15 @@ const UV_KEYS: ReadonlyArray<readonly [string, string]> = [
   ['UV · Wheel', 'Zoom · Shift pan'],
   ['Face / Point / Island', 'UV selection modes'],
   ['G / S / R', 'Move / Scale / Rotate UVs'],
+  ['Shift+H / Shift+V', 'Flip UVs Horizontal / Vertical'],
+  ['Ctrl+Shift+C / V', 'Copy UVs / Paste & Flip'],
   ['Ctrl+drag', 'Box select'],
   ['Double-click tile', 'Apply tile to faces'],
   ['Repeat U/V', 'Live tile wrap on faces'],
   ['B / E / I / F', 'Pixel brush tools (paint mode)'],
   ['Ctrl+Z / Ctrl+Y', 'Undo / Redo'],
   ['Ctrl+K', 'Command palette'],
+  ['Ctrl+,', 'Properties'],
   ['?', 'Toggle this help'],
 ] as const;
 
@@ -76,7 +84,8 @@ const BLOCKOUT_KEYS = [
   ['Wheel', 'Live thickness (Shift/Ctrl still zooms)'],
   ['Delete', 'Delete selected mesh'],
   ['Drop image', 'Front or Side pane as blueprint'],
-  ['F / Home', 'Frame selection / frame all'],
+  ['F / M', 'Fill hole · merge (edit mode)'],
+  ['Numpad . / Home', 'Frame selection / frame all'],
   ['?', 'Toggle this help'],
 ] as const;
 
@@ -114,6 +123,33 @@ const ANIMATE_KEYS = [
   ['?', 'Toggle this help'],
 ];
 
+const TILESET_NOTES: ReadonlyArray<string> = [
+  'Tiles snap to a grid on the current work plane. You cannot grab the grid as a free 3D gizmo.',
+  'Floor, Front, and Side are world-aligned. Surface uses the face under the cursor, including walls, extra storeys, and offsets.',
+  'Click anywhere on the plane — the overlay follows the cursor and is not stuck at the world origin.',
+  'To model more than a flat floor: draw on Floor, switch to Front or Side and nudge with + for walls, then hover a face, click Surface, and Lock (L) to keep drawing on that face.',
+];
+
+const TILESET_KEYS: ReadonlyArray<readonly [string, string]> = [
+  ['Build / Paint', 'Draw new tile geometry · stamp existing faces'],
+  ['Floor / Front / Side', 'World planes (1 / 2 / 3)'],
+  ['Surface', 'Draw on the hovered face (4)'],
+  ['Lock (L)', 'Keep Surface on the current face'],
+  ['− / + · [ / ]', 'Move the plane one tile along its normal'],
+  ['Shift+Wheel', 'Nudge plane depth'],
+  ['B / X / R / F / I', 'Draw / Delete / Replace / Fill / Pick'],
+  ['Fill click', 'Place the fill-size ghost · Shift+click floods'],
+  ['Join Multi', 'One face for a multi-tile door or window'],
+  ['Paint drag', 'Stamp tiles across faces · Stretch U/V · Hint down'],
+  ['Single · Stroke · Line · Rect', 'Stamp shapes'],
+  ['Q / E', 'Rotate stamp'],
+  ['Shift+Q / Shift+E', 'Flip V / Flip U'],
+  ['V', 'Snap the work plane to the nearest vertex'],
+  ['Alt+click', 'Pick a tile from existing geometry'],
+  ['Esc', 'Cancel the current stroke'],
+  ['?', 'Toggle this help'],
+];
+
 export function HotkeyHelpOverlay({ open, onClose }: HotkeyHelpOverlayProps) {
   if (!open) return null;
   return (
@@ -125,7 +161,7 @@ export function HotkeyHelpOverlay({ open, onClose }: HotkeyHelpOverlayProps) {
         onClick={(event) => event.stopPropagation()}
       >
         <header className="app-modal-header">
-          <h2 id="hotkeys-title">Keyboard shortcuts</h2>
+          <h2 id="hotkeys-title">Help</h2>
           <button type="button" className="outliner-icon" onClick={onClose} aria-label="Close">
             ×
           </button>
@@ -146,6 +182,22 @@ export function HotkeyHelpOverlay({ open, onClose }: HotkeyHelpOverlayProps) {
             <h3>UV / Pixel</h3>
             <dl className="hotkey-list">
               {UV_KEYS.map(([key, label]) => (
+                <div key={`${key}-${label}`}>
+                  <dt>{key}</dt>
+                  <dd>{label}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+          <section>
+            <h3>Tileset / Build</h3>
+            <div className="help-note">
+              {TILESET_NOTES.map((note) => (
+                <p key={note}>{note}</p>
+              ))}
+            </div>
+            <dl className="hotkey-list">
+              {TILESET_KEYS.map(([key, label]) => (
                 <div key={`${key}-${label}`}>
                   <dt>{key}</dt>
                   <dd>{label}</dd>

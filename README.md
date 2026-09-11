@@ -63,7 +63,7 @@ updates and BVH refitting.
 
 ## Current status
 
-**0.1.0 closed alpha.** Model, Sculpt, Terrain, Blockout, Rig, Animate, and UV/Paint are in the product, with save/open and OBJ/glTF export. See [docs/SHIP.md](./docs/SHIP.md).
+**0.1.0 closed alpha.** Model, Sculpt, Terrain, Blockout, Rig, Animate, UV/Paint, and Tileset are in the product, with save/open and OBJ/glTF export. See [docs/SHIP.md](./docs/SHIP.md).
 
 The modelling kernel includes document assets, half-edge topology, builders, render/pick mapping, component selection, transactions, extrusion, inset, bevel, solidify, dissolve, fill holes, knife, loop cut, UV islands/packing, pixel paint, native serialization, and a mesh BVH. CI runs tests, lint, and production build on pull requests.
 

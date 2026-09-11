@@ -11,6 +11,8 @@ import {
   ensureDefaultPlaceholderMaterial,
   getObjectMaterialId,
 } from '@/core/document/ModelDocument';
+import { EditorSession } from '@/core/editor/EditorSession';
+import { projectIsDirty } from '@/core/document/ViperProject';
 import { buildBox } from '@/core/mesh/builders/BoxBuilder';
 
 function box(name = 'Box') {
@@ -31,6 +33,12 @@ describe('per-object materials', () => {
     expect(material.unlit).toBe(true);
     expect(material.doubleSided).toBe(true);
     expect(material.shadingModel).toBe('unlit');
+    expect(material.roughness).toBe(0.82);
+  });
+
+  it('does not mark a brand-new session dirty from placeholder retune', () => {
+    const session = new EditorSession();
+    expect(projectIsDirty(session.project)).toBe(false);
   });
 
   it('retunes a leftover lit placeholder so new objects stay visible', () => {

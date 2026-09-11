@@ -3,7 +3,7 @@ import { EditorSession } from '@/core/editor/EditorSession';
 import { commitMeshObject } from '@/core/document/ModelDocument';
 import { buildBox } from '@/core/mesh/builders/BoxBuilder';
 import { AnimationSession } from '@/app/animation/AnimationSession';
-import { exportRigGlb, validateGlbRoundTrip } from '@/app/GameExport';
+import { documentHasSkinnedExport, exportRigGlb, validateGlbRoundTrip } from '@/app/GameExport';
 
 if (typeof (globalThis as any).FileReader === 'undefined') {
   class MockFileReader {
@@ -78,6 +78,7 @@ describe('Rig GLB Export for Game Engines', () => {
     const session = new AnimationSession(editor);
     session.enterForModel(editor.documentId);
     session.runQuickSetup();
+    expect(documentHasSkinnedExport(editor.project, editor.document)).toBe(true);
 
     // Insert keyframes for the root bone
     session.seekTo(0);
@@ -97,5 +98,8 @@ describe('Rig GLB Export for Game Engines', () => {
     expect(report.errors).toHaveLength(0);
     expect(report.meshes).toBeGreaterThan(0);
     expect(report.triangles).toBeGreaterThan(0);
+    expect(report.skinnedMeshes).toBeGreaterThan(0);
+    expect(report.skeletons).toBeGreaterThan(0);
+    expect(report.animations).toBeGreaterThan(0);
   });
 });

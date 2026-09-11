@@ -1,4 +1,5 @@
 import type { ViewId } from '@/workspace/types';
+import { getAppPreferences } from '@/app/preferences/appPreferences';
 
 export const NAV_DRAG_THRESHOLD_PX = 5;
 
@@ -104,6 +105,50 @@ export function texturePreviewNavKind(
   altEmulatesMiddle = true,
 ): NavGestureKind | null {
   return modifierNavKind(button, mods, { altEmulatesMiddle, isPerspective: true });
+}
+
+/** Orbit rate for perspective drag (radians per CSS pixel). */
+export const ORBIT_RADIANS_PER_PIXEL = 0.004;
+/** Exponential zoom gain for drag and wheel-as-pixels. */
+export const NAV_ZOOM_EXP_GAIN = 0.0028;
+/** Scale wheel ticks before they enter {@link NAV_ZOOM_EXP_GAIN}. */
+export const WHEEL_ZOOM_PIXEL_SCALE = 0.18;
+/** UV editor wheel zoom exponential gain. */
+export const UV_WHEEL_ZOOM_EXP_GAIN = 0.002;
+
+export function navZoomFactor(deltaY: number): number {
+  const { zoomSensitivity, invertZoom } = getAppPreferences();
+  const signed = invertZoom ? -deltaY : deltaY;
+  return Math.exp(signed * NAV_ZOOM_EXP_GAIN * zoomSensitivity);
+}
+
+export function navOrbitRadians(deltaX: number, deltaY: number): { theta: number; phi: number } {
+  const { orbitSensitivity, invertOrbitY } = getAppPreferences();
+  const rate = ORBIT_RADIANS_PER_PIXEL * orbitSensitivity;
+  return {
+    theta: deltaX * rate,
+    phi: deltaY * rate * (invertOrbitY ? -1 : 1),
+  };
+}
+
+export function navPanPixels(deltaX: number, deltaY: number): { dx: number; dy: number } {
+  const scale = getAppPreferences().panSensitivity;
+  return { dx: deltaX * scale, dy: deltaY * scale };
+}
+
+export function navWheelZoomPixels(deltaY: number, deltaMode: number): number {
+  return wheelZoomPixels(deltaY, deltaMode) * WHEEL_ZOOM_PIXEL_SCALE * getAppPreferences().wheelZoomSensitivity;
+}
+
+/** UV canvas drag zoom — opposite sign from 3D dolly, same sensitivity prefs. */
+export function uvCanvasZoomFactor(deltaY: number): number {
+  return navZoomFactor(-deltaY);
+}
+
+export function uvWheelZoomFactor(pixels: number): number {
+  const { zoomSensitivity, wheelZoomSensitivity, invertZoom } = getAppPreferences();
+  const signed = invertZoom ? pixels : -pixels;
+  return Math.exp(signed * UV_WHEEL_ZOOM_EXP_GAIN * zoomSensitivity * wheelZoomSensitivity);
 }
 
 /** Normalize wheel ticks so laptop trackpads and mouse notches share a range. */

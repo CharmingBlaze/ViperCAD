@@ -7,6 +7,7 @@ import {
   Quaternion,
   QuaternionKeyframeTrack,
   Scene,
+  SkinnedMesh,
   VectorKeyframeTrack,
   type Material,
   type Object3D,
@@ -40,6 +41,17 @@ export function objectsForExport(
     if (isExportExcludedObject(object.metadata)) return false;
     return true;
   });
+}
+
+/** True when File → Export GLB should write a skinned character instead of a static mesh. */
+export function documentHasSkinnedExport(
+  project: { skinBindings: Map<string, { objectId: string; armatureId: string }>; armatures: Map<string, unknown> },
+  document: { objects: Map<string, unknown> },
+): boolean {
+  for (const binding of project.skinBindings.values()) {
+    if (document.objects.has(binding.objectId) && project.armatures.has(binding.armatureId)) return true;
+  }
+  return false;
 }
 
 /** Export the complete editable scene as a game-ready binary glTF. */
@@ -261,17 +273,24 @@ export type GlbRoundTripReport = {
   meshes: number;
   triangles: number;
   materials: number;
+  skinnedMeshes: number;
+  skeletons: number;
+  animations: number;
 };
 
 /** Parses the generated GLB again before download to catch corrupt or empty exports. */
 export async function validateGlbRoundTrip(buffer: ArrayBuffer): Promise<GlbRoundTripReport> {
+  const empty = { meshes: 0, triangles: 0, materials: 0, skinnedMeshes: 0, skeletons: 0, animations: 0 };
   try {
     const gltf = await new Promise<Awaited<ReturnType<GLTFLoader['parseAsync']>>>((resolve, reject) => {
       new GLTFLoader().parse(buffer, '', resolve, reject);
     });
     let meshes = 0;
     let triangles = 0;
+    let skinnedMeshes = 0;
+    const skeletons = new Set<object>();
     const materials = new Set<Material>();
+    const errors: string[] = [];
     gltf.scene.traverse((node) => {
       if (!(node instanceof Mesh)) return;
       meshes += 1;
@@ -279,19 +298,30 @@ export async function validateGlbRoundTrip(buffer: ArrayBuffer): Promise<GlbRoun
       triangles += Math.floor((node.geometry.index?.count ?? positionCount) / 3);
       const nodeMaterials = Array.isArray(node.material) ? node.material : [node.material];
       for (const material of nodeMaterials) materials.add(material);
+      if (node instanceof SkinnedMesh) {
+        skinnedMeshes += 1;
+        const skeleton = node.skeleton;
+        if (!skeleton || skeleton.bones.length === 0) {
+          errors.push('Round-trip validation found a skinned mesh with no skeleton.');
+        } else {
+          skeletons.add(skeleton);
+        }
+      }
     });
+    if (meshes > 0 && triangles === 0) errors.push('Round-trip validation found meshes with no triangles.');
     return {
-      errors: meshes > 0 && triangles === 0 ? ['Round-trip validation found meshes with no triangles.'] : [],
+      errors,
       meshes,
       triangles,
       materials: materials.size,
+      skinnedMeshes,
+      skeletons: skeletons.size,
+      animations: gltf.animations?.length ?? 0,
     };
   } catch (error) {
     return {
       errors: [error instanceof Error ? `GLB round-trip failed: ${error.message}` : 'GLB round-trip failed.'],
-      meshes: 0,
-      triangles: 0,
-      materials: 0,
+      ...empty,
     };
   }
 }

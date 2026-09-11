@@ -3,6 +3,7 @@ import { BoneEditorPanel } from './BoneEditorPanel';
 import { BlenderIcon } from '@/components/BlenderIcon';
 import { WeightBrushPanel } from './WeightBrushPanel';
 import { RigSceneAssetsPanel } from './RigSceneAssetsPanel';
+import { readRigDocumentSettings } from '@/core/rig/RigDocument';
 import type { CreaturePresetType } from '@/core/rig/creatureSkeletons';
 import { pushToast } from '@/app/Toast';
 import type { AnimationSession } from './AnimationSession';
@@ -27,8 +28,10 @@ export function RiggingPanel({
   const [activeTab, setActiveTab] = useState<'build' | 'bind' | 'pose'>('build');
   const [directWeight, setDirectWeight] = useState<number>(1.0);
   const status = session.getSetupStatus();
+  const settings = readRigDocumentSettings(session.rigDocument);
+  const armature = settings.armatureId ? session.project.armatures.get(settings.armatureId) : null;
   const selectedBone = session.selectedBoneId
-    ? session.project.armatures.get(session.rigDocument.id)?.bones.get(session.selectedBoneId)
+    ? armature?.bones.get(session.selectedBoneId)
     : null;
 
   const sourceModel = session.sourceModelDocument;
@@ -191,7 +194,7 @@ export function RiggingPanel({
                         }}
                       >
                         <option value="">(None - Root Space)</option>
-                        {Array.from(session.project.armatures.get(session.rigDocument.id)?.bones.values() ?? []).map((b) => (
+                        {Array.from(armature?.bones.values() ?? []).map((b) => (
                           <option key={b.id} value={b.id}>{b.name}</option>
                         ))}
                       </select>

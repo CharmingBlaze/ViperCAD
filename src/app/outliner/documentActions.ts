@@ -2,6 +2,7 @@ import type { EditorSession } from '@/core/editor/EditorSession';
 import type { DocumentId } from '@/core/document/types';
 import { getViperDocument } from '@/core/document/ViperProject';
 import { openDocumentTab } from '@/app/DocumentTabs';
+import { confirmAction } from '@/app/platform/appDialogs';
 import { pushToast } from '@/app/Toast';
 
 export function openProjectDocument(
@@ -46,12 +47,12 @@ export function renameProjectDocument(
   return true;
 }
 
-export function deleteProjectDocument(
+export async function deleteProjectDocument(
   session: EditorSession,
   documentId: DocumentId,
   kind: 'model' | 'level',
   onRefresh: () => void,
-): void {
+): Promise<void> {
   const { project, projectEditor } = session;
   const doc = getViperDocument(project, documentId);
   const documentIds = kind === 'model' ? project.modelDocumentIds : project.levelDocumentIds;
@@ -60,7 +61,13 @@ export function deleteProjectDocument(
     pushToast(`Cannot delete the last ${kindLabel}`, 'error');
     return;
   }
-  if (!window.confirm(`Delete ${kind} "${doc.name}"?`)) return;
+  const confirmed = await confirmAction({
+    title: `Delete ${kindLabel}`,
+    message: `Delete ${kindLabel.toLowerCase()} "${doc.name}"? This cannot be undone.`,
+    confirmLabel: 'Delete',
+    danger: true,
+  });
+  if (!confirmed) return;
   if (!projectEditor.deleteDocument(documentId)) return;
   if (projectEditor.activeDocumentId) session.openDocument(projectEditor.activeDocumentId);
   pushToast(`Deleted ${doc.name}`, 'info');

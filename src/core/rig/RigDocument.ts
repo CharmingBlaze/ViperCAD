@@ -1,10 +1,14 @@
 import type { ViperDocument } from '@/core/document/types';
 import type { ViperProject } from '@/core/document/types';
+import { cloneTransform } from '@/core/math/Transform';
 import { createDefaultArmature } from '@/core/rig/ArmatureFactory';
 import {
   createDefaultRigDocumentSettings,
   type AnimationClip,
   type Armature,
+  type RigClipSequenceItem,
+  type RigConstraint,
+  type RigCustomPose,
   type RigDocumentSettings,
   type SkinBinding,
 } from '@/core/rig/types';
@@ -25,6 +29,9 @@ export function readRigDocumentSettings(doc: ViperDocument): RigDocumentSettings
     skinBindingIds: [...(rig.skinBindingIds ?? [])],
     clipIds,
     activeClipId,
+    clipSequence: cloneClipSequence(rig.clipSequence),
+    customPoses: cloneCustomPoses(rig.customPoses),
+    constraints: cloneConstraints(rig.constraints),
   };
 }
 
@@ -35,7 +42,40 @@ export function writeRigDocumentSettings(doc: ViperDocument, settings: RigDocume
     skinBindingIds: [...settings.skinBindingIds],
     clipIds: [...settings.clipIds],
     activeClipId: settings.activeClipId,
+    clipSequence: cloneClipSequence(settings.clipSequence),
+    customPoses: cloneCustomPoses(settings.customPoses),
+    constraints: cloneConstraints(settings.constraints),
   };
+}
+
+function cloneConstraints(items: RigConstraint[] | undefined): RigConstraint[] {
+  if (!items?.length) return [];
+  return items.map((item) => ({
+    ...item,
+    limits: item.limits
+      ? {
+          min: item.limits.min ? { ...item.limits.min } : undefined,
+          max: item.limits.max ? { ...item.limits.max } : undefined,
+        }
+      : undefined,
+    offset: item.offset ? cloneTransform(item.offset) : undefined,
+  }));
+}
+
+function cloneClipSequence(items: RigClipSequenceItem[] | undefined): RigClipSequenceItem[] {
+  if (!items?.length) return [];
+  return items.map((item) => ({ ...item }));
+}
+
+function cloneCustomPoses(poses: RigCustomPose[] | undefined): RigCustomPose[] {
+  if (!poses?.length) return [];
+  return poses.map((pose) => ({
+    id: pose.id,
+    name: pose.name,
+    transforms: Object.fromEntries(
+      Object.entries(pose.transforms ?? {}).map(([id, transform]) => [id, cloneTransform(transform)]),
+    ),
+  }));
 }
 
 export function ensureRigArmature(project: ViperProject, rigDocument: ViperDocument): Armature {

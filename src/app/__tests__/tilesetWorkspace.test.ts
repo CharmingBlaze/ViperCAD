@@ -15,6 +15,7 @@ import {
   prepareTilePaint,
   setTileDrawMode,
   setTileDrawPlane,
+  snapTileDrawToNearestVertex,
   shouldKeepWorkspaceTileset,
   shouldPreviewTerrainAlbedo,
   shouldShowTilesetPanel,
@@ -262,10 +263,29 @@ describe('tileset workspace', () => {
     expect(workspace.texture.atlasUseFacePlane).toBe(true);
     expect(applyTileDrawHotkey(session, workspace, { key: '3', shiftKey: true, ctrlKey: false, metaKey: false })).toBe(true);
     expect(workspace.texture.atlasDrawShape).toBe('line');
+    expect(applyTileDrawHotkey(session, workspace, { key: 'i', shiftKey: false, ctrlKey: false, metaKey: false })).toBe(true);
+    expect(workspace.texture.atlasDrawMode).toBe('pick');
     expect(setTileDrawPlane(session, workspace, 'floor')).toBe(true);
     expect(toggleTileDrawSurfaceLock(session, workspace)).toBe(true);
     expect(workspace.texture.atlasSurfaceLocked).toBe(true);
     expect(session.tools.getActive()?.id).toBe('tile-draw');
+  });
+
+  it('snaps the work plane to the nearest vertex', () => {
+    const session = new EditorSession();
+    const workspace = new WorkspaceController();
+    const { objectId } = commitMeshObject(session.document, buildBox({ width: 2, height: 2, depth: 2 }));
+    session.selection.selectObjects([objectId], 'replace');
+    session.constructionPlane = {
+      origin: { x: 10, y: 10, z: 10 },
+      normal: { x: 0, y: 1, z: 0 },
+      xAxis: { x: 1, y: 0, z: 0 },
+      yAxis: { x: 0, y: 0, z: 1 },
+    };
+    expect(snapTileDrawToNearestVertex(session, workspace)).toBe(true);
+    expect(session.constructionPlane.origin.x).toBeLessThan(2);
+    expect(session.constructionPlane.origin.y).toBeLessThan(2);
+    expect(workspace.texture.atlasUseFacePlane).toBe(true);
   });
 
   it('clamps a leftover stamp back onto the current atlas', () => {

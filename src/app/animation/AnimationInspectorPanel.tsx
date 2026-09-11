@@ -258,7 +258,7 @@ export function AnimationInspectorPanel({ session, onRefresh, onToggleCollapse, 
                         step={0.05}
                         value={constraint.influence}
                         onChange={(event) => {
-                          constraint.influence = Number(event.target.value);
+                          session.setConstraintInfluence(constraint.id, Number(event.target.value));
                           onRefresh();
                         }}
                       />

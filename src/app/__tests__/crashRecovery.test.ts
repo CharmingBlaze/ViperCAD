@@ -4,6 +4,7 @@ import {
   captureOpenProject,
   flushCrashAutosave,
   registerProjectCapture,
+  shouldFlushPageHideAutosave,
 } from '@/app/crashRecovery';
 
 describe('crashRecovery', () => {
@@ -48,5 +49,12 @@ describe('crashRecovery', () => {
     });
     expect(captureOpenProject()).toBeNull();
     expect(() => flushCrashAutosave('Bad capture')).not.toThrow();
+  });
+
+  it('skips a normal page hide when the project is clean', () => {
+    expect(shouldFlushPageHideAutosave(null)).toBe(true);
+    expect(shouldFlushPageHideAutosave(() => false)).toBe(false);
+    expect(shouldFlushPageHideAutosave(() => true)).toBe(true);
+    expect(shouldFlushPageHideAutosave(() => { throw new Error('dirty check failed'); })).toBe(true);
   });
 });

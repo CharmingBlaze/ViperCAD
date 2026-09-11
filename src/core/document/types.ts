@@ -25,6 +25,8 @@ export type DocumentSettings = {
   thumbnailImageId?: ImageId | null;
   /** Rig/animation document configuration when kind is `rig`. */
   rig?: RigDocumentSettings;
+  /** When false, Front/Side blueprints stay hidden in the perspective pane. */
+  blockoutShowInPersp?: boolean;
 };
 
 export type ViperDocument = {

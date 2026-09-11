@@ -87,6 +87,38 @@ export type AnimationClip = {
   animationType?: 'normal' | 'additive';
 };
 
+export type RigClipSequenceItem = {
+  id: string;
+  clipId: AnimationClipId;
+  name: string;
+  startTime: number;
+  duration: number;
+  speedMultiplier: number;
+  blendIn: number;
+  blendOut: number;
+};
+
+export type RigCustomPose = {
+  id: string;
+  name: string;
+  transforms: Record<BoneId, Transform>;
+};
+
+export type RigConstraint = {
+  id: string;
+  name: string;
+  ownerId: BoneId;
+  targetId?: BoneId;
+  type: string;
+  influence: number;
+  enabled: boolean;
+  limits?: {
+    min?: { x: number; y: number; z: number };
+    max?: { x: number; y: number; z: number };
+  };
+  offset?: Transform;
+};
+
 export type RigDocumentSettings = {
   /** Model document that supplies skin meshes for this rig. */
   sourceModelDocumentId: DocumentId | null;
@@ -95,6 +127,12 @@ export type RigDocumentSettings = {
   /** All animation clips owned by this rig document. */
   clipIds: AnimationClipId[];
   activeClipId: AnimationClipId | null;
+  /** Clip sequencer playlist. Survives save/open. */
+  clipSequence: RigClipSequenceItem[];
+  /** Named pose snapshots from the dope sheet. Survives save/open. */
+  customPoses: RigCustomPose[];
+  /** Bone constraints from the animation inspector. Survives save/open. */
+  constraints: RigConstraint[];
 };
 
 export function createDefaultRigDocumentSettings(sourceModelDocumentId: DocumentId | null = null): RigDocumentSettings {
@@ -104,5 +142,8 @@ export function createDefaultRigDocumentSettings(sourceModelDocumentId: Document
     skinBindingIds: [],
     clipIds: [],
     activeClipId: null,
+    clipSequence: [],
+    customPoses: [],
+    constraints: [],
   };
 }

@@ -3,8 +3,11 @@ import { EditorSession } from '@/core/editor/EditorSession';
 import { CreateDoodleTool, smoothDoodlePoints } from '@/core/tools/CreateDoodleTool';
 import { v3 } from '@/core/math/Vec3';
 import type { ToolPointerInput } from '@/core/tools/Tool';
-import { readCurveOperation } from '@/core/curves/CurveOperation';
+import { readCurveOperation, evaluateCurveOperation, serializeCurveOperation } from '@/core/curves/CurveOperation';
+import { applyDefaultBlockoutLook } from '@/core/blockout/BlockoutMaterial';
 import { readObjectModifierStack } from '@/core/modifiers/serialize';
+import { DEFAULT_PLACEHOLDER_IMAGE_NAME } from '@/core/image/DefaultPlaceholderImage';
+import { getObjectOrigin, getObjectWorldBounds } from '@/core/editor/OriginTools';
 
 function pointer(
   origin: { x: number; y: number; z: number },
@@ -461,6 +464,108 @@ describe('CreateDoodleTool', () => {
       operation!.points.map((p) => `${p.x.toFixed(3)},${p.y.toFixed(3)},${p.z.toFixed(3)}`),
     );
     expect(unique.size).toBe(4);
+  });
+
+  it('gives blockout volumes the default texture and a centred origin', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-doodle') as CreateDoodleTool;
+    session.tools.setActive('create-doodle', session.context());
+    tool.setCreateContext('workflows', 'profile-solid', session.context());
+    tool.setInputMode('pen', session.context());
+    tool.setCurveType('polyline', session.context());
+    tool.setStyle('profile-solid', session.context());
+    tool.setAutoConnect(true, session.context());
+    const origin = { x: 0, y: 0, z: 4 };
+
+    tool.begin(pointer(origin, { x: 0, y: 0, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 2, y: 0, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 2, y: 2, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 0, y: 2, z: -1 }), session.context());
+    tool.begin(pointer(origin, { x: 0.01, y: 0.01, z: -1 }), session.context());
+
+    const object = [...session.document.objects.values()][0]!;
+    const material = session.document.materials.get(object.materialSlotIds[0]!)!;
+    expect(material.baseColourTextureId).toBeTruthy();
+    const texture = session.document.textures.get(material.baseColourTextureId!)!;
+    expect(session.document.images.get(texture.imageAssetId)?.name).toBe(
+      DEFAULT_PLACEHOLDER_IMAGE_NAME,
+    );
+    const objectOrigin = getObjectOrigin(session.document, object.id);
+    const bounds = getObjectWorldBounds(session.document, object.id)!;
+    expect(objectOrigin.x).toBeCloseTo(bounds.center.x, 5);
+    expect(objectOrigin.y).toBeCloseTo(bounds.center.y, 5);
+    expect(objectOrigin.z).toBeCloseTo(bounds.center.z, 5);
+    const mesh = session.document.meshes.get(object.meshId!)!;
+    const xs = [...mesh.vertices.values()].map((vertex) => vertex.position.x);
+    const ys = [...mesh.vertices.values()].map((vertex) => vertex.position.y);
+    const zs = [...mesh.vertices.values()].map((vertex) => vertex.position.z);
+    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(0, 5);
+    expect((Math.min(...ys) + Math.max(...ys)) / 2).toBeCloseTo(0, 5);
+    expect((Math.min(...zs) + Math.max(...zs)) / 2).toBeCloseTo(0, 5);
+    const layerId = mesh.defaultUvLayerId!;
+    const uvs = [...mesh.faceCorners.values()]
+      .map((corner) => corner.uvs.get(layerId))
+      .filter((uv): uv is { x: number; y: number } => !!uv);
+    expect(Math.max(...uvs.map((uv) => uv.x)) - Math.min(...uvs.map((uv) => uv.x))).toBeGreaterThan(0.1);
+    expect(Math.max(...uvs.map((uv) => uv.y)) - Math.min(...uvs.map((uv) => uv.y))).toBeGreaterThan(0.1);
+  });
+
+  it('creates each blockout volume as a new object and keeps the look after a live rebuild', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-doodle') as CreateDoodleTool;
+    session.tools.setActive('create-doodle', session.context());
+    tool.setCreateContext('workflows', 'profile-solid', session.context());
+    tool.setInputMode('pen', session.context());
+    tool.setCurveType('polyline', session.context());
+    tool.setStyle('profile-solid', session.context());
+    tool.setAutoConnect(true, session.context());
+    const origin = { x: 0, y: 0, z: 4 };
+
+    const drawSquare = (ox: number) => {
+      session.tools.setActive('create-doodle', session.context());
+      tool.setCreateContext('workflows', 'profile-solid', session.context());
+      tool.setInputMode('pen', session.context());
+      tool.setCurveType('polyline', session.context());
+      tool.setStyle('profile-solid', session.context());
+      tool.setAutoConnect(true, session.context());
+      tool.begin(pointer(origin, { x: ox, y: 0, z: -1 }), session.context());
+      tool.begin(pointer(origin, { x: ox + 2, y: 0, z: -1 }), session.context());
+      tool.begin(pointer(origin, { x: ox + 2, y: 2, z: -1 }), session.context());
+      tool.begin(pointer(origin, { x: ox, y: 2, z: -1 }), session.context());
+      tool.begin(pointer(origin, { x: ox + 0.01, y: 0.01, z: -1 }), session.context());
+    };
+
+    drawSquare(0);
+    const firstId = [...session.document.objects.keys()][0]!;
+    drawSquare(4);
+    expect(session.document.objects.size).toBe(2);
+    const ids = [...session.document.objects.keys()];
+    expect(ids).toContain(firstId);
+    expect(new Set(ids).size).toBe(2);
+    expect(session.document.rootObjectIds).toHaveLength(2);
+    expect(
+      [...session.document.objects.values()].every((object) => object.parentId === null),
+    ).toBe(true);
+
+    const first = session.document.objects.get(firstId)!;
+    const operation = readCurveOperation(first.metadata.curveOperation)!;
+    const next = { ...operation, radius: operation.radius * 2 };
+    const rebuilt = evaluateCurveOperation(next);
+    rebuilt.id = first.meshId!;
+    session.document.meshes.set(first.meshId!, rebuilt);
+    first.metadata.curveOperation = serializeCurveOperation(next);
+    applyDefaultBlockoutLook(session.document, first.id);
+
+    const material = session.document.materials.get(first.materialSlotIds[0]!)!;
+    const texture = session.document.textures.get(material.baseColourTextureId!)!;
+    expect(session.document.images.get(texture.imageAssetId)?.name).toBe(
+      DEFAULT_PLACEHOLDER_IMAGE_NAME,
+    );
+    const objectOrigin = getObjectOrigin(session.document, first.id);
+    const bounds = getObjectWorldBounds(session.document, first.id)!;
+    expect(objectOrigin.x).toBeCloseTo(bounds.center.x, 5);
+    expect(objectOrigin.y).toBeCloseTo(bounds.center.y, 5);
+    expect(objectOrigin.z).toBeCloseTo(bounds.center.z, 5);
   });
 
   it('adds live mirror modifiers to newly created blockout geometry', () => {

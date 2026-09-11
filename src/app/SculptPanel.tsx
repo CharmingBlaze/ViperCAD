@@ -399,8 +399,8 @@ export function SculptPanel({
           key={`brushes-${layoutKey}`}
           title="Brushes"
           storageKey={SCULPT_PANEL_POSITION_KEYS.brushes}
-          defaultPosition={{ x: 12, y: 88 }}
-          defaultSize={{ width: 196 }}
+          defaultPosition={{ x: 12, y: 72 }}
+          defaultSize={{ width: 168 }}
           className="sculpt-float-panel sculpt-float-brushes"
           onClose={onToggleBrushes}
         >
@@ -447,8 +447,8 @@ export function SculptPanel({
           key={`settings-${layoutKey}`}
           title="Brush"
           storageKey={SCULPT_PANEL_POSITION_KEYS.settings}
-          defaultPosition={{ x: Math.max(12, viewportW - 300), y: 88 }}
-          defaultSize={{ width: 272 }}
+          defaultPosition={{ x: Math.max(12, viewportW - 240), y: 72 }}
+          defaultSize={{ width: 220 }}
           className="sculpt-float-panel sculpt-float-settings"
           onClose={onToggleSettings}
         >
@@ -719,8 +719,8 @@ export function SculptPanel({
           key={`mesh-${layoutKey}`}
           title="Mesh"
           storageKey={SCULPT_PANEL_POSITION_KEYS.mesh}
-          defaultPosition={{ x: Math.max(12, viewportW - 584), y: 88 }}
-          defaultSize={{ width: 272 }}
+          defaultPosition={{ x: Math.max(12, viewportW - 472), y: 72 }}
+          defaultSize={{ width: 220 }}
           defaultMinimized={viewportW < 1280}
           className="sculpt-float-panel sculpt-float-mesh"
           onClose={onToggleMesh}

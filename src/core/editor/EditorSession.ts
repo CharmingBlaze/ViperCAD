@@ -3,6 +3,7 @@ import {
   buildModelDocumentView,
   projectFromLegacyDocument,
   removeGeneratedDefaultChecker,
+  clearProjectDirty,
 } from '@/core/document/ViperProject';
 import { ensureCurveObjectsLocalized } from '@/core/curves/CurveOperation';
 import type { DocumentId, DocumentKind, ModelDocument, ObjectId, SceneObject, ViperProject } from '@/core/document/types';
@@ -27,6 +28,7 @@ import { TerrainFeatureTool } from '@/core/tools/TerrainFeatureTool';
 import { BlockoutVectorTool } from '@/core/tools/BlockoutVectorTool';
 import { BlockoutSolidTool } from '@/core/tools/BlockoutSolidTool';
 import { BlockoutRoundTool } from '@/core/tools/BlockoutRoundTool';
+import { hydrateBlockoutReferences } from '@/core/blockout/BlockoutReferenceObject';
 import { createEmptyBlockoutReferenceState, type BlockoutReferenceState } from '@/core/blockout/ReferenceImages';
 import { TerrainStructureTool } from '@/core/tools/TerrainStructureTool';
 import { ToolController } from '@/core/tools/ToolController';
@@ -47,9 +49,10 @@ import { computeFaceNormal } from '@/core/mesh/Normals';
 import { faceVertexIds } from '@/core/mesh/EditableMesh';
 import { invalidateDisplayMeshCache } from '@/core/modifiers/displayMesh';
 import { clearSculptBvhs, pruneSculptBvhs } from '@/core/sculpt/MeshSculptTarget';
-import { clearAllMeshMasks, pruneMeshMasks } from '@/core/sculpt/SculptMask';
+import { clearAllMeshMasks, hydrateSculptMasks, pruneMeshMasks } from '@/core/sculpt/SculptMask';
 import { clearSpatialIndexes, pruneSpatialIndexes } from '@/core/sculpt/SculptSpatialIndex';
 import { clearVertexNeighborMaps, pruneVertexNeighborMaps } from '@/core/sculpt/VertexNeighbors';
+import { pushToast } from '@/app/toastBus';
 
 type SnapIndexCache = {
   meshId: string;
@@ -71,6 +74,7 @@ export class EditorSession {
   private snapBvhCache = new Map<string, MeshBvh>();
 
   constructor(projectOrDocument?: ViperProject | ModelDocument) {
+    const createdFresh = !projectOrDocument;
     if (projectOrDocument && 'documents' in projectOrDocument) {
       this.projectEditor = new ProjectEditor(projectOrDocument);
     } else if (projectOrDocument) {
@@ -79,6 +83,7 @@ export class EditorSession {
       this.projectEditor = new ProjectEditor(createEmptyProject());
     }
     removeGeneratedDefaultChecker(this.projectEditor.project);
+    if (createdFresh) clearProjectDirty(this.projectEditor.project);
     this.document = this.projectEditor.activeDocumentView();
     this.tools = new ToolController();
     this.transform = this.createTransformSystem(this.projectEditor.activeSession());
@@ -86,6 +91,8 @@ export class EditorSession {
     const open = this.projectEditor.activeSession();
     this.tools.setActive(open.activeToolId || 'create-primitive', this.context());
     syncFocusScopeFilter(this);
+    this.blockoutReference = hydrateBlockoutReferences(this.project, this.blockoutReference);
+    hydrateSculptMasks(this.project.meshes.values());
     this.queuePlaceholderHydration();
   }
 
@@ -190,9 +197,7 @@ export class EditorSession {
       gridSize: this.document.settings.snapIncrement,
       resolveSnap: (query) => this.resolveDocumentSnap(query),
       requestRedraw: () => this.requestRedraw(),
-      notify: (text, kind) => {
-        void import('@/app/Toast').then(({ pushToast }) => pushToast(text, kind ?? 'info'));
-      },
+      notify: (text, kind) => pushToast(text, kind ?? 'info'),
       setActiveTool: (id) => this.tools.setActive(id, this.context()),
       setGizmoMode: (mode) => this.transform.setGizmoMode(mode),
     };
@@ -309,6 +314,8 @@ export class EditorSession {
     this.releaseRuntimeCaches(true);
     this.tools.setActive('select', this.context());
     syncFocusScopeFilter(this);
+    this.blockoutReference = hydrateBlockoutReferences(this.project, this.blockoutReference);
+    hydrateSculptMasks(this.project.meshes.values());
     this.queuePlaceholderHydration();
     this.requestRedraw();
   }

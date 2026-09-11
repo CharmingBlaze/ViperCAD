@@ -115,6 +115,13 @@ export function Viewport({ session, workspace }: Props) {
     });
   }, [workspace]);
 
+  const toggleXRay = useCallback(() => {
+    session.selection.setXRay(!session.selection.state.xRay);
+    session.requestRedraw();
+    viewportEngine.invalidate();
+    syncUi();
+  }, [session, syncUi]);
+
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -791,6 +798,8 @@ export function Viewport({ session, workspace }: Props) {
                       viewportEngine.applyViewportNavDrag(navMode, deltaX, deltaY, viewId);
                       syncUi();
                     }}
+                    xRayEnabled={session.selection.state.xRay}
+                    onToggleXRay={toggleXRay}
                     ghostEnabled={viewportEngine.animationSession?.onionSkinning.enabled}
                     onToggleGhost={
                       workspace.shellMode === 'animate' && viewportEngine.animationSession
@@ -893,6 +902,8 @@ export function Viewport({ session, workspace }: Props) {
                   viewportEngine.applyViewportNavDrag(navMode, deltaX, deltaY, viewId);
                   syncUi();
                 }}
+                xRayEnabled={session.selection.state.xRay}
+                onToggleXRay={toggleXRay}
               />
             )}
             </div>
@@ -997,7 +1008,7 @@ export function Viewport({ session, workspace }: Props) {
 
       {splitLayout && (
         <div
-          className="divider texture-split"
+          className="divider divider-v texture-split"
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize 3D and UV split"

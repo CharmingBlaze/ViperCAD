@@ -16,6 +16,11 @@ export default defineConfig({
         main: path.resolve(__dirname, 'index.html'),
         rig: path.resolve(__dirname, 'rig/index.html'),
       },
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/three')) return 'three';
+        },
+      },
     },
   },
   test: {

@@ -106,7 +106,7 @@ export type TextureWorkspaceState = {
   brushSize: number;
   ditherMode: 'none' | 'checker' | 'bayer4';
   recolorOnlyBg: boolean;
-  /** Paint bucket colour range, matching Photoshop's 0–255 tolerance control. */
+  /** Paint bucket colour range, matching the 0–255 tolerance control. */
   fillTolerance: number;
   /** Fill only connected pixels, or every matching pixel in the texture. */
   fillContiguous: boolean;
@@ -145,6 +145,16 @@ export type TextureWorkspaceState = {
   atlasRepeatU: number;
   /** How many times to stamp the selected tile across a face / plane (V axis). */
   atlasRepeatV: number;
+  /** Stretch the tile across the face U axis when painting. */
+  atlasStretchU: boolean;
+  /** Stretch the tile across the face V axis when painting. */
+  atlasStretchV: boolean;
+  atlasAlignU: 'min' | 'center' | 'max';
+  atlasAlignV: 'min' | 'center' | 'max';
+  /** Selected / lowest face edge is the tile bottom. */
+  atlasHintDown: boolean;
+  /** Multi-tile palette picks become one face with one UV rect. */
+  atlasJoinMulti: boolean;
   atlasFillColumns: number;
   atlasFillRows: number;
   atlasFillPattern: 'repeat' | 'random';
@@ -250,6 +260,12 @@ export function createDefaultTextureWorkspace(): TextureWorkspaceState {
     atlasSelectionRows: 1,
     atlasRepeatU: 1,
     atlasRepeatV: 1,
+    atlasStretchU: true,
+    atlasStretchV: true,
+    atlasAlignU: 'center',
+    atlasAlignV: 'center',
+    atlasHintDown: true,
+    atlasJoinMulti: true,
     atlasFillColumns: 4,
     atlasFillRows: 4,
     atlasFillPattern: 'repeat',
@@ -337,6 +353,12 @@ export function loadTextureWorkspace(): TextureWorkspaceState {
       : defaults.atlasPanelDock;
     merged.atlasPanelPinned = parsed.atlasPanelPinned === true;
     merged.atlasNavigatorPan = parsed.atlasNavigatorPan === true;
+    merged.atlasStretchU = parsed.atlasStretchU !== false;
+    merged.atlasStretchV = parsed.atlasStretchV !== false;
+    merged.atlasAlignU = parsed.atlasAlignU === 'min' || parsed.atlasAlignU === 'max' ? parsed.atlasAlignU : 'center';
+    merged.atlasAlignV = parsed.atlasAlignV === 'min' || parsed.atlasAlignV === 'max' ? parsed.atlasAlignV : 'center';
+    merged.atlasHintDown = parsed.atlasHintDown !== false;
+    merged.atlasJoinMulti = parsed.atlasJoinMulti !== false;
     merged.atlasRecentTiles = Array.isArray(parsed.atlasRecentTiles)
       ? parsed.atlasRecentTiles.filter((tile) => tile && Number.isFinite(tile.x) && Number.isFinite(tile.y)).slice(0, 8)
       : [];

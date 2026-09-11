@@ -56,8 +56,13 @@ import {
 } from '@/renderer/ViewportClip';
 import { createViewportGrid, syncViewportGrid } from '@/renderer/ViewportGrid';
 import type { ViewportGrid } from '@/renderer/ViewportGrid';
-import { createViewportWorld, VIEWPORT_CLEAR, VIEWPORT_ZENITH } from '@/renderer/ViewportWorld';
-import type { ViewportWorld } from '@/renderer/ViewportWorld';
+import { createViewportWorld, ViewportWorld, VIEWPORT_CLEAR, VIEWPORT_ZENITH } from '@/renderer/ViewportWorld';
+import { applyThemeHex } from '@/renderer/themeColor';
+import {
+  getActiveTheme,
+  parseHexColor,
+  subscribeWorkspaceTheme,
+} from '@/app/theme/themeTokens';
 import { faceVertexIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
 import type { ObjectId } from '@/core/document/types';
 import type { EditableMesh, EdgeId, FaceId, VertexId } from '@/core/mesh/types';
@@ -83,6 +88,12 @@ import { LoopCutTool } from '@/core/tools/LoopCutTool';
 import { PushPullTool } from '@/core/tools/PushPullTool';
 import { TileDrawTool } from '@/core/tools/TileDrawTool';
 import { nudgeTileDrawPlane } from '@/app/tilesetWorkspace';
+import {
+  endAtlasFacePaintStroke,
+  localPointOnObject,
+  paintAtlasFace,
+  pickAtlasTileFromFace,
+} from '@/app/atlasFacePaint';
 import { TerrainSculptTool } from '@/core/tools/TerrainSculptTool';
 import { MeshSculptTool } from '@/core/tools/MeshSculptTool';
 import { raycastSculptTarget } from '@/core/sculpt/MeshSculptTarget';
@@ -156,16 +167,21 @@ import {
   isStylusButtonEvent,
   modifierNavKind,
   navCursor,
+  navOrbitRadians,
+  navPanPixels,
+  navWheelZoomPixels,
+  navZoomFactor,
   ViewportInputEngine,
-  wheelZoomPixels,
 } from '@/app/viewport/ViewportInputEngine';
 import { ModifierPreviewOverlay, type ModifierPreview } from '@/renderer/ModifierPreviewOverlay';
 import {
   CurveControlOverlay,
   type CurveControlTarget,
 } from '@/renderer/CurveControlOverlay';
+import { applyDefaultBlockoutLook } from '@/core/blockout/BlockoutMaterial';
 import {
   evaluateCurveOperation,
+  isWorkflowOperation,
   readCurveOperation,
   serializeCurveOperation,
   type CurveOperation,
@@ -254,6 +270,8 @@ export class ViewportEngine {
   private resizeObserver: ResizeObserver | null = null;
   private unsubRedraw: (() => void) | null = null;
   private unsubWorkspace: (() => void) | null = null;
+  private unsubTheme: (() => void) | null = null;
+  private viewportClear = VIEWPORT_CLEAR;
   private contextLost = false;
   private attached = false;
   private needsRender = true;
@@ -311,6 +329,7 @@ export class ViewportEngine {
   private pendingPrimitiveMove: { event: PointerEvent; paneId: ViewId } | null = null;
   private pendingPaintMove: { event: PointerEvent; paneId: ViewId } | null = null;
   private painting3D = false;
+  private atlasPaintDrag: { paneId: ViewId; pointerId: number } | null = null;
   private seamStroke: Map<string, { mesh: EditableMesh; edgeId: EdgeId; before: boolean; after: boolean }> | null = null;
   private paintStroke = new PixelStrokeRecorder();
   private lastPaintPixel: { x: number; y: number; imageId: string } | null = null;
@@ -382,6 +401,9 @@ export class ViewportEngine {
       this.onLayoutChange?.();
       this.rebindActiveControls();
     });
+    this.unsubTheme?.();
+    this.unsubTheme = subscribeWorkspaceTheme(() => this.applyThemeColors());
+    this.applyThemeColors();
     this.resize();
     this.syncScene();
     this.rebindActiveControls();
@@ -401,6 +423,8 @@ export class ViewportEngine {
     this.unsubRedraw = null;
     this.unsubWorkspace?.();
     this.unsubWorkspace = null;
+    this.unsubTheme?.();
+    this.unsubTheme = null;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.unbindPointer();
@@ -416,6 +440,7 @@ export class ViewportEngine {
     this.clearMarquee(false);
     this.seamStroke = null;
     this.painting3D = false;
+    this.atlasPaintDrag = null;
     this.workspace?.input.end('tool');
     this.pendingTweak = null;
     this.lastPointerSamples.clear();
@@ -438,8 +463,6 @@ export class ViewportEngine {
     this.host = null;
     this.session = null;
     this.workspace = null;
-    this.world = null;
-    this.shadowReceiver = null;
     this.lightingFog = null;
     this.onLayoutChange = null;
     this.onCameraChange = null;
@@ -466,6 +489,46 @@ export class ViewportEngine {
 
   invalidate(): void {
     this.needsRender = true;
+  }
+
+  private recoverThemeTargets(): void {
+    if (!this.scene) return;
+    if (!this.world) {
+      const found = this.scene.getObjectByName('ViewportWorld');
+      if (found instanceof ViewportWorld) this.world = found;
+    }
+    if (!this.shadowReceiver) {
+      const found = this.scene.getObjectByName('Viewport shadow receiver');
+      if (found instanceof Mesh) {
+        this.shadowReceiver = found as Mesh<PlaneGeometry, ShadowMaterial>;
+      }
+    }
+  }
+
+  private applyThemeColors(): void {
+    const palette = getActiveTheme().palette;
+    this.recoverThemeTargets();
+    this.viewportClear = parseHexColor(palette.horizon);
+    if (this.scene) {
+      if (this.scene.background instanceof Color) {
+        this.scene.background.setHex(parseHexColor(palette.zenith));
+      } else {
+        this.scene.background = new Color(parseHexColor(palette.zenith));
+      }
+    }
+    this.world?.applyPalette(palette);
+    for (const pane of this.panes.values()) {
+      pane.grid.applyPalette(palette);
+    }
+    this.gizmo.applyPalette(palette);
+    this.originOverlay.applyPalette(palette);
+    this.overlays.applyPalette(palette);
+    if (this.shadowReceiver) {
+      applyThemeHex(this.shadowReceiver.material.color, palette.ground);
+      this.shadowReceiver.material.needsUpdate = true;
+    }
+    if (this.attached && this.session) this.syncScene();
+    this.invalidate();
   }
 
   setRenderQuality(scale: number): void {
@@ -671,6 +734,7 @@ export class ViewportEngine {
     this.sculptHardnessPreview.name = 'Sculpt Hardness';
     scene.add(this.modifierPreview.root);
     this.renderer = renderer;
+    this.applyThemeColors();
     return true;
   }
 
@@ -832,14 +896,9 @@ export class ViewportEngine {
   panViewportByPixels(deltaX: number, deltaY: number, viewId: ViewId): void {
     const pane = this.ensurePaneControls(viewId);
     if (!pane?.controls) return;
-    if (pane.camera instanceof OrthographicCamera) {
-      // Ortho views: match OrbitControls / RMB pan (drag right → view moves right).
-      pane.controls.pan(deltaX, deltaY);
-    } else {
-      // Perspective nav: same pixel convention as ortho (OrbitControls pan sign).
-      pane.controls.pan(deltaX, deltaY);
-    }
-    pane.controls.update();
+    const pan = navPanPixels(deltaX, deltaY);
+    pane.controls.pan(pan.dx, pan.dy);
+    this.commitControls(pane.controls);
     if (pane.camera instanceof OrthographicCamera) {
       this.lockOrthoPane(pane);
       this.absorbPaneOrthoZoom(pane);
@@ -855,16 +914,16 @@ export class ViewportEngine {
     if (!pane?.controls) return;
     if (pane.camera instanceof OrthographicCamera) {
       // Ortho views: drag down zooms out, drag up zooms in.
-      const factor = Math.exp(deltaY * 0.008);
+      const factor = navZoomFactor(deltaY);
       pane.orthoHeight = clampOrthoHeight(pane.orthoHeight * factor);
       this.lockOrthoPane(pane);
       this.absorbPaneOrthoZoom(pane);
     } else {
       // Perspective magnifier — same delta sign as ortho, inverted dolly (drag up zooms in).
-      const factor = Math.exp(deltaY * 0.008);
+      const factor = navZoomFactor(deltaY);
       if (factor >= 1) pane.controls.dollyIn(factor);
       else pane.controls.dollyOut(1 / factor);
-      pane.controls.update();
+      this.commitControls(pane.controls);
     }
     this.persistCameras();
     this.notifyCameraChange(viewId);
@@ -904,7 +963,7 @@ export class ViewportEngine {
   }
 
   private zoomViewportFromWheel(deltaY: number, deltaMode: number, viewId: ViewId): void {
-    this.zoomViewportByPixels(wheelZoomPixels(deltaY, deltaMode) * 0.45, viewId);
+    this.zoomViewportByPixels(navWheelZoomPixels(deltaY, deltaMode), viewId);
   }
 
   private applyViewportOrbit(deltaX: number, deltaY: number, viewId: ViewId): void {
@@ -916,13 +975,21 @@ export class ViewportEngine {
     }
     const controls = pane.controls;
     if (!controls) return;
-    const radiansPerPixel = 0.012;
-    controls.rotateLeft(deltaX * radiansPerPixel);
-    controls.rotateUp(deltaY * radiansPerPixel);
-    controls.update();
+    const orbit = navOrbitRadians(deltaX, deltaY);
+    controls.rotateLeft(orbit.theta);
+    controls.rotateUp(orbit.phi);
+    this.commitControls(controls);
     this.persistCameras();
     this.notifyCameraChange(viewId);
     this.invalidate();
+  }
+
+  /** Apply queued orbit/pan/zoom once so damping leftover cannot pile up between pointer events. */
+  private commitControls(controls: OrbitControls): void {
+    const damping = controls.enableDamping;
+    controls.enableDamping = false;
+    controls.update();
+    controls.enableDamping = damping;
   }
 
   private ensurePaneControls(viewId: ViewId): Pane | null {
@@ -1097,7 +1164,7 @@ export class ViewportEngine {
     if (!pane.controls) {
       const controls = new OrbitControls(pane.camera, this.renderer.domElement);
       controls.enableDamping = true;
-      controls.dampingFactor = 0.08;
+      controls.dampingFactor = 0.14;
       controls.screenSpacePanning = true;
       controls.minDistance = ORBIT_MIN_DISTANCE;
       controls.maxDistance = ORBIT_MAX_DISTANCE;
@@ -1138,6 +1205,7 @@ export class ViewportEngine {
       pane.controls.maxDistance = ORBIT_MAX_DISTANCE;
       pane.controls.minDistance =
         pane.camera instanceof PerspectiveCamera ? ORBIT_MIN_DISTANCE : ORTHO_MIN_DISTANCE;
+      pane.controls.dampingFactor = 0.14;
     }
 
     if (pane.controls) {
@@ -1327,6 +1395,11 @@ export class ViewportEngine {
       return;
     }
 
+    if (this.atlasPaintDrag && id && (e.buttons & 1)) {
+      this.stampAtlasPaintHit(e, id);
+      this.invalidate();
+      return;
+    }
     if (this.painting3D && id && (e.buttons & 1)) {
       this.pendingPaintMove = { event: e, paneId: id };
       this.invalidate();
@@ -1498,11 +1571,17 @@ export class ViewportEngine {
       const input = this.meshSculptPointerInput(e, id);
       tool.updatePreview(input, this.session!.context());
       if (tool.dragging && (e.buttons & 1)) {
+        if (!input.worldPosition) {
+          this.invalidate();
+          return;
+        }
         tool.update(input, this.session!.context());
       }
       this.updateMeshSculptBrushPreview(tool);
       this.interactionOverlay.updateTransform(e, tool.statusLine());
-      if (this.renderer) this.renderer.domElement.style.cursor = 'crosshair';
+      if (this.renderer) {
+        this.renderer.domElement.style.cursor = tool.previewHit ? 'crosshair' : '';
+      }
       this.invalidate();
       return;
     }
@@ -1935,17 +2014,26 @@ export class ViewportEngine {
 
     if (tool instanceof MeshSculptTool) {
       const input = this.meshSculptPointerInput(e, id);
-      e.preventDefault();
-      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-      this.rebindActiveControls();
-      this.workspace.input.begin('tool');
-      this.syncOrbitEnabled();
       tool.updatePreview(input, this.session!.context());
-      tool.begin(input, this.session!.context());
       this.updateMeshSculptBrushPreview(tool);
-      this.interactionOverlay.updateTransform(e, tool.statusLine());
-      this.invalidate();
-      return;
+      if (!input.worldPosition) {
+        this.invalidate();
+        // Missed the mesh — leave LMB for orbit / pan / select.
+      } else {
+        e.preventDefault();
+        (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+        this.rebindActiveControls();
+        this.workspace.input.begin('tool');
+        this.syncOrbitEnabled();
+        tool.begin(input, this.session!.context());
+        if (!tool.dragging) {
+          this.workspace.input.end('tool');
+          this.syncOrbitEnabled();
+        }
+        this.interactionOverlay.updateTransform(e, tool.statusLine());
+        this.invalidate();
+        return;
+      }
     }
 
     if (tool instanceof TerrainObjectTool) {
@@ -1992,7 +2080,28 @@ export class ViewportEngine {
     }
 
     // UV Edit: click picks a face, drag orbits — same as the modelling viewport.
+    // Paint mode: click-drag stamps faces like a map editor.
     if (this.isTextureFaceEditing()) {
+      const session = this.session;
+      const workspace = this.workspace;
+      if (session && workspace?.texture.atlasPaintMode && session.tools.getActive()?.id !== 'tile-draw') {
+        const hit = this.resolvePointerHit(e, id);
+        if (hit?.faceId) {
+          e.preventDefault();
+          (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+          this.rebindActiveControls();
+          if (e.altKey) {
+            pickAtlasTileFromFace(session, workspace, hit.objectId, hit.faceId);
+          } else {
+            this.atlasPaintDrag = { paneId: id, pointerId: e.pointerId };
+            workspace.input.begin('tool');
+            this.syncOrbitEnabled();
+            this.stampAtlasPaintHit(e, id, hit);
+          }
+          this.invalidate();
+          return;
+        }
+      }
       this.rebindActiveControls();
       e.preventDefault();
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -2045,6 +2154,11 @@ export class ViewportEngine {
       if (ended?.phase === 'click' && ended.button === 'primary') {
         if (this.isAnimateShell()) {
           this.tryPickAnimationBone(e, ended.paneId);
+          this.invalidate();
+          return;
+        }
+        if (this.session.tools.getActive() instanceof MeshSculptTool) {
+          this.rebindActiveControls();
           this.invalidate();
           return;
         }
@@ -2146,8 +2260,8 @@ export class ViewportEngine {
       this.invalidate();
       return;
     }
-    if (doodle instanceof MeshSculptTool && doodle.dragging && e.button === 0) {
-      doodle.endStroke(this.session.context());
+    if (doodle instanceof MeshSculptTool && e.button === 0) {
+      if (doodle.dragging) doodle.endStroke(this.session.context());
       this.workspace.input.end('tool');
       this.interactionOverlay.updateTransform(null, '');
       this.syncOrbitEnabled();
@@ -2186,6 +2300,14 @@ export class ViewportEngine {
         : this.workspace?.activeViewportId || 'persp';
       doodle.onPointerUp(this.pointerInput(e, pane), this.session.context());
       this.workspace.input.end('tool');
+      this.syncOrbitEnabled();
+      this.invalidate();
+      return;
+    }
+    if (this.atlasPaintDrag && e.button === 0) {
+      if (this.session) endAtlasFacePaintStroke(this.session);
+      this.atlasPaintDrag = null;
+      this.workspace?.input.end('tool');
       this.syncOrbitEnabled();
       this.invalidate();
       return;
@@ -3318,15 +3440,49 @@ export class ViewportEngine {
     const reference = Math.abs(n.y) < 0.9 ? new Vector3(0, 1, 0) : new Vector3(1, 0, 0);
     const u = reference.clone().cross(n).normalize();
     const v = n.clone().cross(u).normalize();
+    const origin = this.nearestFaceVertexWorld(handle, faceId, hit.point) ?? v3(hit.point.x, hit.point.y, hit.point.z);
     return {
       plane: {
-        origin: v3(hit.point.x, hit.point.y, hit.point.z),
+        origin,
         normal: v3(n.x, n.y, n.z),
         xAxis: v3(u.x, u.y, u.z),
         yAxis: v3(v.x, v.y, v.z),
       },
       id: `face:${faceId ?? 'surface'}`,
     };
+  }
+
+  private nearestFaceVertexWorld(
+    handle: ObjectRenderHandle,
+    faceId: FaceId | null,
+    hint: { x: number; y: number; z: number },
+  ): { x: number; y: number; z: number } | null {
+    const object = this.session?.document.objects.get(handle.objectId);
+    const mesh = object?.meshId ? this.session?.document.meshes.get(object.meshId) : null;
+    if (!mesh || !faceId || !mesh.faces.has(faceId)) return null;
+    let best: { x: number; y: number; z: number } | null = null;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (const vertexId of faceVertexIds(mesh, faceId)) {
+      const local = mesh.vertices.get(vertexId)?.position;
+      if (!local) continue;
+      const world = handle.group.localToWorld(new Vector3(local.x, local.y, local.z));
+      const dist = world.distanceToSquared(new Vector3(hint.x, hint.y, hint.z));
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = v3(world.x, world.y, world.z);
+      }
+    }
+    return best;
+  }
+
+  private stampAtlasPaintHit(e: PointerEvent, paneId: ViewId, existing?: PointerHit): void {
+    if (!this.session || !this.workspace) return;
+    const hit = existing ?? this.resolvePointerHit(e, paneId);
+    if (!hit?.faceId) return;
+    const localPoint = hit.worldPoint
+      ? localPointOnObject(this.session, hit.objectId, hit.worldPoint)
+      : undefined;
+    paintAtlasFace(this.session, this.workspace, hit.objectId, hit.faceId, { localPoint });
   }
 
   private pickSelection(e: PointerEvent, paneId: ViewId): void {
@@ -3341,7 +3497,7 @@ export class ViewportEngine {
     }
     const mode = this.session.selection.state.mode;
     const xRay = this.session.selection.state.xRay;
-    const selectBackfaces = this.session.selection.state.selectBackfaces;
+    const selectBackfaces = this.session.selection.state.selectBackfaces || xRay;
 
     if (mode === 'object' && !textureFacePick) {
       if (!hit) {
@@ -3455,7 +3611,7 @@ export class ViewportEngine {
             target.pointer,
             target.faceId,
             selection.state.xRay,
-            selection.state.selectBackfaces || textureFacePick,
+            selection.state.selectBackfaces || textureFacePick || selection.state.xRay,
           ),
         );
       } else if (mode === 'vertex') {
@@ -3591,7 +3747,7 @@ export class ViewportEngine {
     const meshes = pickHandles.map(([, h]) => h.mesh);
     const allowBackfaces =
       this.session.selection.state.mode === 'face' &&
-      this.session.selection.state.selectBackfaces;
+      (this.session.selection.state.selectBackfaces || this.session.selection.state.xRay);
     const materials = allowBackfaces
       ? pickHandles.flatMap(([, handle]) => handle.materials)
       : [];
@@ -3620,6 +3776,7 @@ export class ViewportEngine {
       pane,
       viewport,
       pointer: { x: e.clientX - hostRect.left, y: e.clientY - hostRect.top },
+      worldPoint: v3(intersection.point.x, intersection.point.y, intersection.point.z),
     };
   }
 
@@ -4166,19 +4323,22 @@ export class ViewportEngine {
       this.invalidate();
       return;
     }
-    if (!cameraChord && tool instanceof MeshSculptTool && this.session) {
-      e.preventDefault();
-      if (e.ctrlKey || e.metaKey) {
-        tool.setStrength(
-          tool.strength * (e.deltaY < 0 ? 1.12 : 0.89),
-          this.session.context(),
-        );
-      } else {
-        tool.setRadius(tool.radius * (e.deltaY < 0 ? 1.12 : 0.89), this.session.context());
+    if (tool instanceof MeshSculptTool && this.session && !e.shiftKey) {
+      const overSurface = Boolean(tool.previewHit || tool.dragging);
+      if (overSurface) {
+        e.preventDefault();
+        if (e.ctrlKey || e.metaKey) {
+          tool.setStrength(
+            tool.strength * (e.deltaY < 0 ? 1.12 : 0.89),
+            this.session.context(),
+          );
+        } else {
+          tool.setRadius(tool.radius * (e.deltaY < 0 ? 1.12 : 0.89), this.session.context());
+        }
+        this.interactionOverlay.updateTransform(e, tool.statusLine());
+        this.invalidate();
+        return;
       }
-      this.interactionOverlay.updateTransform(e, tool.statusLine());
-      this.invalidate();
-      return;
     }
     if (!cameraChord && tool instanceof TerrainObjectTool && this.session) {
       e.preventDefault();
@@ -4468,6 +4628,9 @@ export class ViewportEngine {
     mesh.id = object.meshId;
     this.session.document.meshes.set(mesh.id, mesh);
     object.metadata.curveOperation = serializeCurveOperation(drag.operation);
+    if (isWorkflowOperation(drag.operation)) {
+      applyDefaultBlockoutLook(this.session.document, object.id);
+    }
     this.session.document.dirty = true;
     this.session.requestRedraw();
   }
@@ -4954,8 +5117,9 @@ export class ViewportEngine {
     }
     const shadingMode = this.workspace?.getShadingMode() ?? 'material';
     const displayTextures = this.workspace?.getDisplayTextures() ?? true;
+    const xRay = this.session.selection.state.xRay;
     for (const handle of this.handles.values()) {
-      applyViewportRenderStyle(handle, shadingMode, { displayTextures });
+      applyViewportRenderStyle(handle, shadingMode, { displayTextures, xRay });
     }
     const tool = session.tools.getActive();
     if (!(tool instanceof TileDrawTool) && this.tileDrawOverlay.group.visible) {
@@ -4976,7 +5140,12 @@ export class ViewportEngine {
       }
     } else if (tool instanceof CreateDoodleTool) {
       if (this.primitivePreview.revision !== tool.state.revision) {
-        this.primitivePreview.update(tool.getPreviewMesh(), null, tool.state.revision);
+        this.primitivePreview.update(
+          tool.getPreviewMesh(),
+          null,
+          tool.state.revision,
+          tool.createContext === 'workflows' ? this.primitivePreviewAppearance(session) : undefined,
+        );
       }
     } else if (tool instanceof DrawPolyTool) {
       const targetObjId =
@@ -5177,7 +5346,7 @@ export class ViewportEngine {
       }
 
       this.renderer.setScissorTest(true);
-      this.renderer.setClearColor(VIEWPORT_CLEAR, 1);
+      this.renderer.setClearColor(this.viewportClear, 1);
       this.renderer.clear(true, true, true);
 
       const visibleIds = new Set(this.lastRects.map((r) => r.id));
@@ -5190,7 +5359,7 @@ export class ViewportEngine {
         this.renderer.setViewport(rect.x, rect.webglY, rect.width, rect.height);
         this.renderer.setScissor(rect.x, rect.webglY, rect.width, rect.height);
 
-        this.renderer.setClearColor(VIEWPORT_CLEAR, 1);
+        this.renderer.setClearColor(this.viewportClear, 1);
         this.renderer.clear(true, true, true);
 
         for (const p of this.panes.values()) {
@@ -5484,6 +5653,7 @@ type PointerHit = {
   pane: Pane;
   viewport: ViewportRect;
   pointer: { x: number; y: number };
+  worldPoint?: Vec3;
 };
 
 function projectVertex(

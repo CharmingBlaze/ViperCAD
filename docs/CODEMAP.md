@@ -8,10 +8,12 @@ Start here when you need the file that owns a behaviour. Kernel contracts stay i
 | :--- | :--- |
 | App chrome, workspace chips, menus | `src/App.tsx` |
 | Global CSS tokens | `src/App.css` |
+| Workspace themes (chrome + viewport + gizmos) | `src/app/theme/themeTokens.ts` |
 | Workspace mode (`model` / `sculpt` / `terrain` / `animate` / `texture`) | `src/workspace/WorkspaceController.ts`, `src/workspace/types.ts` |
 | Quad layout, maximize, camera snapshots | `src/workspace/SplitLayoutManager.ts`, `src/workspace/WorkspacePersistence.ts` |
 | UV/Paint split windows | `src/workspace/TextureWorkspace.ts`, `src/app/TexturePanelWindow.tsx` |
 | Input ownership (`none` / `nav` / `tool` / `transform` / `divider`) | `src/workspace/InputRouter.ts` |
+| Confirm / rename prompts | `src/app/platform/appDialogs.ts`, `src/app/AppDialogHost.tsx` |
 
 ## Document and session
 
@@ -74,6 +76,7 @@ Camera chords (all 3D workspaces):
 | Need | Look at |
 | :--- | :--- |
 | UV + pixel canvas | `src/app/UvPixelEditor.tsx` |
+| Tileset / 3D tile draw | `src/app/tilesetWorkspace.ts`, `src/core/tools/TileDrawTool.ts`, `src/app/TileDrawHud.tsx`, `src/app/FloatingAtlasTilePanel.tsx` |
 | Canvas draw | `src/app/uvEditor/drawUvPixelCanvas.ts` |
 | UV ops / packing | `src/core/uv/` |
 | Pixel images | `src/core/image/` |

@@ -1,6 +1,8 @@
 /** Crash-safe browser recovery snapshots for ViperCAD projects. */
 
 export const AUTOSAVE_KEY = 'vipercad.autosave.v2';
+export const PROMPT_RECOVERY_KEY = 'vipercad:prompt-recovery-on-startup';
+export const RECOVERY_DISMISSED_AT_KEY = 'vipercad:recovery-dismissed-at';
 const LEGACY_AUTOSAVE_KEY = 'vipercad.autosave.v1';
 const DB_NAME = 'vipercad-recovery';
 const STORE_NAME = 'snapshots';
@@ -87,15 +89,26 @@ export async function clearAutosave(id?: string): Promise<void> {
     await transactionDone(tx);
     db.close();
   } catch {
-    const remaining = id ? readFallback().filter((item) => item.id !== id) : [];
-    writeFallback(remaining);
+    /* IndexedDB may be missing; the localStorage fallback is still cleared below. */
   }
+  // Emergency snapshots always land in localStorage. Clear that copy even when IDB succeeds.
+  writeFallback(id ? readFallback().filter((item) => item.id !== id) : []);
 }
 
 /** Clears rolling crash snapshots while preserving user-named recovery points. */
 export async function clearAutomaticAutosaves(): Promise<void> {
   const snapshots = await readAutosaves();
-  await Promise.all(snapshots.filter((item) => item.kind === 'auto').map((item) => clearAutosave(item.id)));
+  const autos = snapshots.filter((item) => item.kind === 'auto');
+  try {
+    const db = await openRecoveryDb();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    for (const item of autos) tx.objectStore(STORE_NAME).delete(item.id);
+    await transactionDone(tx);
+    db.close();
+  } catch {
+    /* IndexedDB may be missing; the localStorage fallback is still cleared below. */
+  }
+  writeFallback(readFallback().filter((item) => item.kind !== 'auto'));
 }
 
 async function writeSnapshot(payload: AutosavePayload): Promise<boolean> {
@@ -190,6 +203,39 @@ function validPayload(value: unknown): value is AutosavePayload {
   return !!item && typeof item.id === 'string' && typeof item.name === 'string' &&
     typeof item.savedAt === 'number' && typeof item.project === 'string' &&
     (item.kind === 'auto' || item.kind === 'named');
+}
+
+export function readRecoveryDismissedAt(): number | null {
+  try {
+    const raw = localStorage.getItem(RECOVERY_DISMISSED_AT_KEY);
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remember that the user closed the startup prompt so leftover snapshots do not nag again. */
+export function rememberRecoveryDismissed(at = Date.now()): void {
+  try {
+    localStorage.setItem(RECOVERY_DISMISSED_AT_KEY, String(at));
+  } catch {
+    /* Ignore quota/private mode. */
+  }
+}
+
+/** Offer the modal only for automatic snapshots the user has not already dismissed. */
+export function shouldOfferRecoveryPrompt(
+  snapshots: AutosavePayload[],
+  options: { promptOnStartup: boolean; dismissedAt?: number | null },
+): boolean {
+  if (!options.promptOnStartup) return false;
+  const autos = snapshots.filter((item) => item.kind === 'auto');
+  if (autos.length === 0) return false;
+  const newest = Math.max(...autos.map((item) => item.savedAt));
+  const dismissedAt = options.dismissedAt ?? null;
+  return dismissedAt == null || newest > dismissedAt;
 }
 
 export function formatAutosaveTime(savedAt: number): string {

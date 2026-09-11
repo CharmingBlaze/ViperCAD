@@ -10,7 +10,8 @@ import {
   WORLD_YZ_PLANE,
   constructionPlaneThrough,
 } from '@/core/snap/SnapEngine';
-import { addVec3, scaleVec3 } from '@/core/math/Vec3';
+import { addVec3, lengthSqVec3, scaleVec3, subVec3 } from '@/core/math/Vec3';
+import { transformPoint } from '@/core/math/Transform';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';
 import type { AtlasRecentTile, TextureWorkspaceState } from '@/workspace/TextureWorkspace';
@@ -506,6 +507,9 @@ export function applyTileDrawToolConfig(
     pattern: tex.atlasFillPattern,
     randomSeed: tex.atlasRandomSeed,
     layer: tex.atlasTileLayer,
+    fillColumns: tex.atlasFillColumns,
+    fillRows: tex.atlasFillRows,
+    joinMulti: tex.atlasJoinMulti,
   }, session.context());
   if (!tex.atlasUseFacePlane) {
     applyAtlasConstructionPlane(session, tex.atlasPlaneOrientation, tex.atlasPlaneOffset);
@@ -619,11 +623,48 @@ export function toggleTileDrawSurfaceLock(
   workspace: WorkspaceController,
 ): boolean {
   const next = !workspace.texture.atlasSurfaceLocked;
-  if (next) session.setConstructionPlaneFromSelection();
+  if (next) {
+    session.setConstructionPlaneFromSelection();
+    snapTileDrawToNearestVertex(session, workspace);
+  }
   workspace.patchTexture({
     atlasUseFacePlane: true,
     atlasSurfaceLocked: next,
   });
+  const tool = session.tools.get('tile-draw') as TileDrawTool | undefined;
+  tool?.syncWorkPlane(session.constructionPlane, session.context());
+  session.requestRedraw();
+  return true;
+}
+
+export function snapTileDrawToNearestVertex(
+  session: EditorSession,
+  workspace: WorkspaceController,
+): boolean {
+  const hint = session.constructionPlane.origin;
+  let best: { x: number; y: number; z: number } | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  const objectId = session.selection.state.activeObjectId
+    ?? [...session.selection.state.selectedObjectIds][0]
+    ?? null;
+  const objects = objectId
+    ? [session.document.objects.get(objectId)].filter(Boolean)
+    : [...session.document.objects.values()];
+  for (const object of objects) {
+    const mesh = object!.meshId ? session.document.meshes.get(object!.meshId) : null;
+    if (!mesh) continue;
+    for (const vertex of mesh.vertices.values()) {
+      const world = transformPoint(vertex.position, object!.transform);
+      const dist = lengthSqVec3(subVec3(world, hint));
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = world;
+      }
+    }
+  }
+  if (!best) return false;
+  session.constructionPlane = { ...session.constructionPlane, origin: best };
+  workspace.patchTexture({ atlasUseFacePlane: true });
   const tool = session.tools.get('tile-draw') as TileDrawTool | undefined;
   tool?.syncWorkPlane(session.constructionPlane, session.context());
   session.requestRedraw();
@@ -638,6 +679,7 @@ export function snapTileDrawToSelection(
     workspace.patchTexture({ atlasUseFacePlane: true });
     return false;
   }
+  snapTileDrawToNearestVertex(session, workspace);
   workspace.patchTexture({ atlasUseFacePlane: true });
   const tool = session.tools.get('tile-draw') as TileDrawTool | undefined;
   tool?.syncWorkPlane(session.constructionPlane, session.context());
@@ -707,6 +749,7 @@ export function applyTileDrawHotkey(
     return false;
   }
   if (key === 'l') return toggleTileDrawSurfaceLock(session, workspace);
+  if (key === 'v') return snapTileDrawToNearestVertex(session, workspace);
   const plane = TILE_DRAW_PLANE_HOTKEYS[key];
   if (plane) return setTileDrawPlane(session, workspace, plane);
   const mode = TILE_DRAW_MODE_HOTKEYS[key];

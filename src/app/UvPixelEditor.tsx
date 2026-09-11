@@ -19,6 +19,10 @@ import {
   commitUvEdit,
   cornersForFaces,
   cornersInUvRect,
+  copyFaceUvs,
+  pasteFaceUvs,
+  mirrorUvsAcrossAxis,
+  type UvClipboardData,
   expandWeldedUvCorners,
   facesInUvRect,
   flipUvs,
@@ -64,6 +68,7 @@ import { v3 } from '@/core/math/Vec3';
 import type { WorkspaceController } from '@/workspace/WorkspaceController';
 import { editorCamera } from '@/workspace/TextureWorkspace';
 import { UvEditorSidePanel } from '@/app/UvEditorSidePanel';
+import { FloatingUvToolsPanel } from '@/app/uvEditor/FloatingUvToolsPanel';
 import { UvInspectorPortal } from '@/app/UvInspectorHost';
 import { ViewportNavToolbar } from '@/app/ViewportNavToolbar';
 import type { ViewportNavMode } from '@/workspace/WorkspaceController';
@@ -71,6 +76,8 @@ import {
   canvasNavKind,
   classifyPointerButton,
   classifyWheel,
+  uvCanvasZoomFactor,
+  uvWheelZoomFactor,
   wheelZoomPixels,
 } from '@/app/viewport/ViewportInputEngine';
 import { BlenderIcon } from '@/components/BlenderIcon';
@@ -170,11 +177,15 @@ const UV_GUIDE_IMAGE: ImageAsset = {
   revision: 0,
 };
 
+let sharedUvClipboard: UvClipboardData | null = null;
+
 /**
  * Shared UV + pixel image canvas.
  * UV / Combined (when armed): Blockbench-style select + move / scale / rotate.
  */
 export function UvPixelEditor({ session, workspace }: Props) {
+  const [uvClipboard, setUvClipboard] = useState<UvClipboardData | null>(() => sharedUvClipboard);
+  const [showQuickToolsPanel, setShowQuickToolsPanel] = useState(false);
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stroke = useRef(new PixelStrokeRecorder());
@@ -196,8 +207,8 @@ export function UvPixelEditor({ session, workspace }: Props) {
   const lastAutoFramedImage = useRef<string | null>(null);
   const lastAutoFollowedFace = useRef<string>('');
   const lastClick = useRef<{ t: number; faceId: FaceId | null }>({ t: 0, faceId: null });
-  const lastTileBrushedFace = useRef<string | null>(null);
   const liveAtlasTile = useRef<LiveAtlasTileSession | null>(null);
+  const importFileRef = useRef<HTMLInputElement>(null);
   const [tick, setTick] = useState(0);
   const refresh = () => setTick((t) => t + 1);
 
@@ -869,9 +880,102 @@ export function UvPixelEditor({ session, workspace }: Props) {
   };
 
   const flipSelection = (axis: 'u' | 'v') => {
-    mutateSelection(axis === 'u' ? 'Flip U' : 'Flip V', (mesh, layerId, before) => {
+    mutateSelection(axis === 'u' ? 'Flip Horizontal (U)' : 'Flip Vertical (V)', (mesh, layerId, before) => {
       flipUvs(mesh, before, layerId, axis);
     });
+  };
+
+  const handleCopyUvs = () => {
+    const ctx = activeMesh();
+    if (!ctx) return;
+    const faceIds = new Set<FaceId>();
+    if (session.selection.state.selectedFaceIds.size > 0) {
+      for (const f of session.selection.state.selectedFaceIds) faceIds.add(f);
+    } else {
+      for (const cId of session.uvSelection.state.selectedCornerIds) {
+        const corner = ctx.mesh.faceCorners.get(cId);
+        if (corner) faceIds.add(corner.faceId);
+      }
+    }
+    if (!faceIds.size) {
+      pushToast('Select faces or UV island to copy UVs', 'info');
+      return;
+    }
+    const data = copyFaceUvs(ctx.mesh, faceIds, ctx.layerId);
+    if (data) {
+      sharedUvClipboard = data;
+      setUvClipboard(data);
+      pushToast(`Copied UVs for ${data.faces.length} face${data.faces.length === 1 ? '' : 's'}`);
+    }
+  };
+
+  const handlePasteUvs = (flipAxis?: 'u' | 'v') => {
+    const ctx = activeMesh();
+    if (!ctx) return;
+    const clip = uvClipboard ?? sharedUvClipboard;
+    if (!clip || !clip.faces.length) {
+      pushToast('Clipboard is empty. Copy UVs first (Ctrl+Shift+C).', 'info');
+      return;
+    }
+    const targetFaceIds = new Set<FaceId>();
+    if (session.selection.state.selectedFaceIds.size > 0) {
+      for (const f of session.selection.state.selectedFaceIds) targetFaceIds.add(f);
+    } else {
+      for (const cId of session.uvSelection.state.selectedCornerIds) {
+        const corner = ctx.mesh.faceCorners.get(cId);
+        if (corner) targetFaceIds.add(corner.faceId);
+      }
+    }
+    if (!targetFaceIds.size) {
+      pushToast('Select target faces to paste UVs onto', 'info');
+      return;
+    }
+    const targetCorners = cornersForFaces(ctx.mesh, targetFaceIds);
+    const before = snapshotUvs(ctx.mesh, targetCorners, ctx.layerId);
+    const result = pasteFaceUvs(ctx.mesh, targetFaceIds, ctx.layerId, clip, { flipAxis });
+    if (!result.success) {
+      pushToast('Could not paste UVs onto selected faces', 'error');
+      return;
+    }
+    const after = snapshotUvs(ctx.mesh, targetCorners, ctx.layerId);
+    const opName = flipAxis === 'u' ? 'Paste & Flip H UVs' : flipAxis === 'v' ? 'Paste & Flip V UVs' : 'Paste UVs';
+    commitUvEdit(session.history, ctx.mesh, ctx.layerId, before, after, opName, () => session.requestRedraw());
+    session.requestRedraw();
+    refresh();
+    pushToast(`Pasted UVs ${flipAxis ? `(flipped ${flipAxis.toUpperCase()}) ` : ''}onto ${result.modifiedFaceCount} face${result.modifiedFaceCount === 1 ? '' : 's'}`);
+  };
+
+  const handlePasteAndFlipH = () => handlePasteUvs('u');
+  const handlePasteAndFlipV = () => handlePasteUvs('v');
+
+  const handleMirrorToOppositeSide = () => {
+    const ctx = activeMesh();
+    if (!ctx) return;
+    const sourceFaceIds = new Set<FaceId>();
+    if (session.selection.state.selectedFaceIds.size > 0) {
+      for (const f of session.selection.state.selectedFaceIds) sourceFaceIds.add(f);
+    } else {
+      for (const cId of session.uvSelection.state.selectedCornerIds) {
+        const corner = ctx.mesh.faceCorners.get(cId);
+        if (corner) sourceFaceIds.add(corner.faceId);
+      }
+    }
+    if (!sourceFaceIds.size) {
+      pushToast('Select faces on one side to mirror UVs across X', 'info');
+      return;
+    }
+    const allCorners = cornersForFaces(ctx.mesh, ctx.mesh.faces.keys());
+    const before = snapshotUvs(ctx.mesh, allCorners, ctx.layerId);
+    const result = mirrorUvsAcrossAxis(ctx.mesh, sourceFaceIds, ctx.layerId, 'x');
+    if (!result.success || !result.mirroredFaceIds.length) {
+      pushToast('No symmetrical faces found across center X (±X). Try selecting target faces manually and clicking "Paste & Flip H".', 'info');
+      return;
+    }
+    const after = snapshotUvs(ctx.mesh, allCorners, ctx.layerId);
+    commitUvEdit(session.history, ctx.mesh, ctx.layerId, before, after, 'Mirror UVs Across X', () => session.requestRedraw());
+    session.requestRedraw();
+    refresh();
+    pushToast(`Mirrored UVs to ${result.mirroredFaceCount} opposite face${result.mirroredFaceCount === 1 ? '' : 's'}`);
   };
 
   const nudgeSelection = (du: number, dv: number) => {
@@ -1144,7 +1248,13 @@ export function UvPixelEditor({ session, workspace }: Props) {
     }
 
     restoreUvAndAtlasSnapshot(ctx.mesh, sessionLive.layerId, sessionLive.before, sessionLive.beforeTiles);
-    applyAtlasTileToFaces(ctx.mesh, sessionLive.faceIds, sessionLive.layerId, placement);
+    const downEdgeId = tex.atlasHintDown
+      ? ([...session.selection.state.selectedEdgeIds][0] ?? undefined)
+      : undefined;
+    applyAtlasTileToFaces(ctx.mesh, sessionLive.faceIds, sessionLive.layerId, {
+      ...placement,
+      downEdgeId,
+    });
     sessionLive.paramsKey = paramsKey;
     sessionLive.dirty = true;
 
@@ -1181,6 +1291,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
 
   // Live UV tile stamps (cheap — no topology rebuild).
   useEffect(() => {
+    if (tex.atlasPaintMode) return;
     const tilesActive = tex.atlasPanelOpen || tex.uvPanelTab === 'tiles';
     if (!tilesActive) {
       commitLiveAtlasTileSession({ clear: true });
@@ -1235,6 +1346,12 @@ export function UvPixelEditor({ session, workspace }: Props) {
     tex.atlasFlipV,
     tex.atlasRepeatU,
     tex.atlasRepeatV,
+    tex.atlasStretchU,
+    tex.atlasStretchV,
+    tex.atlasAlignU,
+    tex.atlasAlignV,
+    tex.atlasHintDown,
+    tex.atlasPaintMode,
   ]);
 
   const createAtlasTilePlane = () => {
@@ -1426,6 +1543,9 @@ export function UvPixelEditor({ session, workspace }: Props) {
     tex.atlasRandomSeed,
     tex.atlasTileLayer,
     tex.atlasPlaneOrientation,
+    tex.atlasFillColumns,
+    tex.atlasFillRows,
+    tex.atlasJoinMulti,
   ]);
 
   useEffect(() => {
@@ -1443,22 +1563,6 @@ export function UvPixelEditor({ session, workspace }: Props) {
     });
     rememberAtlasStamp(workspace);
   }, [tileDrawActive, tileDrawRevision, tileDrawTool, workspace]);
-
-  useEffect(() => {
-    if (!tex.atlasPaintMode) {
-      lastTileBrushedFace.current = null;
-      return;
-    }
-    const faceId = session.selection.state.activeFaceId;
-    const objectId = session.selection.state.activeObjectId;
-    if (!faceId || !objectId) return;
-    const key = `${objectId}:${faceId}`;
-    if (lastTileBrushedFace.current === key) return;
-    lastTileBrushedFace.current = key;
-    applySelectedAtlasTile([faceId], true);
-    // Apply once when a different 3D face becomes active.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tex.atlasPaintMode, session.selection.state.activeFaceId, session.selection.state.activeObjectId]);
 
   const runWeld = () => {
     const sel = selectedSnapshot();
@@ -1591,7 +1695,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
     const rect = host?.getBoundingClientRect();
     const mx = rect ? clientX - rect.left : (host?.clientWidth ?? 0) / 2;
     const my = rect ? clientY - rect.top : (host?.clientHeight ?? 0) / 2;
-    const next = zoomCameraAt(cam, mx, my, Math.exp(-dy * 0.008), UV_ZOOM_MIN, UV_ZOOM_MAX);
+    const next = zoomCameraAt(cam, mx, my, uvCanvasZoomFactor(dy), UV_ZOOM_MIN, UV_ZOOM_MAX);
     workspace.patchTexture({ uvCamera: next, pixelCamera: next });
   };
 
@@ -1863,7 +1967,7 @@ export function UvPixelEditor({ session, workspace }: Props) {
     const my = e.clientY - rect.top;
     const cam = editorCamera(workspace.texture);
     const pixels = wheelZoomPixels(e.deltaY, e.nativeEvent.deltaMode);
-    const next = zoomCameraAt(cam, mx, my, Math.exp(-pixels * 0.0035), UV_ZOOM_MIN, UV_ZOOM_MAX);
+    const next = zoomCameraAt(cam, mx, my, uvWheelZoomFactor(pixels), UV_ZOOM_MIN, UV_ZOOM_MAX);
     workspace.patchTexture({ uvCamera: next, pixelCamera: next });
     draw();
   };
@@ -1977,6 +2081,18 @@ export function UvPixelEditor({ session, workspace }: Props) {
       } else if (key === 'l' && !e.ctrlKey) {
         e.preventDefault();
         armUv({ uvEditMode: 'island', uvPanelTab: 'edit' });
+      } else if (e.shiftKey && (key === 'h' || key === 'e') && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        flipSelection('u');
+      } else if (e.shiftKey && (key === 'v' || key === 'q') && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        flipSelection('v');
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && key === 'c') {
+        e.preventDefault();
+        handleCopyUvs();
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && key === 'v') {
+        e.preventDefault();
+        handlePasteAndFlipH();
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
         nudgeSelection(e.shiftKey ? -8 : -1, 0);
@@ -2066,6 +2182,10 @@ export function UvPixelEditor({ session, workspace }: Props) {
     });
   };
 
+  const openImportPicker = () => {
+    importFileRef.current?.click();
+  };
+
   const handleImportImageFile = async (file: File | null) => {
     if (!file) return;
     try {
@@ -2105,10 +2225,11 @@ export function UvPixelEditor({ session, workspace }: Props) {
     }
   };
 
+  const hasUvSelection = Boolean(selectedSnapshot());
   const paletteProps = {
     session,
     workspace,
-    hasUvSelection: !!selectedSnapshot(),
+    hasUvSelection,
     onApply: () => applySelectedAtlasTile(),
     onCreatePlane: createAtlasTilePlane,
     onCreateGrid: createAtlasGrid,
@@ -2154,22 +2275,27 @@ export function UvPixelEditor({ session, workspace }: Props) {
                 </button>
               </div>
             )}
-            <label
-              className="uv-canvas-tool is-icon"
-              title="Import image texture (.png, .jpg, .webp)"
+            <input
+              ref={importFileRef}
+              className="uv-import-file"
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              aria-label="Import image texture"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void handleImportImageFile(file);
+                e.target.value = '';
+              }}
+            />
+            <button
+              type="button"
+              className={`uv-canvas-tool${image ? '' : ' is-import'}`}
+              onClick={openImportPicker}
+              title="Import image texture (.png, .jpg, .webp, .gif)"
             >
-              <BlenderIcon name="import" size={13} />
-              <input
-                type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif"
-                style={{ display: 'none' }}
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) void handleImportImageFile(file);
-                  e.target.value = '';
-                }}
-              />
-            </label>
+              <BlenderIcon name="image" size={13} />
+              <span>Image</span>
+            </button>
             <div className="uv-canvas-toolgroup" role="group" aria-label="Workspace layout">
               <button
                 type="button"
@@ -2331,6 +2457,40 @@ export function UvPixelEditor({ session, workspace }: Props) {
                     <span>Snap</span>
                   </button>
                 </div>
+                <div className="uv-canvas-toolgroup" role="group" aria-label="UV flip and quick tools">
+                  <button
+                    type="button"
+                    className="uv-canvas-tool"
+                    disabled={!hasUvSelection}
+                    onClick={() => flipSelection('u')}
+                    title="Flip selection horizontally across U (Shift+H / Flip U)"
+                  >
+                    <BlenderIcon name="arrow_leftright" size={13} />
+                    <span>Flip H</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="uv-canvas-tool"
+                    disabled={!hasUvSelection}
+                    onClick={() => flipSelection('v')}
+                    title="Flip selection vertically across V (Shift+V / Flip V)"
+                  >
+                    <span style={{ display: 'inline-flex', transform: 'rotate(90deg)' }}>
+                      <BlenderIcon name="arrow_leftright" size={13} />
+                    </span>
+                    <span>Flip V</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`uv-canvas-tool${showQuickToolsPanel ? ' is-active' : ''}`}
+                    onClick={() => setShowQuickToolsPanel((v) => !v)}
+                    title={showQuickToolsPanel ? 'Hide UV Quick Tools popup' : 'Open UV Quick Tools popup (Flip, Rotate, Copy & Paste, Mirror)'}
+                    aria-pressed={showQuickToolsPanel}
+                  >
+                    <BlenderIcon name="mod_mirror" size={13} />
+                    <span>Tools</span>
+                  </button>
+                </div>
               </>
             ) : (
               <div className="uv-canvas-toolgroup uv-canvas-brush-tools" role="group" aria-label="Paint tools">
@@ -2414,12 +2574,27 @@ export function UvPixelEditor({ session, workspace }: Props) {
           onWheel={onWheel}
           onContextMenu={(e) => e.preventDefault()}
         />
+        {canvasImage && !image && (
+          <div className="uv-import-hint">
+            <strong>No texture assigned</strong>
+            <span>Import a PNG, JPG, or WEBP to paint this model.</span>
+            <button type="button" className="tool primary" onClick={openImportPicker}>
+              Import image
+            </button>
+          </div>
+        )}
         {canvasImage && (
           <div className="uv-canvas-status" aria-live="polite">
             <span className={`uv-status-mode${tex.uvPanelTab === 'tiles' ? ' is-tiles' : uvPointerActive ? ' is-uv' : ' is-paint'}`}>
               {tex.uvPanelTab === 'tiles' ? 'TILESET' : uvPointerActive ? 'UV EDIT' : 'PIXEL PAINT'}
             </span>
-            <span className="uv-status-name">{image ? image.name : 'UV guide · no texture assigned'}</span>
+            {image ? (
+              <span className="uv-status-name">{image.name}</span>
+            ) : (
+              <button type="button" className="uv-status-import" onClick={openImportPicker}>
+                No texture — Import image
+              </button>
+            )}
             <span>{canvasImage.width}×{canvasImage.height}</span>
             <span>{Math.round(editorCamera(tex).zoom * 100)}%</span>
             <span>{modeSummary}</span>
@@ -2431,20 +2606,31 @@ export function UvPixelEditor({ session, workspace }: Props) {
             <strong>{activeObjectId ? 'No editable texture yet' : 'Select a model first'}</strong>
             <span>
               {activeObjectId
-                ? 'Create a blank pixel map or import an image for the selected material.'
+                ? 'Import an image, or open Material setup to create a blank pixel map.'
                 : 'Choose an object in the Model workspace, then return here to edit its UVs and texture.'}
             </span>
-            <button
-              type="button"
-              className="tool primary"
-              onClick={() =>
-                activeObjectId
-                  ? workspace.patchTexture({ uvPanelTab: 'material' })
-                  : workspace.setShellMode('model')
-              }
-            >
-              {activeObjectId ? 'Open Material setup' : 'Back to Model'}
-            </button>
+            {activeObjectId ? (
+              <div className="uv-canvas-empty-actions">
+                <button type="button" className="tool primary" onClick={openImportPicker}>
+                  Import image
+                </button>
+                <button
+                  type="button"
+                  className="tool"
+                  onClick={() => workspace.patchTexture({ uvPanelTab: 'material' })}
+                >
+                  Create blank map
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="tool primary"
+                onClick={() => workspace.setShellMode('model')}
+              >
+                Back to Model
+              </button>
+            )}
           </div>
         )}
         </div>
@@ -2463,6 +2649,13 @@ export function UvPixelEditor({ session, workspace }: Props) {
           onResizePixels={resizeSelectionToPixels}
           onScaleFactor={scaleSelectionBy}
           onFlip={flipSelection}
+          onCopyUvs={handleCopyUvs}
+          onPasteUvs={handlePasteUvs}
+          onPasteAndFlipH={handlePasteAndFlipH}
+          onPasteAndFlipV={handlePasteAndFlipV}
+          onMirrorToOppositeSide={handleMirrorToOppositeSide}
+          hasUvClipboard={Boolean(uvClipboard?.faces.length)}
+          uvClipboardCount={uvClipboard?.faces.length ?? 0}
           onUnwrap={runUnwrap}
           onPack={runPack}
           onNormalize={runNormalize}
@@ -2492,6 +2685,25 @@ export function UvPixelEditor({ session, workspace }: Props) {
           onFillAtlasConnected={fillConnectedTileFaces}
         />
       </UvInspectorPortal>
+      {showQuickToolsPanel && (
+        <FloatingUvToolsPanel
+          hasSelection={hasUvSelection}
+          selectedFaceCount={session.selection.state.selectedFaceIds.size}
+          hasClipboard={Boolean(uvClipboard?.faces.length)}
+          clipboardCount={uvClipboard?.faces.length ?? 0}
+          onFlipHorizontal={() => flipSelection('u')}
+          onFlipVertical={() => flipSelection('v')}
+          onRotateDegrees={rotateSelectionBy}
+          onCopyUvs={handleCopyUvs}
+          onPasteUvs={handlePasteUvs}
+          onPasteAndFlipH={handlePasteAndFlipH}
+          onPasteAndFlipV={handlePasteAndFlipV}
+          onMirrorToOppositeSide={handleMirrorToOppositeSide}
+          onAlign={handleAlign}
+          onPixelSnap={handlePixelSnap}
+          onClose={() => setShowQuickToolsPanel(false)}
+        />
+      )}
       {paletteDocked && tex.atlasPanelDock === 'right' && (
         <aside className="tile-palette-dock" aria-label="Tile palette">
           <FloatingAtlasTilePanel {...paletteProps} docked />

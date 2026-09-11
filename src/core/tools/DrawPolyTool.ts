@@ -759,7 +759,6 @@ export class DrawPolyTool implements Tool {
     }
 
     context.selection.applyTopologyChange(result.change);
-    this.applyCommittedLook(context, target.objectId);
     const createdFaces = result.value?.faceIds ?? [];
 
     if (this.blockoutPoly.enabled && createdFaces.length > 0) {
@@ -775,6 +774,7 @@ export class DrawPolyTool implements Tool {
         context.selection.applyTopologyChange(solid.change);
       }
     }
+    this.applyCommittedLook(context, target.objectId);
 
     const originAfter = captureOriginSnapshot(context.document, target.objectId);
     const after = cloneMeshPreserveIds(target.mesh);

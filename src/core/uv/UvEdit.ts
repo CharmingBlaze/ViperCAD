@@ -1,4 +1,5 @@
 import { cloneVec2, type Vec2 } from '@/core/math/Vec2';
+import type { Vec3 } from '@/core/math/Vec3';
 import { faceCornerIds } from '@/core/mesh/EditableMesh';
 import type { EditableMesh, FaceCornerId, FaceId, UvLayerId } from '@/core/mesh/types';
 import type { CommandHistory } from '@/core/history/CommandHistory';
@@ -935,4 +936,275 @@ export function snapUvsToPixelGrid(
   mesh.geometryVersion += 1;
   mesh.dirty.uvs = true;
 }
+
+export type FaceUvCornerData = {
+  vertexPosition: Vec3;
+  uv: Vec2;
+};
+
+export type FaceUvData = {
+  faceId: FaceId;
+  center: Vec3;
+  corners: FaceUvCornerData[];
+};
+
+export type UvClipboardData = {
+  faces: FaceUvData[];
+  bounds: { min: Vec2; max: Vec2; center: Vec2; size: Vec2 };
+};
+
+/** Copy UV data and vertex positions for the given faces. */
+export function copyFaceUvs(
+  mesh: EditableMesh,
+  faceIds: Iterable<FaceId>,
+  layerId: UvLayerId,
+): UvClipboardData | null {
+  const ids = [...faceIds];
+  if (!ids.length) return null;
+
+  const faces: FaceUvData[] = [];
+  let minU = Infinity;
+  let minV = Infinity;
+  let maxU = -Infinity;
+  let maxV = -Infinity;
+
+  for (const faceId of ids) {
+    const face = mesh.faces.get(faceId);
+    if (!face) continue;
+    const cornerIds = faceCornerIds(mesh, faceId);
+    if (!cornerIds.length) continue;
+
+    const corners: FaceUvCornerData[] = [];
+    let cx = 0;
+    let cy = 0;
+    let cz = 0;
+
+    for (const cornerId of cornerIds) {
+      const corner = mesh.faceCorners.get(cornerId);
+      if (!corner) continue;
+      const vert = mesh.vertices.get(corner.vertexId);
+      const pos = vert ? { x: vert.position.x, y: vert.position.y, z: vert.position.z } : { x: 0, y: 0, z: 0 };
+      cx += pos.x;
+      cy += pos.y;
+      cz += pos.z;
+
+      const uv = cloneVec2(corner.uvs.get(layerId) ?? { x: 0, y: 0 });
+      minU = Math.min(minU, uv.x);
+      minV = Math.min(minV, uv.y);
+      maxU = Math.max(maxU, uv.x);
+      maxV = Math.max(maxV, uv.y);
+
+      corners.push({ vertexPosition: pos, uv });
+    }
+
+    const n = corners.length || 1;
+    faces.push({
+      faceId,
+      center: { x: cx / n, y: cy / n, z: cz / n },
+      corners,
+    });
+  }
+
+  if (!faces.length || !Number.isFinite(minU)) return null;
+
+  return {
+    faces,
+    bounds: {
+      min: { x: minU, y: minV },
+      max: { x: maxU, y: maxV },
+      center: { x: (minU + maxU) / 2, y: (minV + maxV) / 2 },
+      size: { x: maxU - minU, y: maxV - minV },
+    },
+  };
+}
+
+/** Paste copied UVs onto target faces, with optional horizontal (U) or vertical (V) flip. */
+export function pasteFaceUvs(
+  mesh: EditableMesh,
+  targetFaceIds: Iterable<FaceId>,
+  layerId: UvLayerId,
+  clipboard: UvClipboardData,
+  options?: { flipAxis?: 'u' | 'v' },
+): { success: boolean; modifiedFaceCount: number } {
+  const targetIds = [...targetFaceIds];
+  if (!targetIds.length || !clipboard.faces.length) {
+    return { success: false, modifiedFaceCount: 0 };
+  }
+
+  const { min, max } = clipboard.bounds;
+  const flip = (uv: Vec2): Vec2 => {
+    let u = uv.x;
+    let v = uv.y;
+    if (options?.flipAxis === 'u') {
+      u = min.x + max.x - u;
+    } else if (options?.flipAxis === 'v') {
+      v = min.y + max.y - v;
+    }
+    return { x: u, y: v };
+  };
+
+  let modifiedFaceCount = 0;
+
+  for (let i = 0; i < targetIds.length; i++) {
+    const targetFaceId = targetIds[i]!;
+    const targetCornerIds = faceCornerIds(mesh, targetFaceId);
+    if (!targetCornerIds.length) continue;
+
+    let tcx = 0;
+    let tcy = 0;
+    let tcz = 0;
+    const targetCornerPositions: { cornerId: FaceCornerId; pos: Vec3 }[] = [];
+    for (const cId of targetCornerIds) {
+      const corner = mesh.faceCorners.get(cId);
+      const vert = corner ? mesh.vertices.get(corner.vertexId) : null;
+      const pos = vert ? vert.position : { x: 0, y: 0, z: 0 };
+      tcx += pos.x;
+      tcy += pos.y;
+      tcz += pos.z;
+      targetCornerPositions.push({ cornerId: cId, pos });
+    }
+    const tCount = targetCornerPositions.length;
+    tcx /= tCount;
+    tcy /= tCount;
+    tcz /= tCount;
+
+    // Geometric symmetry or closest centroid matching
+    const searchMirroredX = options?.flipAxis === 'u';
+    let bestSource: FaceUvData | null = null;
+    let bestDist = Infinity;
+
+    for (const src of clipboard.faces) {
+      const expectedSx = searchMirroredX ? -tcx : tcx;
+      const dx = src.center.x - expectedSx;
+      const dy = src.center.y - tcy;
+      const dz = src.center.z - tcz;
+      const dist = dx * dx + dy * dy + dz * dz;
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestSource = src;
+      }
+    }
+
+    if (!bestSource || (bestDist > 10 && i < clipboard.faces.length)) {
+      bestSource = clipboard.faces[i % clipboard.faces.length]!;
+    }
+
+    if (!bestSource) continue;
+
+    for (const { cornerId, pos } of targetCornerPositions) {
+      const expectedVx = searchMirroredX ? -pos.x : pos.x;
+      let closestCornerIdx = -1;
+      let closestCornerDist = Infinity;
+
+      for (let ci = 0; ci < bestSource.corners.length; ci++) {
+        const sc = bestSource.corners[ci]!;
+        const cdx = sc.vertexPosition.x - expectedVx;
+        const cdy = sc.vertexPosition.y - pos.y;
+        const cdz = sc.vertexPosition.z - pos.z;
+        const cdist = cdx * cdx + cdy * cdy + cdz * cdz;
+        if (cdist < closestCornerDist) {
+          closestCornerDist = cdist;
+          closestCornerIdx = ci;
+        }
+      }
+
+      if (closestCornerIdx !== -1) {
+        const srcUv = bestSource.corners[closestCornerIdx]!.uv;
+        const targetCorner = mesh.faceCorners.get(cornerId);
+        if (targetCorner) {
+          targetCorner.uvs.set(layerId, flip(srcUv));
+        }
+      }
+    }
+
+    modifiedFaceCount++;
+  }
+
+  if (modifiedFaceCount > 0) {
+    mesh.geometryVersion += 1;
+    mesh.dirty.uvs = true;
+  }
+
+  return { success: modifiedFaceCount > 0, modifiedFaceCount };
+}
+
+/** Mirror UVs from source faces onto opposite symmetrical faces across an axis (defaults to X). */
+export function mirrorUvsAcrossAxis(
+  mesh: EditableMesh,
+  sourceFaceIds: Iterable<FaceId>,
+  layerId: UvLayerId,
+  axis: 'x' | 'y' | 'z' = 'x',
+  tolerance = 0.05,
+): { success: boolean; mirroredFaceCount: number; mirroredFaceIds: FaceId[] } {
+  const sourceIds = new Set(sourceFaceIds);
+  if (!sourceIds.size) {
+    return { success: false, mirroredFaceCount: 0, mirroredFaceIds: [] };
+  }
+
+  const clipboard = copyFaceUvs(mesh, sourceIds, layerId);
+  if (!clipboard) {
+    return { success: false, mirroredFaceCount: 0, mirroredFaceIds: [] };
+  }
+
+  const mirroredFaceIds: FaceId[] = [];
+
+  for (const srcFace of clipboard.faces) {
+    const expectedCenter = { ...srcFace.center };
+    expectedCenter[axis] = -expectedCenter[axis];
+
+    let bestFaceId: FaceId | null = null;
+    let bestDist = Infinity;
+
+    for (const [faceId] of mesh.faces) {
+      if (sourceIds.has(faceId)) continue;
+      const cornerIds = faceCornerIds(mesh, faceId);
+      if (cornerIds.length !== srcFace.corners.length) continue;
+
+      let cx = 0;
+      let cy = 0;
+      let cz = 0;
+      for (const cid of cornerIds) {
+        const c = mesh.faceCorners.get(cid);
+        const v = c ? mesh.vertices.get(c.vertexId) : null;
+        if (v) {
+          cx += v.position.x;
+          cy += v.position.y;
+          cz += v.position.z;
+        }
+      }
+      const n = cornerIds.length || 1;
+      cx /= n;
+      cy /= n;
+      cz /= n;
+
+      const dx = cx - expectedCenter.x;
+      const dy = cy - expectedCenter.y;
+      const dz = cz - expectedCenter.z;
+      const d = Math.hypot(dx, dy, dz);
+      if (d <= tolerance && d < bestDist) {
+        bestDist = d;
+        bestFaceId = faceId;
+      }
+    }
+
+    if (bestFaceId) {
+      mirroredFaceIds.push(bestFaceId);
+    }
+  }
+
+  if (!mirroredFaceIds.length) {
+    return { success: false, mirroredFaceCount: 0, mirroredFaceIds: [] };
+  }
+
+  const result = pasteFaceUvs(mesh, mirroredFaceIds, layerId, clipboard, {
+    flipAxis: axis === 'y' ? 'v' : 'u',
+  });
+
+  return {
+    success: result.success,
+    mirroredFaceCount: result.modifiedFaceCount,
+    mirroredFaceIds,
+  };
+}
+
 

@@ -38,7 +38,7 @@ export function createDefaultMaterial(name = 'Material'): MaterialAsset {
     baseColour: { ...DEFAULT_MATERIAL_COLOUR },
     baseColourTextureId: null,
     normalTextureId: null,
-    roughness: 0.55,
+    roughness: 0.82,
     roughnessTextureId: null,
     metallic: 0,
     metallicTextureId: null,

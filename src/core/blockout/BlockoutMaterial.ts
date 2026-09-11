@@ -1,28 +1,13 @@
 import {
-  createMaterial,
+  assignMaterialToObject,
   ensureDefaultPlaceholderMaterial,
 } from '@/core/document/ModelDocument';
 import type { MaterialAsset, MaterialId, ModelDocument, ObjectId } from '@/core/document/types';
-
-/** Light clay that stays readable on the dark blockout background. */
-export const DEFAULT_BLOCKOUT_CLAY = {
-  name: 'Blockout Clay',
-  hex: '#d4c4b0',
-  rgb: { x: 0xd4 / 255, y: 0xc4 / 255, z: 0xb0 / 255 },
-} as const;
+import { centreObjectOrigin } from '@/core/editor/GameAssetTools';
+import { unwrapUvAuto } from '@/core/uv/UvOperations';
 
 export function ensureBlockoutMaterial(doc: ModelDocument): MaterialId {
-  for (const material of doc.materials.values()) {
-    if (material.name === DEFAULT_BLOCKOUT_CLAY.name) return material.id;
-  }
-  const material = createMaterial(doc, { name: DEFAULT_BLOCKOUT_CLAY.name });
-  material.presetId = 'default';
-  material.baseColour = { ...DEFAULT_BLOCKOUT_CLAY.rgb };
-  bindPlaceholderTexture(doc, material);
-  material.roughness = 0.82;
-  material.metallic = 0.04;
-  material.flatShaded = true;
-  return material.id;
+  return ensureDefaultPlaceholderMaterial(doc);
 }
 
 /** Keep the default clay map on a blockout colour so finish matches the live preview. */
@@ -38,6 +23,34 @@ export function bindPlaceholderTexture(doc: ModelDocument, material: MaterialAss
 export function assignDefaultBlockoutMaterial(doc: ModelDocument, objectId: ObjectId): void {
   const object = doc.objects.get(objectId);
   if (!object) return;
-  object.materialSlotIds = [ensureBlockoutMaterial(doc)];
+  assignMaterialToObject(doc, objectId, ensureDefaultPlaceholderMaterial(doc));
   doc.dirty = true;
+}
+
+function unwrapBlockoutUvs(doc: ModelDocument, objectId: ObjectId): void {
+  const object = doc.objects.get(objectId);
+  const mesh = object?.meshId ? doc.meshes.get(object.meshId) : null;
+  if (!mesh?.faces.size || !mesh.defaultUvLayerId) return;
+  try {
+    unwrapUvAuto(mesh, [...mesh.faces.keys()], mesh.defaultUvLayerId);
+  } catch {
+    /* degenerate faces can skip unwrap */
+  }
+}
+
+function centreBlockoutOrigin(doc: ModelDocument, objectId: ObjectId): void {
+  const object = doc.objects.get(objectId);
+  const mesh = object?.meshId ? doc.meshes.get(object.meshId) : null;
+  if (!object || !mesh || mesh.vertices.size === 0) return;
+  centreObjectOrigin(doc, objectId);
+}
+
+/**
+ * Default placeholder texture, paintable UVs, and origin at the mesh bounds centre.
+ * Also keeps live curve points in sync with that origin.
+ */
+export function applyDefaultBlockoutLook(doc: ModelDocument, objectId: ObjectId): void {
+  assignDefaultBlockoutMaterial(doc, objectId);
+  unwrapBlockoutUvs(doc, objectId);
+  centreBlockoutOrigin(doc, objectId);
 }

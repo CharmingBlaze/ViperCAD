@@ -4,6 +4,8 @@ import { beginInteractiveKnife } from '@/app/KnifeHotkey';
 import { beginInteractiveBevel } from '@/app/BevelHotkey';
 import { beginInteractiveLoopCut } from '@/app/LoopCutHotkey';
 import {
+  applyFillHotkey,
+  applyMergeHotkey,
   applyShadeHotkey,
   applySubdivideHotkey,
 } from '@/app/ModelingEditHotkeys';
@@ -336,7 +338,7 @@ export function handleBlenderSelectAll(
 
 /**
  * Dedicated engine dispatch for all Blender shortcuts:
- * - Operators: E (extrude), I (inset), K (knife), Ctrl+B (bevel), Ctrl+R (loop cut)
+ * - Operators: E (extrude), I (inset), K (knife), Ctrl+B (bevel), Ctrl+R (loop cut), F (fill), M (merge)
  * - Modal transforms: G (move), R (rotate), S (scale)
  * - Mode switches: 1 (vertex), 2 (edge), 3 (face), Tab (edit/object toggle)
  * - Selection utilities: A / Alt+A, Ctrl+= / Ctrl+-, Ctrl+L
@@ -389,6 +391,15 @@ export function handleBlenderShortcut(
 
   if (activeTool?.id === 'tile-draw' && applyTileDrawHotkey(session, workspace, e)) {
     e.preventDefault();
+    invalidateViewport?.();
+    return true;
+  }
+
+  // --- Viewport X-Ray (Blender Alt+Z): see and select through the mesh ---
+  if ((key === 'z' || key === 'Z') && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+    e.preventDefault();
+    session.selection.setXRay(!session.selection.state.xRay);
+    session.requestRedraw();
     invalidateViewport?.();
     return true;
   }
@@ -492,6 +503,26 @@ export function handleBlenderShortcut(
     return applyShadeHotkey(session, 'flat');
   }
 
+  // --- Blender Fill (F) / Merge (M) ---
+  if ((key === 'f' || key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+    if (meshEdit && session.selection.state.mode !== 'object') {
+      e.preventDefault();
+      applyFillHotkey(session);
+      session.requestRedraw();
+      invalidateViewport?.();
+      return true;
+    }
+  }
+  if ((key === 'm' || key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+    if (meshEdit && session.selection.state.mode !== 'object') {
+      e.preventDefault();
+      applyMergeHotkey(session);
+      session.requestRedraw();
+      invalidateViewport?.();
+      return true;
+    }
+  }
+
   // --- Blockout Mode Operators ---
   if (workspace.shellMode === 'blockout' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
     if (key === 'v' || key === 'V') {
@@ -582,14 +613,14 @@ export function handleBlenderShortcut(
   }
 
   // --- Orientation & Pivot: . and , ---
-  if (key === '.' || key === '>') {
+  if ((key === '.' || key === '>') && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
     session.transform.setOrientation(cycleOrientation(session.transform.prefs.orientation));
     session.requestRedraw();
     invalidateViewport?.();
     return true;
   }
-  if (key === ',' || key === '<') {
+  if ((key === ',' || key === '<') && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
     session.transform.setPivotMode(cyclePivotMode(session.transform.prefs.pivotMode));
     session.requestRedraw();

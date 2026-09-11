@@ -4,6 +4,7 @@ import { commitMeshObject, createEmptyDocument } from '@/core/document/ModelDocu
 import { EditorSession } from '@/core/editor/EditorSession';
 import { buildBox } from '@/core/mesh/builders/BoxBuilder';
 import { WorkspaceController } from '@/workspace/WorkspaceController';
+import { isBoundaryEdge, removeFace } from '@/core/mesh/EditableMesh';
 
 function key(name: string, modifiers: Partial<KeyboardEvent> = {}): KeyboardEvent {
   return {
@@ -52,6 +53,7 @@ function setupTest() {
     pushToast: vi.fn(),
     setHotkeysOpen: vi.fn(),
     setPaletteOpen: vi.fn(),
+    setPropertiesOpen: vi.fn(),
     setZenMode: vi.fn(),
     setSidebarCollapsed: vi.fn(),
     newProject: vi.fn(),
@@ -111,11 +113,34 @@ describe('MasterInputEngine', () => {
     expect(viewport.invalidate).toHaveBeenCalled();
   });
 
-  it('routes viewport camera framing (F or .)', () => {
+  it('frames the selection with F in Object mode', () => {
     const { viewport } = setupTest();
     const handled = masterInputEngine.handleKeyDown(key('f'));
     expect(handled).toBe(true);
     expect(viewport.frameSelection).toHaveBeenCalled();
+  });
+
+  it('frames the selection with Numpad .', () => {
+    const { viewport } = setupTest();
+    const handled = masterInputEngine.handleKeyDown(key('.', { code: 'NumpadDecimal' }));
+    expect(handled).toBe(true);
+    expect(viewport.frameSelection).toHaveBeenCalled();
+  });
+
+  it('uses F to fill in edit mode instead of framing', () => {
+    const { session, viewport, objectId } = setupTest();
+    const mesh = session.document.meshes.get(session.document.objects.get(objectId)!.meshId!)!;
+    const faceId = [...mesh.faces.keys()][0]!;
+    removeFace(mesh, faceId);
+    const seed = [...mesh.edges.keys()].find((id) => isBoundaryEdge(mesh, id))!;
+    session.selection.switchEditMode('edge', mesh);
+    session.selection.selectEdges([seed], 'replace');
+    const facesBefore = mesh.faces.size;
+
+    const handled = masterInputEngine.handleKeyDown(key('f'));
+    expect(handled).toBe(true);
+    expect(viewport.frameSelection).not.toHaveBeenCalled();
+    expect(mesh.faces.size).toBe(facesBefore + 1);
   });
 
   it('routes universal hotkeys like Ctrl+Z and Ctrl+Y', () => {
@@ -133,5 +158,22 @@ describe('MasterInputEngine', () => {
     const handled = masterInputEngine.handleKeyDown(key('k', { ctrlKey: true }));
     expect(handled).toBe(true);
     expect(actions.setPaletteOpen).toHaveBeenCalled();
+  });
+
+  it('routes properties (Ctrl+,)', () => {
+    const { actions } = setupTest();
+    const handled = masterInputEngine.handleKeyDown(key(',', { ctrlKey: true }));
+    expect(handled).toBe(true);
+    expect(actions.setPropertiesOpen).toHaveBeenCalled();
+  });
+
+  it('routes flip and mirror tools panel (Shift+M)', () => {
+    const { actions } = setupTest();
+    const setModelToolsSpy = vi.fn();
+    actions.setModelQuickToolsOpen = setModelToolsSpy;
+
+    const handled = masterInputEngine.handleKeyDown(key('M', { shiftKey: true, code: 'KeyM' }));
+    expect(handled).toBe(true);
+    expect(setModelToolsSpy).toHaveBeenCalled();
   });
 });

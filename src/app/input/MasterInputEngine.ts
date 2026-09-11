@@ -3,6 +3,7 @@ import type { WorkspaceController } from '@/workspace/WorkspaceController';
 import type { ViewId } from '@/workspace/types';
 import type { PointerSample } from '@/core/transform/TransformSystem';
 import { isTypingTarget } from '@/workspace/InputRouter';
+import { isAppDialogOpen } from '@/app/platform/appDialogs';
 import { commitDeleteSelection } from '@/core/editor/DeleteSelection';
 import { exitGroupFocus } from '@/core/editor/GroupFocus';
 import { commitCopySelection, commitPasteClipboard } from '@/core/editor/Clipboard';
@@ -39,6 +40,7 @@ export interface MasterInputActions {
   pushToast?: (message: string, type?: 'info' | 'success' | 'warning' | 'error') => void;
   setHotkeysOpen?: (update: boolean | ((open: boolean) => boolean)) => void;
   setPaletteOpen?: (update: boolean | ((open: boolean) => boolean)) => void;
+  setPropertiesOpen?: (update: boolean | ((open: boolean) => boolean)) => void;
   setZenMode?: (update: boolean | ((open: boolean) => boolean)) => void;
   setSidebarCollapsed?: (update: boolean | ((collapsed: boolean) => boolean)) => void;
   newProject?: () => void;
@@ -46,6 +48,8 @@ export interface MasterInputActions {
   openProject?: () => void;
   hotkeysOpen?: boolean;
   zenMode?: boolean;
+  modelQuickToolsOpen?: boolean;
+  setModelQuickToolsOpen?: (update: boolean | ((open: boolean) => boolean)) => void;
   animation?: {
     extrudeSelectedBone: () => string | null;
     getSelectedBoneName: () => string | null;
@@ -205,6 +209,7 @@ export class MasterInputEngine {
 
     // 1. Never swallow inputs from form fields
     if (isTypingTarget(e.target)) return false;
+    if (isAppDialogOpen()) return false;
 
     // 2. Active modal transform keys (x, y, z, numeric, Enter, Esc)
     if (session.transform.active) {
@@ -505,6 +510,18 @@ export class MasterInputEngine {
     }
 
     // 5. Dedicated Blender Shortcut Engine (e, i, s, g, r, 1, 2, 3, Tab, A, etc.)
+    if (
+      e.code === 'NumpadDecimal' &&
+      !session.transform.active &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey
+    ) {
+      e.preventDefault();
+      viewport?.frameSelection?.();
+      return true;
+    }
+
     const handledBlender = handleBlenderShortcut(e, {
       session,
       workspace,
@@ -531,7 +548,7 @@ export class MasterInputEngine {
         workspace.shellMode === 'rig' ||
         workspace.shellMode === 'blockout')
     ) {
-      if (e.code === 'NumpadDecimal' || e.key === '.' || e.key.toLowerCase() === 'f') {
+      if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         e.preventDefault();
         viewport?.frameSelection?.();
         return true;
@@ -554,6 +571,11 @@ export class MasterInputEngine {
       if (key === 'k' && !e.shiftKey) {
         e.preventDefault();
         actions?.setPaletteOpen?.((open) => !open);
+        return true;
+      }
+      if (key === ',' && !e.shiftKey) {
+        e.preventDefault();
+        actions?.setPropertiesOpen?.((open) => !open);
         return true;
       }
       if (key === 'n') {
@@ -656,8 +678,16 @@ export class MasterInputEngine {
       return true;
     }
 
-    // 10. Space / Shift+Space / N
+    // 10. Space / Shift+Space / Shift+M / N
     if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+      if ((e.code === 'KeyM' || e.key === 'M' || e.key === 'm') && e.shiftKey) {
+        if (workspace.shellMode === 'model' || workspace.shellMode === 'texture' || workspace.shellMode === 'blockout') {
+          e.preventDefault();
+          actions?.setModelQuickToolsOpen?.((open) => !open);
+          actions?.refresh?.();
+          return true;
+        }
+      }
       if (e.code === 'Space' && e.shiftKey) {
         e.preventDefault();
         actions?.setZenMode?.((open) => !open);

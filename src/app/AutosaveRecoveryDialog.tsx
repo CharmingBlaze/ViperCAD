@@ -54,7 +54,7 @@ export function AutosaveRecoveryDialog({
             aria-label="Close dialog"
             title="Close"
           >
-            ✕
+            <BlenderIcon name="panel_close" size={12} />
           </button>
         </div>
 

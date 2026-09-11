@@ -13,6 +13,7 @@ import { buildBox } from '@/core/mesh/builders';
 import { MeshBuilder } from '@/core/mesh/MeshBuilder';
 import { v3 } from '@/core/math/Vec3';
 import { createTerrain } from '@/core/terrain/Terrain';
+import { commitLakeWithCarve } from '@/core/terrain/TerrainFeatures';
 import { ensureTerrainPresetSource } from '@/core/terrain/TerrainProps';
 
 beforeEach(() => resetIdCounter(1));
@@ -158,6 +159,39 @@ describe('exportDocumentGlb', () => {
     const report = await validateGlbRoundTrip(buffer);
     expect(report.errors).toEqual([]);
     expect(report.meshes).toBeGreaterThan(0);
+    expect(report.triangles).toBeGreaterThan(0);
+  });
+
+  it('exports terrain, water, and a collider for a game engine', async () => {
+    if (typeof FileReader === 'undefined') {
+      class NodeFileReader {
+        result: ArrayBuffer | null = null;
+        onloadend: ((this: NodeFileReader, ev: unknown) => void) | null = null;
+        readAsArrayBuffer(blob: Blob) {
+          void blob.arrayBuffer().then((buffer) => {
+            this.result = buffer;
+            this.onloadend?.call(this, {});
+          });
+        }
+      }
+      (globalThis as { FileReader: typeof NodeFileReader }).FileReader = NodeFileReader;
+    }
+    const session = new EditorSession();
+    const created = createTerrain(session, { size: 8, resolution: 4, name: 'Ground' });
+    commitLakeWithCarve(session, created.objectId, {
+      radius: 2,
+      waterLevel: 0.1,
+      style: {},
+    });
+    generateMeshCollider(session.document, created.objectId);
+    for (const object of session.document.objects.values()) object.materialSlotIds = [];
+    session.document.materials.clear();
+    session.document.textures.clear();
+    session.document.images.clear();
+    const buffer = await exportDocumentGlb(session.document, EXPORT_PROFILES.godot);
+    const report = await validateGlbRoundTrip(buffer);
+    expect(report.errors).toEqual([]);
+    expect(report.meshes).toBeGreaterThanOrEqual(2);
     expect(report.triangles).toBeGreaterThan(0);
   });
 });

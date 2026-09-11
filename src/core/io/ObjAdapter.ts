@@ -30,7 +30,7 @@ export function importObj(text: string, name = 'OBJ Import'): EditableMesh {
       faces.push({ refs, material });
     }
   }
-  const builder = new MeshBuilder(name, false);
+  const builder = new MeshBuilder(name);
   const vertices: VertexId[] = positions.map((p) => builder.vertex(p));
   builder.setMaterialSlotCount(Math.max(1, materials.size));
   for (const face of faces) builder.ngon(face.refs.map((r) => vertices[r.v]!), face.refs.map((r) => r.vt == null ? v2(0, 0) : texcoords[r.vt]!), face.material);

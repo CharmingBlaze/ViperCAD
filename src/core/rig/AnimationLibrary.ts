@@ -46,6 +46,7 @@ export function deleteClipForRig(
   if (!settings.clipIds.includes(clipId)) return false;
   if (settings.clipIds.length <= 1) return false;
   settings.clipIds = settings.clipIds.filter((id) => id !== clipId);
+  settings.clipSequence = settings.clipSequence.filter((item) => item.clipId !== clipId);
   project.animationClips.delete(clipId);
   if (settings.activeClipId === clipId) {
     settings.activeClipId = settings.clipIds[0] ?? null;

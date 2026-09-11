@@ -28,8 +28,9 @@ import { EditorSession } from '@/core/editor/EditorSession';
 | Selection | `src/core/selection/` |
 | Tools (knife, sculpt, primitives) | `src/core/tools/` |
 | Viewport cameras / pointer / nav | `src/app/viewportEngine.ts`, `src/app/viewport/` |
-| Workspaces (Model, Sculpt, Terrain, Animate, UV) | `src/workspace/`, `src/App.tsx` |
+| Workspaces (Model, Sculpt, Terrain, Animate, UV, Tileset) | `src/workspace/`, `src/App.tsx` |
 | UV / pixel canvas | `src/app/UvPixelEditor.tsx`, `src/app/uvEditor/` |
+| Tileset / 3D tile draw | `src/app/tilesetWorkspace.ts`, `src/core/tools/TileDrawTool.ts` |
 | Icons | `src/assets/icons/`, `src/components/BlenderIcon.tsx` |
 | Persistence | `src/core/persistence/` |
 
@@ -61,7 +62,7 @@ Put new tests beside the module they cover (`src/core/mesh/ops/__tests__/`, `src
 
 ## UI and input
 
-- Modelling, sculpt, terrain, animate, and UV/Paint 3D views share camera chords in `src/app/viewport/ViewportInputEngine.ts`.
+- Modelling, sculpt, terrain, animate, UV/Paint, and Tileset 3D views share camera chords in `src/app/viewport/ViewportInputEngine.ts`.
 - LightWave-style on-canvas tools are `ViewportNavToolbar` (pan / orbit / zoom / frame / maximize).
 - The UV/Paint 2D canvas uses the same toolbar plus `canvasNavKind` (Alt pan, Ctrl+Alt zoom).
 - Keep `currentColor` on icons so they follow the dark UI.

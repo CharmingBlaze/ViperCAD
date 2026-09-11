@@ -4,6 +4,8 @@ import { v3 } from '@/core/math/Vec3';
 import { WORLD_XY_PLANE } from '@/core/snap/SnapEngine';
 import { BlockoutVectorTool } from '../BlockoutVectorTool';
 import type { ToolPointerInput } from '../Tool';
+import { DEFAULT_PLACEHOLDER_IMAGE_NAME } from '@/core/image/DefaultPlaceholderImage';
+import { getObjectOrigin, getObjectWorldBounds } from '@/core/editor/OriginTools';
 
 function pointer(viewportId: string, origin = v3(0, 0, 10), dir = v3(0, 0, -1)): ToolPointerInput {
   return {
@@ -228,5 +230,27 @@ describe('BlockoutVectorTool', () => {
     tool.state.activePlane = 'front';
     expect(tool.commitExtrude(session.context())).toBe(true);
     expect(session.tools.getActive()?.id).toBe('select');
+  });
+
+  it('assigns the default texture and centres the origin on commit', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('blockout-vector') as BlockoutVectorTool;
+    session.tools.setActive('blockout-vector', session.context());
+    tool.state.points = [v3(0, 0, 0), v3(2, 0, 0), v3(2, 2, 0), v3(0, 2, 0)];
+    tool.state.activePlane = 'front';
+    expect(tool.commitExtrude(session.context())).toBe(true);
+
+    const object = [...session.document.objects.values()][0]!;
+    const material = session.document.materials.get(object.materialSlotIds[0]!)!;
+    expect(material.baseColourTextureId).toBeTruthy();
+    const texture = session.document.textures.get(material.baseColourTextureId!)!;
+    expect(session.document.images.get(texture.imageAssetId)?.name).toBe(
+      DEFAULT_PLACEHOLDER_IMAGE_NAME,
+    );
+    const origin = getObjectOrigin(session.document, object.id);
+    const bounds = getObjectWorldBounds(session.document, object.id)!;
+    expect(origin.x).toBeCloseTo(bounds.center.x, 5);
+    expect(origin.y).toBeCloseTo(bounds.center.y, 5);
+    expect(origin.z).toBeCloseTo(bounds.center.z, 5);
   });
 });

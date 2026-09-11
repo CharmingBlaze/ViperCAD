@@ -14,9 +14,11 @@ import {
   exportDiagnostics,
   type ExportProfile,
 } from '@/app/GameExportProfiles';
+import { exportDocumentGlb, exportRigGlb, documentHasSkinnedExport, validateGlbRoundTrip } from '@/app/GameExport';
 import { EditorSession } from '@/core/editor/EditorSession';
 import { preloadDefaultPlaceholderImage } from '@/core/image/DefaultPlaceholderImage';
 import { beginBlenderOperator } from '@/app/blender/BlenderControlEngine';
+import { applyFillHotkey, applyMergeHotkey } from '@/app/ModelingEditHotkeys';
 import { masterInputEngine } from '@/app/input/MasterInputEngine';
 import { PRIMITIVE_LABELS } from '@/core/primitives/PrimitiveFactory';
 import { CreateDoodleTool } from '@/core/tools/CreateDoodleTool';
@@ -50,7 +52,7 @@ import { createEmptyProject, clearProjectDirty, projectIsDirty } from '@/core/do
 import { DocumentTabs } from '@/app/DocumentTabs';
 import { enterGroupFocus, exitGroupFocus, exitToDocumentRoot } from '@/core/editor/GroupFocus';
 import { placeModelQuick } from '@/app/outliner/placeModelWorkflow';
-import { renameProjectDocument } from '@/app/outliner/documentActions';
+import { renameProjectDocument, deleteProjectDocument } from '@/app/outliner/documentActions';
 import { modelHasPlaceableGeometry } from '@/core/editor/ModelInstances';
 import { getViperDocument } from '@/core/document/ViperProject';
 import { isGroupObject } from '@/core/editor/Hierarchy';
@@ -60,7 +62,27 @@ import {
   commitGroupSelection,
   commitUngroupSelection,
 } from '@/core/editor/HierarchyCommands';
+import { FloatingModelToolsPanel } from '@/app/modelTools/FloatingModelToolsPanel';
+import {
+  flipObjectScale,
+  mirrorObjectAcrossWorld,
+  duplicateAndMirrorObjects,
+  rotateObjectsDegrees,
+  centerObjectsOnAxis,
+  snapObjectsToGround,
+  duplicateAndMirrorFaces,
+  flipFaces,
+} from '@/core/editor/ModelTransformTools';
+import { runMeshTransaction } from '@/core/history/Transaction';
+import {
+  readObjectModifierStack,
+  writeObjectModifierStack,
+} from '@/core/modifiers/serialize';
+import { createDefaultMirrorModifier, MODIFIER_STACK_METADATA_KEY } from '@/core/modifiers/types';
 import { AutosaveRecoveryDialog } from '@/app/AutosaveRecoveryDialog';
+import { AppPropertiesDialog } from '@/app/AppPropertiesDialog';
+import { AppDialogHost } from '@/app/AppDialogHost';
+import { confirmAction, promptText } from '@/app/platform/appDialogs';
 import { type RecoveryControlsState } from '@/app/AppInspectorPanel';
 import { HotkeyHelpOverlay } from '@/app/HotkeyHelpOverlay';
 import { ToastStack, pushToast, useToasts } from '@/app/Toast';
@@ -80,7 +102,11 @@ import { getActiveClip } from '@/core/rig/RigDocument';
 import {
   clearAutomaticAutosaves,
   clearAutosave,
+  PROMPT_RECOVERY_KEY,
   readAutosaves,
+  readRecoveryDismissedAt,
+  rememberRecoveryDismissed,
+  shouldOfferRecoveryPrompt,
   writeAutosave,
   writeEmergencyAutosave,
   writeNamedAutosave,
@@ -107,6 +133,12 @@ import {
   WORKSPACE_THEMES,
   type WorkspaceThemeId,
 } from '@/app/theme/themeTokens';
+import {
+  getAppPreferences,
+  renderQualityScale,
+  subscribeAppPreferences,
+  type RenderQualityId,
+} from '@/app/preferences/appPreferences';
 import './App.css';
 import '@/app/animation/animation.css';
 
@@ -131,6 +163,7 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [zenMode, setZenMode] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [modelQuickToolsOpen, setModelQuickToolsOpen] = useState(false);
   const [themeId, setThemeId] = useState<WorkspaceThemeId>(() => readStoredTheme());
   const [terrainObjectsOpen, setTerrainObjectsOpen] = useState(false);
   const [terrainFocusTab, setTerrainFocusTab] = useState<TerrainPanelTab | null>(null);
@@ -225,37 +258,31 @@ export default function App() {
   const [autosaveOffers, setAutosaveOffers] = useState<AutosavePayload[]>([]);
   const [promptRecoveryOnStartup, setPromptRecoveryOnStartup] = useState<boolean>(() => {
     try {
-      const stored = localStorage.getItem('vipercad:prompt-recovery-on-startup');
+      const stored = localStorage.getItem(PROMPT_RECOVERY_KEY);
       return stored === null ? true : stored === 'true';
     } catch {
       return false;
     }
   });
   const [recoveryModalOpen, setRecoveryModalOpen] = useState(false);
+  const [propertiesOpen, setPropertiesOpen] = useState(false);
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
-  const [renderQuality, setRenderQuality] = useState<'performance' | 'balanced' | 'high'>('balanced');
   const [exportProfileId, setExportProfileId] = useState<ExportProfile['id']>('godot');
   const projectFileToken = useRef<FileToken | null>(null);
   const toasts = useToasts();
-  const refresh = () => setTick((t) => t + 1);
-  const chooseRenderQuality = (quality: 'performance' | 'balanced' | 'high') => {
-    setRenderQuality(quality);
-    viewportEngine.setRenderQuality(
-      quality === 'performance' ? 0.6 : quality === 'high' ? 1.35 : 1,
-    );
-    pushToast(
-      quality === 'performance'
-        ? 'Performance viewport enabled'
-        : quality === 'high'
-          ? 'High-quality viewport enabled'
-          : 'Balanced viewport enabled',
-      'info',
-    );
-  };
+  const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  useEffect(() => session.onRedraw(refresh), [session]);
-  useEffect(() => workspace.subscribe(refresh), [workspace]);
-  useEffect(() => animation.subscribe(refresh), [animation]);
+  useEffect(() => {
+    const applyQuality = (prefs: { renderQuality: RenderQualityId }) => {
+      viewportEngine.setRenderQuality(renderQualityScale(prefs.renderQuality));
+    };
+    applyQuality(getAppPreferences());
+    return subscribeAppPreferences(applyQuality);
+  }, []);
+
+  useEffect(() => session.onRedraw(refresh), [session, refresh]);
+  useEffect(() => workspace.subscribe(refresh), [workspace, refresh]);
+  useEffect(() => animation.subscribe(refresh), [animation, refresh]);
   useEffect(() => {
     writeSculptPanelOpen({
       brushes: sculptBrushesOpen,
@@ -303,14 +330,19 @@ export default function App() {
     if (workspace.shellMode === 'model') session.ensureDocumentKind('model');
     else if (workspace.shellMode === 'terrain') session.ensureDocumentKind('level');
     refresh();
-  }, [session, workspace]);
+  }, [session, workspace, refresh]);
 
   useEffect(() => {
     let active = true;
     void readAutosaves().then((existing) => {
       if (active) {
         setAutosaveOffers(existing);
-        if (promptRecoveryOnStartup && existing.length > 0) {
+        if (
+          shouldOfferRecoveryPrompt(existing, {
+            promptOnStartup: promptRecoveryOnStartup,
+            dismissedAt: readRecoveryDismissedAt(),
+          })
+        ) {
           setRecoveryModalOpen(true);
         }
       }
@@ -321,17 +353,19 @@ export default function App() {
   useEffect(() => {
     const snapshot = () => {
       try {
+        animation.flushToProject();
         return serializeViperProject(session.project, APP_VERSION);
       } catch {
         return serializeProject(session.document, APP_VERSION);
       }
     };
-    registerProjectCapture(snapshot);
+    registerProjectCapture(snapshot, () => projectIsDirty(session.project));
     const timer = window.setInterval(() => {
       if (!projectIsDirty(session.project)) return;
       void writeAutosave(snapshot(), session.project.name || 'Autosave');
     }, 5000);
     const onHide = () => {
+      if (document.visibilityState !== 'hidden') return;
       if (!projectIsDirty(session.project)) return;
       try {
         writeEmergencyAutosave(snapshot(), 'Hidden tab');
@@ -345,7 +379,7 @@ export default function App() {
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onHide);
     };
-  }, [session]);
+  }, [session, animation]);
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -353,8 +387,17 @@ export default function App() {
       event.preventDefault();
       event.returnValue = '';
     };
+    const blockBrowserFileNav = (event: DragEvent) => {
+      event.preventDefault();
+    };
     window.addEventListener('beforeunload', onBeforeUnload);
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+    window.addEventListener('dragover', blockBrowserFileNav);
+    window.addEventListener('drop', blockBrowserFileNav);
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('dragover', blockBrowserFileNav);
+      window.removeEventListener('drop', blockBrowserFileNav);
+    };
   }, [session]);
 
   useEffect(() => {
@@ -362,13 +405,20 @@ export default function App() {
     return () => masterInputEngine.detach();
   }, []);
 
-  const confirmReplaceDirtyProject = () =>
-    !projectIsDirty(session.project) ||
-    window.confirm('Discard unsaved changes and replace the current project?');
+  const confirmReplaceDirtyProject = useCallback(async () => {
+    if (!projectIsDirty(session.project)) return true;
+    return confirmAction({
+      title: 'Unsaved changes',
+      message: 'This project has unsaved changes. Discard them and continue?',
+      confirmLabel: 'Discard',
+      danger: true,
+    });
+  }, [session]);
 
-  const newProject = () => {
-    if (!confirmReplaceDirtyProject()) return;
+  const newProject = useCallback(async () => {
+    if (!(await confirmReplaceDirtyProject())) return;
     session.loadProject(createEmptyProject());
+    animation.syncFromProject();
     if (workspace.shellMode === 'model') session.ensureDocumentKind('model');
     else if (workspace.shellMode === 'terrain') session.ensureDocumentKind('level');
     projectFileToken.current = null;
@@ -380,15 +430,16 @@ export default function App() {
       'success',
     );
     refresh();
-  };
+  }, [confirmReplaceDirtyProject, refresh, session, workspace, animation]);
 
   const toggleOutliner = () => {
     setOutlinerOpen((open) => !open);
     refresh();
   };
 
-  const saveProject = async (saveAs = false) => {
+  const saveProject = useCallback(async (saveAs = false) => {
     try {
+      animation.flushToProject();
       const health = inspectProjectHealth(session.project);
       if (!health.ok) {
         pushToast(health.errors[0] ?? 'Project failed validation', 'error');
@@ -414,15 +465,16 @@ export default function App() {
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Could not save project', 'error');
     }
-  };
+  }, [refresh, session, animation]);
 
-  const openProjectDialog = async () => {
-    if (!confirmReplaceDirtyProject()) return;
+  const openProjectDialog = useCallback(async () => {
+    if (!(await confirmReplaceDirtyProject())) return;
     try {
       const selected = await openNativeFile({ types: [VIPER_PROJECT_FILE] });
       if (!selected) return;
       const { project, activeDocumentId } = openViperProjectText(await selected.file.text());
       session.loadProject(project, activeDocumentId);
+      animation.syncFromProject();
       session.project.name = selected.file.name.replace(/\.(?:viper|json)$/i, '') || session.project.name;
       projectFileToken.current = selected.token;
       void clearAutomaticAutosaves();
@@ -431,7 +483,7 @@ export default function App() {
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Failed to open project', 'error');
     }
-  };
+  }, [confirmReplaceDirtyProject, refresh, session, animation]);
 
   useEffect(() => {
     masterInputEngine.setContext({
@@ -456,28 +508,20 @@ export default function App() {
         pushToast,
         setHotkeysOpen,
         setPaletteOpen,
+        setPropertiesOpen,
         setZenMode,
         setSidebarCollapsed,
-        newProject,
+        newProject: () => void newProject(),
         saveProject: (saveAs) => void saveProject(saveAs),
         openProject: () => void openProjectDialog(),
         hotkeysOpen,
         zenMode,
+        modelQuickToolsOpen,
+        setModelQuickToolsOpen,
         animation,
       },
     });
-  }, [
-    session,
-    workspace,
-    refresh,
-    pushToast,
-    hotkeysOpen,
-    zenMode,
-    animation,
-    newProject,
-    saveProject,
-    openProjectDialog,
-  ]);
+  }, [session, workspace, refresh, hotkeysOpen, zenMode, modelQuickToolsOpen, animation, newProject, saveProject, openProjectDialog]);
 
   const importModelDialog = async () => {
     try {
@@ -556,7 +600,8 @@ export default function App() {
   const createRecoveryPoint = async () => {
     const timestamp = new Date().toLocaleTimeString();
     const name = `${session.document.name || 'Project'} · ${timestamp}`;
-    const saved = await writeNamedAutosave(name, serializeProject(session.document));
+    animation.flushToProject();
+    const saved = await writeNamedAutosave(name, serializeViperProject(session.project, APP_VERSION));
     if (saved) {
       const existing = await readAutosaves();
       setAutosaveOffers(existing);
@@ -583,8 +628,10 @@ export default function App() {
         types: [GLB_FILE],
       });
       if (!target) return;
-      const { exportDocumentGlb, validateGlbRoundTrip } = await import('@/app/GameExport');
-      const buffer = await exportDocumentGlb(session.document, profile);
+      const skinned = documentHasSkinnedExport(session.project, session.document);
+      const buffer = skinned
+        ? await exportRigGlb(animation, profile)
+        : await exportDocumentGlb(session.document, profile);
       const roundTrip = await validateGlbRoundTrip(buffer);
       if (roundTrip.errors.length) {
         pushToast(roundTrip.errors[0]!, 'error');
@@ -592,7 +639,9 @@ export default function App() {
       }
       await writeNativeFile(target, buffer, 'model/gltf-binary');
       pushToast(
-        `Exported ${target.name} for ${profile.label} · verified ${roundTrip.triangles} triangles`,
+        skinned
+          ? `Exported ${target.name} for ${profile.label} · verified ${roundTrip.triangles} triangles, ${roundTrip.skeletons} skeleton${roundTrip.skeletons === 1 ? '' : 's'}`
+          : `Exported ${target.name} for ${profile.label} · verified ${roundTrip.triangles} triangles`,
         'success',
       );
     } catch (error) {
@@ -655,6 +704,7 @@ export default function App() {
     try {
       const loaded = openViperProjectText(autosave.project);
       session.loadProject(loaded.project, loaded.activeDocumentId);
+      animation.syncFromProject();
       session.project.dirty = true;
       void clearAutosave(autosave.id);
       setAutosaveOffers((items) => items.filter((item) => item.id !== autosave.id));
@@ -672,6 +722,7 @@ export default function App() {
   };
 
   const discardAllAutosaves = () => {
+    rememberRecoveryDismissed();
     void clearAutosave();
     setAutosaveOffers([]);
     pushToast('Recovery history cleared', 'info');
@@ -681,7 +732,7 @@ export default function App() {
     setPromptRecoveryOnStartup((prev) => {
       const next = typeof val === 'boolean' ? val : !prev;
       try {
-        localStorage.setItem('vipercad:prompt-recovery-on-startup', String(next));
+        localStorage.setItem(PROMPT_RECOVERY_KEY, String(next));
       } catch {}
       pushToast(`Startup recovery prompt ${next ? 'enabled' : 'disabled'}`, 'info');
       return next;
@@ -720,6 +771,7 @@ export default function App() {
   const toggleXRay = () => {
     session.selection.setXRay(!session.selection.state.xRay);
     session.requestRedraw();
+    viewportEngine.invalidate();
     refresh();
   };
 
@@ -732,6 +784,17 @@ export default function App() {
   const toggleDisplayTextures = () => {
     workspace.setDisplayTextures(!workspace.getDisplayTextures());
     session.requestRedraw();
+    refresh();
+  };
+
+  const setDisplayTexturesEnabled = (enabled: boolean) => {
+    workspace.setDisplayTextures(enabled);
+    session.requestRedraw();
+    refresh();
+  };
+
+  const setDrawOnSurfacesEnabled = (enabled: boolean) => {
+    workspace.setDrawOnSurfaces(enabled);
     refresh();
   };
 
@@ -926,6 +989,538 @@ export default function App() {
     });
   };
 
+  const handleModelFlipHorizontal = (acrossWorld = false) => {
+    const isEditMode = session.selection.state.mode !== 'object';
+    const activeObj = session.selection.state.activeObjectId
+      ? session.document.objects.get(session.selection.state.activeObjectId)
+      : null;
+    const mesh = activeObj?.meshId ? session.document.meshes.get(activeObj.meshId) : null;
+
+    if (isEditMode && mesh && session.selection.state.mode === 'face' && session.selection.state.selectedFaceIds.size > 0) {
+      const faceIds = [...session.selection.state.selectedFaceIds];
+      const result = runMeshTransaction(
+        session.history,
+        mesh,
+        `Flip ${faceIds.length} Face UVs Horizontal`,
+        () => {
+          for (const fId of faceIds) {
+            const face = mesh.faces.get(fId);
+            if (!face) continue;
+            for (const cId of face.cornerIds) {
+              const corner = mesh.faceCorners.get(cId);
+              if (!corner || !mesh.defaultUvLayerId) continue;
+              const uv = corner.uvs.get(mesh.defaultUvLayerId);
+              if (uv) uv.x = 1 - uv.x;
+            }
+          }
+          mesh.geometryVersion++;
+          mesh.dirty.uvs = true;
+          return faceIds.length;
+        },
+        { fullValidation: false, selection: session.selection },
+      );
+      if (result.ok) {
+        pushToast(`Flipped UVs for ${faceIds.length} face(s)`, 'success');
+        session.requestRedraw();
+        refresh();
+      }
+      return;
+    }
+
+    const targetIds = session.selection.state.selectedObjectIds.size > 0
+      ? [...session.selection.state.selectedObjectIds]
+      : session.selection.state.activeObjectId
+        ? [session.selection.state.activeObjectId]
+        : [];
+
+    if (!targetIds.length) {
+      pushToast('Select an object or faces to flip', 'error');
+      return;
+    }
+
+    const prevTransforms = new Map(
+      targetIds.map((id) => {
+        const obj = session.document.objects.get(id)!;
+        return [id, { pos: { ...obj.transform.position }, scale: { ...obj.transform.scale } }];
+      }),
+    );
+
+    let applied = false;
+    const action = () => {
+      if (acrossWorld) mirrorObjectAcrossWorld(session.document, targetIds, 'x');
+      else flipObjectScale(session.document, targetIds, 'x');
+    };
+    action();
+    applied = true;
+
+    session.history.execute({
+      name: acrossWorld ? 'Mirror Objects Across World X' : 'Flip Objects Horizontal (X)',
+      execute: () => {
+        if (!applied) {
+          action();
+          applied = true;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+      undo: () => {
+        if (applied) {
+          for (const [id, t] of prevTransforms) {
+            const obj = session.document.objects.get(id);
+            if (obj) {
+              obj.transform.position = { ...t.pos };
+              obj.transform.scale = { ...t.scale };
+            }
+          }
+          applied = false;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+    });
+
+    session.requestRedraw();
+    refresh();
+    pushToast(
+      acrossWorld
+        ? `Mirrored ${targetIds.length} object(s) across world X=0`
+        : `Flipped ${targetIds.length} object(s) along X`,
+      'success',
+    );
+  };
+
+  const handleModelFlipVertical = () => {
+    const targetIds = session.selection.state.selectedObjectIds.size > 0
+      ? [...session.selection.state.selectedObjectIds]
+      : session.selection.state.activeObjectId
+        ? [session.selection.state.activeObjectId]
+        : [];
+
+    if (!targetIds.length) {
+      pushToast('Select an object to flip', 'error');
+      return;
+    }
+
+    const prevTransforms = new Map(
+      targetIds.map((id) => {
+        const obj = session.document.objects.get(id)!;
+        return [id, { scale: { ...obj.transform.scale } }];
+      }),
+    );
+
+    flipObjectScale(session.document, targetIds, 'y');
+    let applied = true;
+
+    session.history.execute({
+      name: 'Flip Objects Vertical (Y)',
+      execute: () => {
+        if (!applied) {
+          flipObjectScale(session.document, targetIds, 'y');
+          applied = true;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+      undo: () => {
+        if (applied) {
+          for (const [id, t] of prevTransforms) {
+            const obj = session.document.objects.get(id);
+            if (obj) obj.transform.scale = { ...t.scale };
+          }
+          applied = false;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+    });
+
+    session.requestRedraw();
+    refresh();
+    pushToast(`Flipped ${targetIds.length} object(s) vertically along Y`, 'success');
+  };
+
+  const handleModelFlipDepth = () => {
+    const targetIds = session.selection.state.selectedObjectIds.size > 0
+      ? [...session.selection.state.selectedObjectIds]
+      : session.selection.state.activeObjectId
+        ? [session.selection.state.activeObjectId]
+        : [];
+
+    if (!targetIds.length) {
+      pushToast('Select an object to flip', 'error');
+      return;
+    }
+
+    const prevTransforms = new Map(
+      targetIds.map((id) => {
+        const obj = session.document.objects.get(id)!;
+        return [id, { scale: { ...obj.transform.scale } }];
+      }),
+    );
+
+    flipObjectScale(session.document, targetIds, 'z');
+    let applied = true;
+
+    session.history.execute({
+      name: 'Flip Objects Depth (Z)',
+      execute: () => {
+        if (!applied) {
+          flipObjectScale(session.document, targetIds, 'z');
+          applied = true;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+      undo: () => {
+        if (applied) {
+          for (const [id, t] of prevTransforms) {
+            const obj = session.document.objects.get(id);
+            if (obj) obj.transform.scale = { ...t.scale };
+          }
+          applied = false;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+    });
+
+    session.requestRedraw();
+    refresh();
+    pushToast(`Flipped ${targetIds.length} object(s) along Z (depth)`, 'success');
+  };
+
+  const handleModelFlipNormals = () => {
+    const activeObj = session.selection.state.activeObjectId
+      ? session.document.objects.get(session.selection.state.activeObjectId)
+      : null;
+    const mesh = activeObj?.meshId ? session.document.meshes.get(activeObj.meshId) : null;
+    if (!mesh) {
+      pushToast('Select a mesh object to flip normals', 'error');
+      return;
+    }
+
+    const isEditMode = session.selection.state.mode !== 'object';
+    const targetFaceIds = isEditMode && session.selection.state.selectedFaceIds.size > 0
+      ? [...session.selection.state.selectedFaceIds]
+      : [...mesh.faces.keys()];
+
+    if (!targetFaceFaceCount(targetFaceIds)) {
+      pushToast('No faces to flip', 'error');
+      return;
+    }
+
+    const result = runMeshTransaction(
+      session.history,
+      mesh,
+      `Flip Normals (${targetFaceIds.length} faces)`,
+      (m) => flipFaces(m, targetFaceIds),
+      { fullValidation: true, selection: session.selection },
+    );
+
+    if (result.ok) {
+      pushToast(`Flipped normals of ${targetFaceIds.length} face(s)`, 'success');
+      session.requestRedraw();
+      refresh();
+    } else {
+      pushToast(result.error ?? 'Failed to flip normals', 'error');
+    }
+  };
+
+  function targetFaceFaceCount(faces: unknown[]): boolean {
+    return faces.length > 0;
+  }
+
+  const handleModelDuplicateAndMirror = (linked = false) => {
+    const isEditMode = session.selection.state.mode !== 'object';
+    const activeObj = session.selection.state.activeObjectId
+      ? session.document.objects.get(session.selection.state.activeObjectId)
+      : null;
+    const mesh = activeObj?.meshId ? session.document.meshes.get(activeObj.meshId) : null;
+
+    if (isEditMode && mesh && session.selection.state.selectedFaceIds.size > 0) {
+      const faceIds = [...session.selection.state.selectedFaceIds];
+      let newCreatedIds: string[] = [];
+
+      const result = runMeshTransaction(
+        session.history,
+        mesh,
+        `Duplicate & Mirror ${faceIds.length} Faces across X`,
+        (m) => {
+          const res = duplicateAndMirrorFaces(m, faceIds, 'x');
+          newCreatedIds = res.newFaceIds;
+          return res;
+        },
+        { fullValidation: true, selection: session.selection },
+      );
+
+      if (result.ok) {
+        session.selection.selectFaces(newCreatedIds, 'replace');
+        pushToast(`Duplicated & mirrored ${faceIds.length} face(s) across X=0`, 'success');
+        session.requestRedraw();
+        refresh();
+      } else {
+        pushToast(result.error ?? 'Failed to mirror faces', 'error');
+      }
+      return;
+    }
+
+    const targetIds = session.selection.state.selectedObjectIds.size > 0
+      ? [...session.selection.state.selectedObjectIds]
+      : session.selection.state.activeObjectId
+        ? [session.selection.state.activeObjectId]
+        : [];
+
+    if (!targetIds.length) {
+      pushToast('Select objects or faces to duplicate & mirror', 'error');
+      return;
+    }
+
+    const createdIds = duplicateAndMirrorObjects(session.document, targetIds, 'x', linked);
+    if (!createdIds.length) {
+      pushToast('Failed to duplicate & mirror objects', 'error');
+      return;
+    }
+
+    let applied = true;
+    session.history.execute({
+      name: linked ? 'Duplicate & Mirror Objects (Linked)' : 'Duplicate & Mirror Objects',
+      execute: () => {
+        if (!applied) {
+          duplicateAndMirrorObjects(session.document, targetIds, 'x', linked);
+          applied = true;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+      undo: () => {
+        if (applied) {
+          for (const id of createdIds) {
+            session.document.objects.delete(id);
+          }
+          applied = false;
+          session.selection.selectObjects(targetIds, 'replace');
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+    });
+
+    session.selection.setMode('object');
+    session.selection.selectObjects(createdIds, 'replace');
+    session.requestRedraw();
+    refresh();
+    pushToast(
+      linked
+        ? `Created ${createdIds.length} linked mirror object(s) across X=0`
+        : `Duplicated & mirrored ${createdIds.length} object(s) across X=0`,
+      'success',
+    );
+  };
+
+  const handleModelAddMirrorModifier = () => {
+    const activeObj = session.selection.state.activeObjectId
+      ? session.document.objects.get(session.selection.state.activeObjectId)
+      : null;
+    if (!activeObj) {
+      pushToast('Select an object to add Mirror modifier', 'error');
+      return;
+    }
+
+    const currentStack = readObjectModifierStack(activeObj) ?? {
+      version: 1,
+      modifiers: [],
+    };
+    const hasMirror = currentStack.modifiers.some((m) => m.kind === 'mirror');
+    if (hasMirror) {
+      pushToast('Object already has a Mirror modifier in its stack', 'info');
+      return;
+    }
+
+    const previousStackJson = activeObj.metadata[MODIFIER_STACK_METADATA_KEY];
+    const newStack = {
+      ...currentStack,
+      modifiers: [...currentStack.modifiers, createDefaultMirrorModifier('x')],
+    };
+    writeObjectModifierStack(activeObj, newStack);
+    session.document.dirty = true;
+
+    let applied = true;
+    session.history.execute({
+      name: 'Add Mirror Modifier (X)',
+      execute: () => {
+        if (!applied) {
+          writeObjectModifierStack(activeObj, newStack);
+          applied = true;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+      undo: () => {
+        if (applied) {
+          if (previousStackJson) activeObj.metadata[MODIFIER_STACK_METADATA_KEY] = previousStackJson;
+          else delete activeObj.metadata[MODIFIER_STACK_METADATA_KEY];
+          applied = false;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+    });
+
+    session.requestRedraw();
+    refresh();
+    pushToast('Added live Mirror modifier (X axis)', 'success');
+  };
+
+  const handleModelRotateDegrees = (axis: 'x' | 'y' | 'z', degrees: number) => {
+    const targetIds = session.selection.state.selectedObjectIds.size > 0
+      ? [...session.selection.state.selectedObjectIds]
+      : session.selection.state.activeObjectId
+        ? [session.selection.state.activeObjectId]
+        : [];
+
+    if (!targetIds.length) {
+      pushToast('Select an object to rotate', 'error');
+      return;
+    }
+
+    const prevRots = new Map(
+      targetIds.map((id) => {
+        const obj = session.document.objects.get(id)!;
+        return [id, { ...obj.transform.rotation }];
+      }),
+    );
+
+    rotateObjectsDegrees(session.document, targetIds, axis, degrees);
+    let applied = true;
+
+    session.history.execute({
+      name: `Rotate Objects ${degrees}° (${axis.toUpperCase()})`,
+      execute: () => {
+        if (!applied) {
+          rotateObjectsDegrees(session.document, targetIds, axis, degrees);
+          applied = true;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+      undo: () => {
+        if (applied) {
+          for (const [id, rot] of prevRots) {
+            const obj = session.document.objects.get(id);
+            if (obj) obj.transform.rotation = { ...rot };
+          }
+          applied = false;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+    });
+
+    session.requestRedraw();
+    refresh();
+    pushToast(`Rotated ${targetIds.length} object(s) by ${degrees}° on ${axis.toUpperCase()}`, 'info');
+  };
+
+  const handleModelCenterAxis = (axis: 'x' | 'y' | 'z') => {
+    const targetIds = session.selection.state.selectedObjectIds.size > 0
+      ? [...session.selection.state.selectedObjectIds]
+      : session.selection.state.activeObjectId
+        ? [session.selection.state.activeObjectId]
+        : [];
+
+    if (!targetIds.length) {
+      pushToast('Select an object to center', 'error');
+      return;
+    }
+
+    const prevPositions = new Map(
+      targetIds.map((id) => {
+        const obj = session.document.objects.get(id)!;
+        return [id, { ...obj.transform.position }];
+      }),
+    );
+
+    centerObjectsOnAxis(session.document, targetIds, axis);
+    let applied = true;
+
+    session.history.execute({
+      name: `Center Objects on ${axis.toUpperCase()}=0`,
+      execute: () => {
+        if (!applied) {
+          centerObjectsOnAxis(session.document, targetIds, axis);
+          applied = true;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+      undo: () => {
+        if (applied) {
+          for (const [id, pos] of prevPositions) {
+            const obj = session.document.objects.get(id);
+            if (obj) obj.transform.position = { ...pos };
+          }
+          applied = false;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+    });
+
+    session.requestRedraw();
+    refresh();
+    pushToast(`Centered ${targetIds.length} object(s) on ${axis.toUpperCase()}=0`, 'success');
+  };
+
+  const handleModelSnapToGround = () => {
+    const targetIds = session.selection.state.selectedObjectIds.size > 0
+      ? [...session.selection.state.selectedObjectIds]
+      : session.selection.state.activeObjectId
+        ? [session.selection.state.activeObjectId]
+        : [];
+
+    if (!targetIds.length) {
+      pushToast('Select an object to snap to ground', 'error');
+      return;
+    }
+
+    const prevPositions = new Map(
+      targetIds.map((id) => {
+        const obj = session.document.objects.get(id)!;
+        return [id, { ...obj.transform.position }];
+      }),
+    );
+
+    snapObjectsToGround(session.document, targetIds);
+    let applied = true;
+
+    session.history.execute({
+      name: 'Snap Objects to Ground Y=0',
+      execute: () => {
+        if (!applied) {
+          snapObjectsToGround(session.document, targetIds);
+          applied = true;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+      undo: () => {
+        if (applied) {
+          for (const [id, pos] of prevPositions) {
+            const obj = session.document.objects.get(id);
+            if (obj) obj.transform.position = { ...pos };
+          }
+          applied = false;
+          session.document.dirty = true;
+          session.requestRedraw();
+        }
+      },
+    });
+
+    session.requestRedraw();
+    refresh();
+    pushToast(`Snapped ${targetIds.length} object(s) to ground level (Y=0)`, 'success');
+  };
+
   const menus: DesktopMenuDefinition[] = [
     {
       label: 'File',
@@ -948,60 +1543,6 @@ export default function App() {
           label: 'Save As…',
           shortcut: 'Ctrl+Shift+S',
           action: () => void saveProject(true),
-        },
-        { kind: 'separator' },
-        {
-          kind: 'command',
-          label: 'New Model',
-          action: () => {
-            const id = session.projectEditor.newModel(`Model ${session.project.modelDocumentIds.length + 1}`);
-            session.openDocument(id);
-            refresh();
-            pushToast('New Model — edit reusable assets here', 'success');
-          },
-        },
-        {
-          kind: 'command',
-          label: 'New Level',
-          action: () => {
-            const id = session.projectEditor.newLevel(`Level ${session.project.levelDocumentIds.length + 1}`);
-            session.openDocument(id);
-            refresh();
-            pushToast('New Level — place content in the environment', 'success');
-          },
-        },
-        { kind: 'separator' },
-        {
-          kind: 'command',
-          label: 'Extrude',
-          shortcut: 'E',
-          action: () => editFaces('extrude'),
-        },
-        {
-          kind: 'command',
-          label: 'Inset Faces',
-          shortcut: 'I',
-          action: () => editFaces('inset'),
-        },
-        {
-          kind: 'command',
-          label: 'Bevel Edges',
-          shortcut: 'Ctrl+B',
-          action: () => editFaces('bevel'),
-        },
-        {
-          kind: 'command',
-          label: 'Loop Cut',
-          shortcut: 'Ctrl+R',
-          action: () => {
-            beginBlenderOperator('loop-cut', {
-              session,
-              workspace,
-              getCameraAxes: (id) => viewportEngine.getCameraAxes(id),
-              getPointerSample: (id) => viewportEngine.getLastPointerSample(id),
-            });
-            refresh();
-          },
         },
         { kind: 'separator' },
         {
@@ -1044,19 +1585,14 @@ export default function App() {
         { kind: 'separator' },
         {
           kind: 'command',
-          label: 'Create Recovery Checkpoint',
-          action: () => void createRecoveryPoint(),
-        },
-        {
-          kind: 'command',
-          label: 'Autosave Recovery History…',
+          label: 'Recovery…',
           action: () => setRecoveryModalOpen(true),
         },
         {
           kind: 'command',
-          label: 'Prompt Recovery on Startup',
-          checked: promptRecoveryOnStartup,
-          action: () => handleTogglePromptRecovery(),
+          label: 'Properties…',
+          shortcut: 'Ctrl+,',
+          action: () => setPropertiesOpen(true),
         },
       ],
     },
@@ -1104,7 +1640,7 @@ export default function App() {
         { kind: 'separator' },
         {
           kind: 'command',
-          label: 'Copy Selection',
+          label: 'Copy',
           shortcut: 'Ctrl+C',
           action: () => {
             if (commitCopySelection(session)) pushToast('Copied selection', 'success');
@@ -1119,6 +1655,25 @@ export default function App() {
           action: () => {
             if (commitPasteClipboard(session)) pushToast('Pasted', 'success');
             else pushToast('Clipboard is empty', 'error');
+            refresh();
+          },
+        },
+        { kind: 'separator' },
+        {
+          kind: 'command',
+          label: 'Fill',
+          shortcut: 'F',
+          action: () => {
+            if (!applyFillHotkey(session)) pushToast('Select vertices or a hole to fill', 'error');
+            refresh();
+          },
+        },
+        {
+          kind: 'command',
+          label: 'Merge',
+          shortcut: 'M',
+          action: () => {
+            if (!applyMergeHotkey(session)) pushToast('Select vertices, edges, or faces to merge', 'error');
             refresh();
           },
         },
@@ -1154,7 +1709,7 @@ export default function App() {
                 const modelDoc = getViperDocument(session.project, modelId);
                 return {
                   kind: 'command' as const,
-                  label: `Place ${modelDoc.name} in Level`,
+                  label: `Place ${modelDoc.name}`,
                   disabled: !modelHasPlaceableGeometry(modelDoc, session.project),
                   action: () => placeModelInActiveLevel(modelId),
                 };
@@ -1164,50 +1719,28 @@ export default function App() {
         { kind: 'separator' },
         {
           kind: 'command',
-          label: 'Rename Active Document',
+          label: 'Rename',
           action: () => {
-            const docId = session.documentId;
-            const doc = session.project.documents.get(docId);
-            if (!doc) return;
-            const next = window.prompt('Rename', doc.name);
-            if (!next?.trim()) return;
-            renameProjectDocument(session, docId, next, refresh);
+            void (async () => {
+              const docId = session.documentId;
+              const doc = session.project.documents.get(docId);
+              if (!doc) return;
+              const next = await promptText({
+                title: 'Rename',
+                message: `Rename this ${doc.kind === 'model' ? 'model' : 'level'}.`,
+                value: doc.name,
+                confirmLabel: 'Rename',
+              });
+              if (!next) return;
+              renameProjectDocument(session, docId, next, refresh);
+            })();
           },
         },
         {
           kind: 'command',
-          label: 'Delete Active Document',
+          label: 'Delete',
           action: () => {
-            const docId = session.documentId;
-            const doc = session.project.documents.get(docId);
-            if (!doc) return;
-            const list = doc.kind === 'model' ? session.project.modelDocumentIds : session.project.levelDocumentIds;
-            if (list.length <= 1) {
-              pushToast(`Cannot delete the last ${doc.kind === 'model' ? 'Model' : 'Level'}`, 'error');
-              return;
-            }
-            if (!window.confirm(`Delete ${doc.kind} "${doc.name}"?`)) return;
-            if (!session.projectEditor.deleteDocument(docId)) return;
-            if (session.projectEditor.activeDocumentId) session.openDocument(session.projectEditor.activeDocumentId);
-            pushToast(`Deleted ${doc.name}`, 'info');
-            refresh();
-          },
-        },
-        { kind: 'separator' },
-        {
-          kind: 'command',
-          label: 'Browse Models in Outliner',
-          action: () => {
-            setOutlinerTab('models');
-            setOutlinerOpen(true);
-          },
-        },
-        {
-          kind: 'command',
-          label: 'Browse Levels in Outliner',
-          action: () => {
-            setOutlinerTab('levels');
-            setOutlinerOpen(true);
+            void deleteProjectDocument(session, session.documentId, session.document.kind, refresh);
           },
         },
       ],
@@ -1255,7 +1788,7 @@ export default function App() {
         },
         {
           kind: 'command',
-          label: 'Exit to Document Root',
+          label: 'Exit to Root',
           disabled: !session.focusGroupId,
           action: () => {
             if (exitToDocumentRoot(session)) refresh();
@@ -1276,93 +1809,20 @@ export default function App() {
             workspace.shellMode !== 'terrain',
           action: toggleOutliner,
         },
-        { kind: 'separator' },
         {
           kind: 'command',
-          label: 'Scene Outliner',
-          checked: outlinerOpen && outlinerTab === 'scene',
-          action: () => {
-            setOutlinerTab('scene');
-            setOutlinerOpen(true);
-          },
-        },
-        {
-          kind: 'command',
-          label: 'Assets in Outliner',
-          checked: outlinerOpen && outlinerTab === 'assets',
-          action: () => {
-            setOutlinerTab('assets');
-            setOutlinerOpen(true);
-          },
-        },
-        {
-          kind: 'command',
-          label: 'Models in Outliner',
-          checked: outlinerOpen && outlinerTab === 'models',
-          action: () => {
-            setOutlinerTab('models');
-            setOutlinerOpen(true);
-          },
-        },
-        {
-          kind: 'command',
-          label: 'Levels in Outliner',
-          checked: outlinerOpen && outlinerTab === 'levels',
-          action: () => {
-            setOutlinerTab('levels');
-            setOutlinerOpen(true);
-          },
-        },
-        {
-          kind: 'command',
-          label: 'Level object library',
+          label: 'Object Library',
           checked: workspace.shellMode === 'terrain' && terrainObjectsOpen,
           disabled: workspace.shellMode !== 'terrain',
           action: () => setTerrainObjectsOpen((open) => !open),
         },
         {
           kind: 'command',
-          label: 'Model Workspace',
-          checked: workspace.shellMode === 'model',
-          action: () => setShell('model'),
+          label: 'Flip & Mirror Tools',
+          shortcut: 'Shift+M',
+          checked: modelQuickToolsOpen,
+          action: () => setModelQuickToolsOpen((open) => !open),
         },
-        {
-          kind: 'command',
-          label: 'Sculpt Workspace',
-          checked: workspace.shellMode === 'sculpt',
-          action: () => setShell('sculpt'),
-        },
-        {
-          kind: 'command',
-          label: 'Terrain Workspace',
-          checked: workspace.shellMode === 'terrain',
-          action: () => setShell('terrain'),
-        },
-        {
-          kind: 'command',
-          label: 'Rigging Workspace',
-          checked: workspace.shellMode === 'rig',
-          action: () => setShell('rig'),
-        },
-        {
-          kind: 'command',
-          label: 'Animation Workspace',
-          checked: workspace.shellMode === 'animate',
-          action: () => setShell('animate'),
-        },
-        {
-          kind: 'command',
-          label: 'Blockout Workspace',
-          checked: workspace.shellMode === 'blockout',
-          action: () => setShell('blockout'),
-        },
-        {
-          kind: 'command',
-          label: 'UV / Pixel Workspace',
-          checked: workspace.shellMode === 'texture' && workspace.texture.uvPanelTab !== 'tiles',
-          action: () => setShell('texture'),
-        },
-        { kind: 'separator' },
         {
           kind: 'command',
           label: 'Navigation Tools',
@@ -1372,19 +1832,11 @@ export default function App() {
             refresh();
           },
         },
-        {
-          kind: 'command',
-          label: 'Draw on Surfaces',
-          checked: workspace.getDrawOnSurfaces(),
-          action: () => {
-            workspace.setDrawOnSurfaces(!workspace.getDrawOnSurfaces());
-            refresh();
-          },
-        },
+        { kind: 'separator' },
         {
           kind: 'command',
           label: 'Frame Selection',
-          shortcut: 'F',
+          shortcut: 'Numpad .',
           action: () => viewportEngine.frameSelection(),
         },
         {
@@ -1395,13 +1847,13 @@ export default function App() {
         },
         {
           kind: 'command',
-          label: 'Reset Active View',
+          label: 'Reset View',
           shortcut: 'Shift+Home',
           action: () => viewportEngine.resetView(),
         },
         {
           kind: 'command',
-          label: workspace.layoutMode === 'maximized' ? 'Restore Quad View' : 'Maximize Active View',
+          label: workspace.layoutMode === 'maximized' ? 'Restore Quad View' : 'Maximize View',
           shortcut: 'Tab',
           action: () => {
             workspace.handleTab();
@@ -1416,13 +1868,6 @@ export default function App() {
           checked: zenMode,
           action: () => setZenMode((open) => !open),
         },
-        { kind: 'separator' },
-        ...WORKSPACE_THEMES.map((theme) => ({
-          kind: 'command' as const,
-          label: theme.label,
-          checked: themeId === theme.id,
-          action: () => setThemeId(applyWorkspaceTheme(theme.id)),
-        })),
       ],
     },
     {
@@ -1433,12 +1878,6 @@ export default function App() {
           label: 'Material',
           checked: shadingMode === 'material',
           action: () => setRenderMode('material'),
-        },
-        {
-          kind: 'command',
-          label: 'Display Textures',
-          checked: displayTextures,
-          action: toggleDisplayTextures,
         },
         {
           kind: 'command',
@@ -1467,218 +1906,16 @@ export default function App() {
         { kind: 'separator' },
         {
           kind: 'command',
+          label: 'Textures',
+          checked: displayTextures,
+          action: toggleDisplayTextures,
+        },
+        {
+          kind: 'command',
           label: 'X-Ray',
+          shortcut: 'Alt+Z',
           checked: sel.xRay,
           action: toggleXRay,
-        },
-        { kind: 'separator' },
-        {
-          kind: 'command',
-          label: 'Viewport Quality: Performance',
-          checked: renderQuality === 'performance',
-          action: () => chooseRenderQuality('performance'),
-        },
-        {
-          kind: 'command',
-          label: 'Viewport Quality: Balanced',
-          checked: renderQuality === 'balanced',
-          action: () => chooseRenderQuality('balanced'),
-        },
-        {
-          kind: 'command',
-          label: 'Viewport Quality: High',
-          checked: renderQuality === 'high',
-          action: () => chooseRenderQuality('high'),
-        },
-      ],
-    },
-    {
-      label: 'Create',
-      entries: [
-        {
-          kind: 'command',
-          label: 'Primitive Builder',
-          action: () => {
-            workspace.setInspectorTab('create');
-            session.tools.setActive('create-primitive', session.context());
-            refresh();
-          },
-        },
-        {
-          kind: 'command',
-          label: 'Draw Mesh Surface',
-          action: () => {
-            workspace.setInspectorTab('create');
-            session.tools.setActive('draw-poly', session.context());
-            refresh();
-          },
-        },
-        { kind: 'separator' },
-        {
-          kind: 'command',
-          label: 'Curve Sketch · Tube Sweep',
-          action: () => {
-            workspace.setInspectorTab('create');
-            doodleTool.setInputMode('sketch', session.context());
-            doodleTool.setStyle('tube', session.context());
-            session.tools.setActive('create-doodle', session.context());
-            refresh();
-          },
-        },
-        {
-          kind: 'command',
-          label: 'Vector Pen · Tube Sweep',
-          action: () => {
-            workspace.setInspectorTab('create');
-            doodleTool.setInputMode('pen', session.context());
-            doodleTool.setStyle('tube', session.context());
-            session.tools.setActive('create-doodle', session.context());
-            refresh();
-          },
-        },
-        {
-          kind: 'command',
-          label: 'Stroke Shape · Ribbon / Hair',
-          action: () => {
-            workspace.setInspectorTab('create');
-            doodleTool.setStyle('hair', session.context());
-            session.tools.setActive('create-doodle', session.context());
-            refresh();
-          },
-        },
-        {
-          kind: 'command',
-          label: 'Stroke Shape · Braided Rope',
-          action: () => {
-            workspace.setInspectorTab('create');
-            doodleTool.setStyle('rope', session.context());
-            session.tools.setActive('create-doodle', session.context());
-            refresh();
-          },
-        },
-        {
-          kind: 'command',
-          label: 'Profile · Soft Volume',
-          action: () => {
-            workspace.setInspectorTab('create');
-            doodleTool.setStyle('soft', session.context());
-            session.tools.setActive('create-doodle', session.context());
-            refresh();
-          },
-        },
-        {
-          kind: 'command',
-          label: 'Sweep · Square / Rail',
-          action: () => {
-            workspace.setInspectorTab('create');
-            doodleTool.setStyle('square-sweep', session.context());
-            session.tools.setActive('create-doodle', session.context());
-            refresh();
-          },
-        },
-      ],
-    },
-    {
-      label: 'Model',
-      entries: [
-        {
-          kind: 'command',
-          label: 'Select & Objects Tools',
-          checked: workspace.inspectorTab === 'edit' && workspace.inspectorSection === 'select',
-          action: () => workspace.setInspectorSection('select'),
-        },
-        {
-          kind: 'command',
-          label: 'Transform Tools',
-          checked: workspace.inspectorTab === 'edit' && workspace.inspectorSection === 'transform',
-          action: () => workspace.setInspectorSection('transform'),
-        },
-        {
-          kind: 'command',
-          label: 'Mesh Geometry Tools',
-          checked: workspace.inspectorTab === 'edit' && workspace.inspectorSection === 'geometry',
-          action: () => workspace.setInspectorSection('geometry'),
-        },
-        {
-          kind: 'command',
-          label: 'Symmetry Tools',
-          checked: workspace.inspectorTab === 'edit' && workspace.inspectorSection === 'symmetry',
-          action: () => workspace.setInspectorSection('symmetry'),
-        },
-        {
-          kind: 'command',
-          label: 'Construct & Game Tools',
-          checked: workspace.inspectorTab === 'edit' && workspace.inspectorSection === 'scene',
-          action: () => workspace.setInspectorSection('scene'),
-        },
-        {
-          kind: 'command',
-          label: 'Material Tools',
-          checked: workspace.inspectorTab === 'material',
-          action: () => workspace.setInspectorTab('material'),
-        },
-        { kind: 'separator' },
-        {
-          kind: 'command',
-          label: 'Object Selection',
-          checked: sel.mode === 'object',
-          action: () => chooseMode('object'),
-        },
-        {
-          kind: 'command',
-          label: 'Vertex Selection',
-          shortcut: '1',
-          checked: sel.mode === 'vertex',
-          action: () => chooseMode('vertex'),
-        },
-        {
-          kind: 'command',
-          label: 'Edge Selection',
-          shortcut: '2',
-          checked: sel.mode === 'edge',
-          action: () => chooseMode('edge'),
-        },
-        {
-          kind: 'command',
-          label: 'Face Selection',
-          shortcut: '3',
-          checked: sel.mode === 'face',
-          action: () => chooseMode('face'),
-        },
-        { kind: 'separator' },
-        {
-          kind: 'command',
-          label: 'Move Gizmo',
-          shortcut: 'G',
-          checked: session.transform.prefs.gizmoMode === 'move',
-          action: () => setGizmoMode('move'),
-        },
-        {
-          kind: 'command',
-          label: 'Rotate Gizmo',
-          shortcut: 'R',
-          checked: session.transform.prefs.gizmoMode === 'rotate',
-          action: () => setGizmoMode('rotate'),
-        },
-        {
-          kind: 'command',
-          label: 'Scale Gizmo',
-          shortcut: 'S',
-          checked: session.transform.prefs.gizmoMode === 'scale',
-          action: () => setGizmoMode('scale'),
-        },
-        {
-          kind: 'command',
-          label: 'Transform Gizmo',
-          checked: session.transform.prefs.gizmoMode === 'combined',
-          action: () => setGizmoMode('combined'),
-        },
-        {
-          kind: 'command',
-          label: 'Edit Origin Gizmo',
-          shortcut: 'P',
-          checked: session.transform.prefs.gizmoMode === 'origin',
-          action: () => setGizmoMode(session.transform.prefs.gizmoMode === 'origin' ? 'combined' : 'origin'),
         },
       ],
     },
@@ -1693,7 +1930,7 @@ export default function App() {
         },
         {
           kind: 'command',
-          label: 'Keyboard Shortcuts',
+          label: 'Help & Shortcuts',
           shortcut: '?',
           action: () => setHotkeysOpen(true),
         },
@@ -1710,7 +1947,15 @@ export default function App() {
   const paletteCommands = flattenMenuCommands(menus);
 
   return (
-    <div className={`app${zenMode ? ' is-zen' : ''}`}>
+    <div
+      className={`app${zenMode ? ' is-zen' : ''}`}
+      onContextMenu={(event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        if (target.closest('input, textarea, [contenteditable="true"]')) return;
+        event.preventDefault();
+      }}
+    >
       <CommandPalette
         open={paletteOpen}
         commands={paletteCommands}
@@ -1833,6 +2078,23 @@ export default function App() {
                   title="Paint tiles onto existing faces"
                 >
                   Paint
+                </button>
+              </div>
+              <span className="bar-sep" aria-hidden />
+              <div className="shell-switch selection-switch" role="group" aria-label="Model quick tools">
+                <button
+                  type="button"
+                  className={`tool${modelQuickToolsOpen ? ' is-active' : ''}`}
+                  onClick={() => {
+                    setModelQuickToolsOpen((open) => !open);
+                    refresh();
+                  }}
+                  aria-pressed={modelQuickToolsOpen}
+                  title="Open Flip, Mirror & Symmetry floating panel for 3D models (Shift+M)"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                >
+                  <BlenderIcon name="mod_mirror" size={13} />
+                  <span>Flip &amp; Mirror</span>
                 </button>
               </div>
             </>
@@ -2442,6 +2704,28 @@ export default function App() {
           onRefresh={refresh}
         />
       )}
+      {modelQuickToolsOpen && (
+        <FloatingModelToolsPanel
+          hasSelection={
+            session.selection.state.mode === 'object'
+              ? session.selection.state.selectedObjectIds.size > 0 || !!session.selection.state.activeObjectId
+              : session.selection.state.selectedFaceIds.size > 0 || session.selection.state.selectedVertexIds.size > 0 || session.selection.state.selectedEdgeIds.size > 0
+          }
+          selectedObjectCount={session.selection.state.selectedObjectIds.size || (session.selection.state.activeObjectId ? 1 : 0)}
+          selectedFaceCount={session.selection.state.selectedFaceIds.size}
+          isEditMode={session.selection.state.mode !== 'object'}
+          onFlipHorizontal={handleModelFlipHorizontal}
+          onFlipVertical={handleModelFlipVertical}
+          onFlipDepth={handleModelFlipDepth}
+          onFlipNormals={handleModelFlipNormals}
+          onDuplicateAndMirror={handleModelDuplicateAndMirror}
+          onAddMirrorModifier={handleModelAddMirrorModifier}
+          onRotateDegrees={handleModelRotateDegrees}
+          onCenterAxis={handleModelCenterAxis}
+          onSnapToGround={handleModelSnapToGround}
+          onClose={() => setModelQuickToolsOpen(false)}
+        />
+      )}
 
       <footer className="status">
         <div className="status-left">
@@ -2597,6 +2881,23 @@ export default function App() {
         </div>
       </footer>
 
+      {propertiesOpen && (
+        <AppPropertiesDialog
+          themeId={themeId}
+          onThemeId={setThemeId}
+          promptRecoveryOnStartup={promptRecoveryOnStartup}
+          onTogglePromptRecovery={handleTogglePromptRecovery}
+          displayTextures={displayTextures}
+          onToggleDisplayTextures={setDisplayTexturesEnabled}
+          drawOnSurfaces={workspace.getDrawOnSurfaces()}
+          onToggleDrawOnSurfaces={setDrawOnSurfacesEnabled}
+          onOpenRecovery={() => {
+            setPropertiesOpen(false);
+            setRecoveryModalOpen(true);
+          }}
+          onClose={() => setPropertiesOpen(false)}
+        />
+      )}
       {recoveryModalOpen && (
         <AutosaveRecoveryDialog
           autosaves={autosaveOffers}
@@ -2608,11 +2909,15 @@ export default function App() {
           }}
           onDiscard={discardAutosave}
           onDiscardAll={discardAllAutosaves}
-          onClose={() => setRecoveryModalOpen(false)}
+          onClose={() => {
+            rememberRecoveryDismissed();
+            setRecoveryModalOpen(false);
+          }}
           onCreateCheckpoint={() => void createRecoveryPoint()}
         />
       )}
       <HotkeyHelpOverlay open={hotkeysOpen} onClose={() => setHotkeysOpen(false)} />
+      <AppDialogHost />
       <ToastStack toasts={toasts} />
     </div>
   );

@@ -30,6 +30,13 @@ export type AtlasTilePlacementInput = {
   flipV: boolean;
   repeatU: number;
   repeatV: number;
+  stretchU: boolean;
+  stretchV: boolean;
+  alignU: 'min' | 'center' | 'max';
+  alignV: 'min' | 'center' | 'max';
+  worldTileWidth: number;
+  worldTileHeight: number;
+  downEdgeId?: string;
 };
 
 export function buildAtlasTilePlacement(
@@ -50,6 +57,16 @@ export function buildAtlasTilePlacement(
     flipV: tex.atlasFlipV,
     repeatU: tex.atlasRepeatU,
     repeatV: tex.atlasRepeatV,
+    stretchU: tex.atlasStretchU,
+    stretchV: tex.atlasStretchV,
+    alignU: tex.atlasAlignU,
+    alignV: tex.atlasAlignV,
+    worldTileWidth: (tex.atlasUsePixelDensity
+      ? tex.atlasTileWidth / Math.max(1, tex.atlasPixelsPerUnit)
+      : tex.atlasWorldTileWidth) * tex.atlasSelectionColumns,
+    worldTileHeight: (tex.atlasUsePixelDensity
+      ? tex.atlasTileHeight / Math.max(1, tex.atlasPixelsPerUnit)
+      : tex.atlasWorldTileHeight) * tex.atlasSelectionRows,
   };
 }
 
@@ -73,6 +90,11 @@ export function buildAtlasTileParamsKey(
     tex.atlasFlipV ? 1 : 0,
     tex.atlasRepeatU,
     tex.atlasRepeatV,
+    tex.atlasStretchU ? 1 : 0,
+    tex.atlasStretchV ? 1 : 0,
+    tex.atlasAlignU,
+    tex.atlasAlignV,
+    tex.atlasHintDown ? 1 : 0,
   ].join('|');
 }
 

@@ -4,6 +4,7 @@ import {
   generateBoxCollider,
   generateConvexCollider,
   generateLightmapUv,
+  generateMeshCollider,
   createMirroredInstance,
   createRadialInstances,
   createRigMarker,
@@ -45,6 +46,26 @@ describe('game asset tools', () => {
     expect(collider.transform).toEqual(sourceObject.transform);
     expect(colliderMesh.vertices.size).toBe(8);
     expect(colliderMesh.faces.size).toBe(6);
+  });
+
+  it('does not treat a mesh collider copied from terrain as terrain', () => {
+    const document = createEmptyDocument();
+    const source = commitMeshObject(document, buildBox({ width: 1, height: 1, depth: 1 }), { name: 'Hill' });
+    const hill = document.objects.get(source.objectId)!;
+    hill.kind = 'terrain';
+    hill.metadata.terrain = 'true';
+    hill.metadata.terrainResolution = '8';
+
+    const colliderId = generateMeshCollider(document, source.objectId);
+    const collider = document.objects.get(colliderId)!;
+    expect(collider.kind).toBe('collision');
+    expect(collider.metadata.terrain).toBeUndefined();
+    expect(collider.metadata.terrainResolution).toBeUndefined();
+    expect(collider.metadata).toMatchObject({
+      gameRole: 'collision',
+      collision: 'mesh',
+      collisionFor: source.objectId,
+    });
   });
 
   it('builds a secondary UV attribute for GLB lightmaps', () => {
@@ -148,8 +169,9 @@ describe('game asset tools', () => {
     expect(document.objects.size).toBe(1);
     expect(mesh.vertices.size).toBe(16);
     expect(mesh.faces.size).toBe(12);
-    expect(Math.min(...xs)).toBeCloseTo(-0.5);
-    expect(Math.max(...xs)).toBeCloseTo(3.5);
+    expect(Math.min(...xs)).toBeCloseTo(-2);
+    expect(Math.max(...xs)).toBeCloseTo(2);
+    expect(joined.transform.position.x).toBeCloseTo(1.5);
   });
 
   it('centres an origin without moving the visible mesh in world space', () => {

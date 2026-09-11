@@ -92,7 +92,7 @@ export function RightSidebar({
     };
   }, [resizer.containerRef]);
 
-  // When collapsed, render a sleek Blender/Photoshop-style vertical icon dock
+  // When collapsed, render a vertical icon dock
   if (isCollapsed) {
     return (
       <aside
@@ -234,9 +234,9 @@ export function RightSidebar({
               className={`sidebar-xray-button${session.selection.state.xRay ? ' is-active' : ''}`}
               onClick={toggleXRay}
               aria-pressed={session.selection.state.xRay}
-              title={`X-Ray selection: ${session.selection.state.xRay ? 'On' : 'Off'}`}
+              title={`X-Ray (Alt+Z): ${session.selection.state.xRay ? 'On' : 'Off'}`}
             >
-              <BlenderIcon name={session.selection.state.xRay ? 'hide_on' : 'hide_off'} size={13} />
+              <BlenderIcon name="x_ray" size={13} />
               <span>X-Ray</span>
             </button>
           )}

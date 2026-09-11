@@ -1,9 +1,13 @@
 import type { EditableMesh, MeshId } from '@/core/mesh/types';
 import type {
+  ImageId,
+  MaterialAsset,
   MaterialId,
   ModelDocument,
   ObjectId,
   SceneObject,
+  TextureAsset,
+  TextureId,
   ViperProject,
 } from '@/core/document/types';
 import { validateMeshFull } from '@/core/mesh/Validation';
@@ -11,6 +15,34 @@ import {
   deserializeViperProject,
   type DeserializeProjectResult,
 } from '@/core/persistence/ProjectSerializer';
+import { readRigDocumentSettings } from '@/core/rig/RigDocument';
+
+const MATERIAL_TEXTURE_SLOTS: Array<keyof MaterialAsset> = [
+  'baseColourTextureId',
+  'normalTextureId',
+  'roughnessTextureId',
+  'metallicTextureId',
+  'emissiveTextureId',
+];
+
+function collectAssetErrors(
+  materials: Map<MaterialId, MaterialAsset>,
+  textures: Map<TextureId, TextureAsset>,
+  images: Map<ImageId, unknown>,
+  errors: string[],
+): void {
+  for (const material of materials.values()) {
+    for (const slot of MATERIAL_TEXTURE_SLOTS) {
+      const textureId = material[slot];
+      if (typeof textureId === 'string' && !textures.has(textureId as TextureId)) {
+        errors.push(`${material.name}: missing texture`);
+      }
+    }
+  }
+  for (const texture of textures.values()) {
+    if (!images.has(texture.imageAssetId)) errors.push(`${texture.name}: missing image`);
+  }
+}
 
 function collectMeshErrors(name: string, mesh: EditableMesh, errors: string[]): void {
   try {
@@ -50,6 +82,74 @@ function collectSceneErrors(
   }
 }
 
+function collectRigErrors(project: ViperProject, errors: string[]): void {
+  const objectIds = new Set<ObjectId>();
+  for (const document of project.documents.values()) {
+    for (const objectId of document.objects.keys()) objectIds.add(objectId);
+  }
+
+  for (const armature of project.armatures.values()) {
+    for (const rootId of armature.rootBoneIds) {
+      if (!armature.bones.has(rootId)) errors.push(`${armature.name}: missing root bone`);
+    }
+    for (const bone of armature.bones.values()) {
+      if (bone.parentId && !armature.bones.has(bone.parentId)) {
+        errors.push(`${bone.name}: missing parent bone`);
+      }
+    }
+  }
+
+  for (const binding of project.skinBindings.values()) {
+    if (!project.meshes.has(binding.meshId)) errors.push(`${binding.name}: missing mesh`);
+    if (!project.armatures.has(binding.armatureId)) errors.push(`${binding.name}: missing armature`);
+    if (!objectIds.has(binding.objectId)) errors.push(`${binding.name}: missing object`);
+  }
+
+  for (const document of project.documents.values()) {
+    if (document.kind !== 'rig' && !document.settings.rig) continue;
+    const rig = readRigDocumentSettings(document);
+    if (rig.sourceModelDocumentId && !project.documents.has(rig.sourceModelDocumentId)) {
+      errors.push(`${document.name}: missing source model`);
+    }
+    if (rig.armatureId && !project.armatures.has(rig.armatureId)) {
+      errors.push(`${document.name}: missing armature`);
+    }
+    for (const bindingId of rig.skinBindingIds) {
+      if (!project.skinBindings.has(bindingId)) errors.push(`${document.name}: missing skin binding`);
+    }
+    for (const clipId of rig.clipIds) {
+      if (!project.animationClips.has(clipId)) errors.push(`${document.name}: missing clip`);
+    }
+    if (rig.activeClipId && !project.animationClips.has(rig.activeClipId)) {
+      errors.push(`${document.name}: missing active clip`);
+    }
+    for (const item of rig.clipSequence) {
+      if (!project.animationClips.has(item.clipId)) {
+        errors.push(`${document.name}: missing sequence clip`);
+      }
+    }
+    const armature = rig.armatureId ? project.armatures.get(rig.armatureId) : null;
+    if (!armature) continue;
+    for (const constraint of rig.constraints) {
+      if (!armature.bones.has(constraint.ownerId)) {
+        errors.push(`${document.name}: missing constraint bone`);
+      }
+      if (constraint.targetId && !armature.bones.has(constraint.targetId)) {
+        errors.push(`${document.name}: missing constraint target`);
+      }
+    }
+    for (const clipId of rig.clipIds) {
+      const clip = project.animationClips.get(clipId);
+      if (!clip) continue;
+      for (const track of clip.tracks) {
+        if (!armature.bones.has(track.boneId)) {
+          errors.push(`${clip.name}: missing bone`);
+        }
+      }
+    }
+  }
+}
+
 export type ProjectHealthReport = {
   ok: boolean;
   errors: string[];
@@ -69,6 +169,7 @@ export function inspectDocumentHealth(document: ModelDocument): ProjectHealthRep
     document.materials,
     errors,
   );
+  collectAssetErrors(document.materials, document.textures, document.images, errors);
   return { ok: errors.length === 0, errors };
 }
 
@@ -97,6 +198,8 @@ export function inspectProjectHealth(project: ViperProject): ProjectHealthReport
       errors,
     );
   }
+  collectAssetErrors(project.materials, project.textures, project.images, errors);
+  collectRigErrors(project, errors);
   return { ok: errors.length === 0, errors };
 }
 

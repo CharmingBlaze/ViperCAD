@@ -19,6 +19,8 @@ type Props = {
   compact?: boolean;
   ghostEnabled?: boolean;
   onToggleGhost?: () => void;
+  xRayEnabled?: boolean;
+  onToggleXRay?: () => void;
 };
 
 /** Inset from a pane's right edge; left-column panes need extra clearance at the split. */
@@ -47,6 +49,8 @@ export function ViewportNavToolbar({
   compact = false,
   ghostEnabled = false,
   onToggleGhost,
+  xRayEnabled = false,
+  onToggleXRay,
 }: Props) {
   const dragRef = useRef<{
     mode: DragMode;
@@ -132,7 +136,7 @@ export function ViewportNavToolbar({
         type="button"
         className="viewport-nav-btn"
         aria-label="Frame selection"
-        title="Frame selection (F)"
+        title="Frame selection (Numpad .)"
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -200,6 +204,26 @@ export function ViewportNavToolbar({
             <path d="M7 4.8v4.4M4.8 7h4.4" />
           </svg>
         ),
+      )}
+      {onToggleXRay && (
+        <button
+          type="button"
+          className={`viewport-nav-btn${xRayEnabled ? ' is-active' : ''}`}
+          aria-label="X-Ray"
+          aria-pressed={xRayEnabled}
+          title="X-Ray — see and select through the mesh (Alt+Z)"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onToggleXRay();
+          }}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden>
+            <path d="M3.2 5.2 8 2.7l4.8 2.5v6.4L8 14.1 3.2 11.6z" />
+            <path d="M8 2.7v11.4M3.2 5.2h9.6" opacity="0.4" />
+            <rect x="5.1" y="6.4" width="5.8" height="4.4" opacity="0.55" />
+          </svg>
+        </button>
       )}
       {onToggleGhost && (
         <button

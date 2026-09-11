@@ -2,18 +2,9 @@ import { createId } from '@/core/ids/IdService';
 import { cloneTransform, type Transform } from '@/core/math/Transform';
 import type { Vec3 } from '@/core/math/Vec3';
 import { insertBoneKeyframe, sampledLocalTransforms } from '@/core/rig/keyframes';
-import type { AnimationClip, AnimationClipId, Armature, BoneId } from '@/core/rig/types';
+import type { AnimationClip, AnimationClipId, Armature, BoneId, RigClipSequenceItem } from '@/core/rig/types';
 
-export type ClipSequenceItem = {
-  id: string;
-  clipId: AnimationClipId;
-  name: string;
-  startTime: number;
-  duration: number;
-  speedMultiplier: number;
-  blendIn: number;
-  blendOut: number;
-};
+export type ClipSequenceItem = RigClipSequenceItem;
 
 type Quat = { x: number; y: number; z: number; w: number };
 

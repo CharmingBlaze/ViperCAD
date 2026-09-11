@@ -1,13 +1,15 @@
 import { removeObject } from '@/core/document/ModelDocument';
-import type { ModelDocument, ObjectId, SceneObject } from '@/core/document/types';
+import type { DocumentId, ImageAsset, ModelDocument, ObjectId, SceneObject, ViperProject } from '@/core/document/types';
+import { buildModelDocumentView } from '@/core/document/ViperProject';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import { createImagePlane, type ImagePlaneResult } from '@/core/editor/ImagePlane';
 import { importImageFile } from '@/core/image/ImageImport';
+import { imageAssetToDataUrl } from '@/core/image/PixelEditor';
 import type {
   BlockoutReferenceState,
   ReferenceImageConfig,
 } from './ReferenceImages';
-import { createDefaultReferenceImage } from './ReferenceImages';
+import { createDefaultReferenceImage, createEmptyBlockoutReferenceState } from './ReferenceImages';
 
 export const BLOCKOUT_REFERENCE_META = 'blockoutReference';
 
@@ -32,10 +34,14 @@ export function findBlockoutReferenceObjectId(
 }
 
 export function lockBlockoutReferences(doc: ModelDocument, locked: boolean): void {
+  let changed = false;
   for (const object of doc.objects.values()) {
-    if (isBlockoutReferenceObject(object)) object.locked = locked;
+    if (!isBlockoutReferenceObject(object)) continue;
+    if (object.locked === locked) continue;
+    object.locked = locked;
+    changed = true;
   }
-  doc.dirty = true;
+  if (changed) doc.dirty = true;
 }
 
 export function setBlockoutReferenceLocked(
@@ -279,4 +285,87 @@ export function overlayStateWithoutObjects(state: BlockoutReferenceState): Block
     front: state.front?.objectId ? { ...state.front, visible: false } : state.front,
     side: state.side?.objectId ? { ...state.side, visible: false } : state.side,
   };
+}
+
+export function revokeBlockoutReferenceUrls(state: BlockoutReferenceState): void {
+  for (const config of [state.front, state.side]) {
+    if (config?.url.startsWith('blob:') && typeof URL.revokeObjectURL === 'function') {
+      URL.revokeObjectURL(config.url);
+    }
+  }
+}
+
+function referenceImageAsset(doc: ModelDocument, objectId: ObjectId): ImageAsset | null {
+  const object = doc.objects.get(objectId);
+  const materialId = object?.materialSlotIds[0];
+  const material = materialId ? doc.materials.get(materialId) : null;
+  const texture = material?.baseColourTextureId ? doc.textures.get(material.baseColourTextureId) : null;
+  if (!texture) return null;
+  return doc.images.get(texture.imageAssetId) ?? null;
+}
+
+function withPreviewUrl(doc: ModelDocument, config: ReferenceImageConfig | null): ReferenceImageConfig | null {
+  if (!config?.objectId || config.url) return config;
+  const image = referenceImageAsset(doc, config.objectId);
+  if (image) config.url = imageAssetToDataUrl(image);
+  return config;
+}
+
+export function readBlockoutShowInPersp(project: ViperProject): boolean {
+  for (const documentId of blockoutDocumentIds(project)) {
+    const value = project.documents.get(documentId)?.settings.blockoutShowInPersp;
+    if (typeof value === 'boolean') return value;
+  }
+  return true;
+}
+
+export function persistBlockoutShowInPersp(
+  project: ViperProject,
+  documentId: DocumentId,
+  show: boolean,
+): void {
+  const document = project.documents.get(documentId);
+  if (!document || document.settings.blockoutShowInPersp === show) return;
+  document.settings.blockoutShowInPersp = show;
+  document.dirty = true;
+  project.dirty = true;
+}
+
+export function setBlockoutShowInPersp(session: EditorSession, show: boolean): void {
+  session.blockoutReference.showInPersp = show;
+  persistBlockoutShowInPersp(session.project, session.documentId, show);
+  session.blockoutReference.revision += 1;
+  session.requestRedraw();
+}
+
+/** Rebuild Front/Side panel slots from serialized blueprint objects after open. */
+export function hydrateBlockoutReferences(
+  project: ViperProject,
+  previous: BlockoutReferenceState,
+): BlockoutReferenceState {
+  revokeBlockoutReferenceUrls(previous);
+  const next = createEmptyBlockoutReferenceState();
+  next.revision = previous.revision + 1;
+  next.showInPersp = readBlockoutShowInPersp(project);
+  for (const documentId of blockoutDocumentIds(project)) {
+    const view = buildModelDocumentView(project, documentId);
+    next.front ??= withPreviewUrl(view, configFromReferenceObject(view, 'front'));
+    next.side ??= withPreviewUrl(view, configFromReferenceObject(view, 'side'));
+    if (next.front && next.side) break;
+  }
+  return next;
+}
+
+function blockoutDocumentIds(project: ViperProject): DocumentId[] {
+  const ids: DocumentId[] = [];
+  const seen = new Set<string>();
+  const push = (id: DocumentId | null | undefined) => {
+    if (!id || seen.has(id) || !project.documents.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  };
+  push(project.activeDocumentId);
+  for (const id of project.modelDocumentIds) push(id);
+  for (const id of project.levelDocumentIds) push(id);
+  return ids;
 }

@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { resetIdCounter } from '@/core/ids/IdService';
 import { buildBox } from '@/core/mesh/builders/BoxBuilder';
 import { faceCornerIds } from '@/core/mesh/EditableMesh';
-import { applyAtlasTileToFaces, buildAtlasTileGrid } from '@/core/uv/AtlasUv';
+import { applyAtlasTileToFaces, autoDownEdgeId, buildAtlasTileCells, buildAtlasTileGrid } from '@/core/uv/AtlasUv';
+import { faceVertexIds, getEdgeVertices } from '@/core/mesh/EditableMesh';
 import { getMeshStats } from '@/core/mesh/EditableMesh';
 import { validateMeshFull } from '@/core/mesh/Validation';
 import { createDefaultMaterial } from '@/core/document/ModelDocument';
@@ -176,5 +177,67 @@ describe('sprite atlas UV placement', () => {
       maxU: 32 / 64,
       maxV: 48 / 64,
     });
+  });
+
+  it('keeps world aspect when stretch is off and hints the lowest edge as down', () => {
+    const mesh = buildAtlasTileCells({
+      cells: [{ column: 0, row: 0, spanColumns: 2, spanRows: 1 }],
+      origin: { x: 0, y: 0, z: 0 },
+      axisU: { x: 1, y: 0, z: 0 },
+      axisV: { x: 0, y: 0, z: 1 },
+      cellSize: 1,
+      imageWidth: 16,
+      imageHeight: 16,
+      tileX: 0,
+      tileY: 0,
+      tileWidth: 16,
+      tileHeight: 16,
+    });
+    const layerId = mesh.defaultUvLayerId!;
+    const faceId = [...mesh.faces.keys()][0]!;
+    const down = autoDownEdgeId(mesh, faceId)!;
+    applyAtlasTileToFaces(mesh, [faceId], layerId, {
+      imageWidth: 16,
+      imageHeight: 16,
+      x: 0,
+      y: 0,
+      width: 16,
+      height: 16,
+      stretchU: false,
+      stretchV: true,
+      worldTileWidth: 1,
+      worldTileHeight: 1,
+      downEdgeId: down,
+    });
+    const uvs = faceCornerIds(mesh, faceId).map((id) => mesh.faceCorners.get(id)!.uvs.get(layerId)!);
+    const spanU = Math.max(...uvs.map((uv) => uv.x)) - Math.min(...uvs.map((uv) => uv.x));
+    expect(spanU).toBeGreaterThan(1.5);
+    const pair = getEdgeVertices(mesh, down)!;
+    const verts = faceVertexIds(mesh, faceId);
+    const downCorners = faceCornerIds(mesh, faceId).filter((_, index) => verts[index] === pair[0] || verts[index] === pair[1]);
+    const downV = downCorners.map((id) => mesh.faceCorners.get(id)!.uvs.get(layerId)!.y);
+    expect(Math.max(...downV) - Math.min(...downV)).toBeLessThan(0.05);
+  });
+
+  it('joins a multi-cell stamp into one face', () => {
+    const mesh = buildAtlasTileCells({
+      cells: [{ column: 0, row: 0, spanColumns: 2, spanRows: 2 }],
+      origin: { x: 0, y: 0, z: 0 },
+      axisU: { x: 1, y: 0, z: 0 },
+      axisV: { x: 0, y: 0, z: 1 },
+      cellSize: 1,
+      imageWidth: 32,
+      imageHeight: 32,
+      tileX: 0,
+      tileY: 0,
+      tileWidth: 16,
+      tileHeight: 16,
+    });
+    expect(mesh.faces.size).toBe(1);
+    expect(mesh.vertices.size).toBe(4);
+    const faceId = [...mesh.faces.keys()][0]!;
+    const uvs = faceCornerIds(mesh, faceId).map((id) => mesh.faceCorners.get(id)!.uvs.get(mesh.defaultUvLayerId!)!);
+    expect(Math.min(...uvs.map((uv) => uv.x))).toBeCloseTo(0);
+    expect(Math.max(...uvs.map((uv) => uv.x))).toBeCloseTo(1);
   });
 });

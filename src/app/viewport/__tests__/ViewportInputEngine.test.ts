@@ -1,19 +1,29 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   classifyPointerButton,
   classifyWheel,
   isStylusButtonEvent,
   navCursor,
   NAV_DRAG_THRESHOLD_PX,
+  NAV_ZOOM_EXP_GAIN,
+  navOrbitRadians,
+  navZoomFactor,
+  ORBIT_RADIANS_PER_PIXEL,
   primaryNavKind,
   modifierNavKind,
   texturePreviewNavKind,
   canvasNavKind,
   ViewportInputEngine,
+  WHEEL_ZOOM_PIXEL_SCALE,
   wheelZoomPixels,
 } from '@/app/viewport/ViewportInputEngine';
+import { patchAppPreferences, resetAppPreferences, resetAppPreferencesCache } from '@/app/preferences/appPreferences';
 
 describe('ViewportInputEngine mapping', () => {
+  beforeEach(() => resetAppPreferencesCache());
+  afterEach(() => {
+    resetAppPreferences();
+  });
   it('maps mouse and stylus buttons', () => {
     expect(classifyPointerButton(0)).toBe('primary');
     expect(classifyPointerButton(1)).toBe('middle');
@@ -53,6 +63,28 @@ describe('ViewportInputEngine mapping', () => {
   it('clamps wheel ticks', () => {
     expect(wheelZoomPixels(800, 0)).toBe(120);
     expect(wheelZoomPixels(2, 1)).toBe(32);
+  });
+
+  it('keeps orbit and zoom gains below the old jumpy rates', () => {
+    expect(ORBIT_RADIANS_PER_PIXEL).toBeLessThanOrEqual(0.0045);
+    expect(NAV_ZOOM_EXP_GAIN).toBeLessThanOrEqual(0.0032);
+    expect(WHEEL_ZOOM_PIXEL_SCALE).toBeLessThanOrEqual(0.22);
+    expect(navZoomFactor(0)).toBe(1);
+    expect(navZoomFactor(20)).toBeCloseTo(Math.exp(20 * NAV_ZOOM_EXP_GAIN));
+    expect(navZoomFactor(20)).toBeLessThan(Math.exp(20 * 0.004));
+  });
+
+  it('scales orbit and zoom from app preferences', () => {
+    const base = navOrbitRadians(10, 4);
+    patchAppPreferences({ orbitSensitivity: 2, invertOrbitY: true });
+    const next = navOrbitRadians(10, 4);
+    expect(next.theta).toBeCloseTo(base.theta * 2);
+    expect(next.phi).toBeCloseTo(-base.phi * 2);
+
+    resetAppPreferencesCache();
+    const zoom = navZoomFactor(20);
+    patchAppPreferences({ zoomSensitivity: 2 });
+    expect(navZoomFactor(20)).toBeGreaterThan(zoom);
   });
 
   it('maps mouse and laptop shortcuts in every 3D workspace', () => {

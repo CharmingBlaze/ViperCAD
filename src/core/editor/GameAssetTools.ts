@@ -31,6 +31,22 @@ import { subVec3 } from '@/core/math/Vec3';
 
 export const LIGHTMAP_UV_NAME = 'Lightmap UV';
 
+function markAsCollider(
+  collider: SceneObject,
+  source: SceneObject,
+  collision: 'mesh' | 'convex' | 'box',
+): void {
+  collider.kind = 'collision';
+  for (const key of Object.keys(collider.metadata)) {
+    if (key === 'terrain' || key.startsWith('terrain')) delete collider.metadata[key];
+  }
+  collider.metadata.gameRole = 'collision';
+  collider.metadata.collision = collision;
+  collider.metadata.collisionFor = source.id;
+  source.metadata.collision = collision;
+  source.metadata.colliderObject = collider.id;
+}
+
 /** Add or rebuild a packed secondary UV channel suitable for baked lighting. */
 export function generateLightmapUv(mesh: EditableMesh): UvLayerId {
   const existing = [...mesh.uvLayers.values()].find((layer) => layer.name === LIGHTMAP_UV_NAME);
@@ -115,12 +131,7 @@ export function generateBoxCollider(document: ModelDocument, sourceObjectId: Obj
   });
   const collider = document.objects.get(committed.objectId)!;
   collider.transform = cloneTransform(source.transform);
-  collider.kind = 'collision';
-  collider.metadata.gameRole = 'collision';
-  collider.metadata.collision = 'box';
-  collider.metadata.collisionFor = source.id;
-  source.metadata.collision = 'box';
-  source.metadata.colliderObject = collider.id;
+  markAsCollider(collider, source, 'box');
   document.dirty = true;
   return collider.id;
 }
@@ -132,12 +143,7 @@ export function generateMeshCollider(document: ModelDocument, sourceObjectId: Ob
   const id = duplicateObject(document, sourceObjectId, true);
   const collider = document.objects.get(id)!;
   collider.name = `UCX_${source.name}`;
-  collider.kind = 'collision';
-  collider.metadata.gameRole = 'collision';
-  collider.metadata.collision = 'mesh';
-  collider.metadata.collisionFor = source.id;
-  source.metadata.collision = 'mesh';
-  source.metadata.colliderObject = collider.id;
+  markAsCollider(collider, source, 'mesh');
   document.dirty = true;
   return id;
 }
@@ -185,12 +191,7 @@ export function generateConvexCollider(document: ModelDocument, sourceObjectId: 
   });
   const collider = document.objects.get(committed.objectId)!;
   collider.transform = cloneTransform(source.transform);
-  collider.kind = 'collision';
-  collider.metadata.gameRole = 'collision';
-  collider.metadata.collision = 'convex';
-  collider.metadata.collisionFor = source.id;
-  source.metadata.collision = 'convex';
-  source.metadata.colliderObject = collider.id;
+  markAsCollider(collider, source, 'convex');
   document.dirty = true;
   return collider.id;
 }
@@ -365,6 +366,7 @@ export function joinMeshObjects(document: ModelDocument, objectIds: ObjectId[], 
   joined.metadata.gameRole = 'geometry';
   joined.metadata.joinedSources = sources.map((source) => source.name).join(', ');
   for (const source of sources) removeObject(document, source.id, true);
+  if (mesh.vertices.size > 0) centreObjectOrigin(document, joined.id);
   document.dirty = true;
   return joined.id;
 }

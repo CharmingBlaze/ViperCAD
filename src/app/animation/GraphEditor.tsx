@@ -3,6 +3,7 @@ import { getActiveClip, readRigDocumentSettings } from '@/core/rig/RigDocument';
 import { clipFrameCount } from '@/core/rig/AnimationLibrary';
 import type { AnimationSession } from './AnimationSession';
 import type { BoneAnimationTrack } from '@/core/rig/types';
+import { getActiveTheme, subscribeWorkspaceTheme, type ThemePalette } from '@/app/theme/themeTokens';
 
 type Props = {
   session: AnimationSession;
@@ -11,14 +12,31 @@ type Props = {
 
 type ChannelKind = 'pos_x' | 'pos_y' | 'pos_z' | 'rot_x' | 'rot_y' | 'rot_z';
 
-const CHANNEL_DEFS: { id: ChannelKind; name: string; color: string; group: 'Position' | 'Rotation' }[] = [
-  { id: 'pos_x', name: 'Pos X', color: '#e74c3c', group: 'Position' },
-  { id: 'pos_y', name: 'Pos Y', color: '#2ecc71', group: 'Position' },
-  { id: 'pos_z', name: 'Pos Z', color: '#3498db', group: 'Position' },
-  { id: 'rot_x', name: 'Rot X', color: '#e67e22', group: 'Rotation' },
-  { id: 'rot_y', name: 'Rot Y', color: '#1abc9c', group: 'Rotation' },
-  { id: 'rot_z', name: 'Rot Z', color: '#9b59b6', group: 'Rotation' },
+const CHANNEL_DEFS: { id: ChannelKind; name: string; group: 'Position' | 'Rotation' }[] = [
+  { id: 'pos_x', name: 'Pos X', group: 'Position' },
+  { id: 'pos_y', name: 'Pos Y', group: 'Position' },
+  { id: 'pos_z', name: 'Pos Z', group: 'Position' },
+  { id: 'rot_x', name: 'Rot X', group: 'Rotation' },
+  { id: 'rot_y', name: 'Rot Y', group: 'Rotation' },
+  { id: 'rot_z', name: 'Rot Z', group: 'Rotation' },
 ];
+
+function channelColor(id: ChannelKind, palette: ThemePalette): string {
+  switch (id) {
+    case 'pos_x':
+      return palette.gizmoX;
+    case 'pos_y':
+      return palette.gizmoY;
+    case 'pos_z':
+      return palette.gizmoZ;
+    case 'rot_x':
+      return palette.creative;
+    case 'rot_y':
+      return palette.accent;
+    case 'rot_z':
+      return palette.success;
+  }
+}
 
 export function GraphEditor({ session, onRefresh }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -27,6 +45,10 @@ export function GraphEditor({ session, onRefresh }: Props) {
   const [activeChannels, setActiveChannels] = useState<Set<ChannelKind>>(
     new Set(['rot_x', 'rot_y', 'rot_z']),
   );
+
+  const [themeTick, setThemeTick] = useState(0);
+
+  useEffect(() => subscribeWorkspaceTheme(() => setThemeTick((n) => n + 1)), []);
 
   const [dragPoint, setDragPoint] = useState<{
     keyIndex: number;
@@ -99,8 +121,10 @@ export function GraphEditor({ session, onRefresh }: Props) {
     const height = canvas.height;
     if (width === 0 || height === 0) return;
 
+    const palette = getActiveTheme().palette;
+
     // Background
-    ctx.fillStyle = '#1e1e1e';
+    ctx.fillStyle = palette.panel;
     ctx.fillRect(0, 0, width, height);
 
     // Padding & plot bounds
@@ -147,8 +171,8 @@ export function GraphEditor({ session, onRefresh }: Props) {
     ctx.font = '10px "IBM Plex Sans", monospace';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#9c9c9c';
-    ctx.strokeStyle = '#2d2d2d';
+    ctx.fillStyle = palette.muted;
+    ctx.strokeStyle = palette.line;
     ctx.lineWidth = 1;
 
     const gridSteps = 6;
@@ -165,7 +189,7 @@ export function GraphEditor({ session, onRefresh }: Props) {
     // Zero-axis indicator
     if (yMin <= 0 && yMax >= 0) {
       const zeroY = valToY(0);
-      ctx.strokeStyle = '#444444';
+      ctx.strokeStyle = palette.control;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(padLeft, zeroY);
@@ -180,7 +204,7 @@ export function GraphEditor({ session, onRefresh }: Props) {
     for (let f = 0; f <= totalFrames; f += frameStep) {
       const t = f / fps;
       const x = timeToX(t);
-      ctx.strokeStyle = f === 0 ? '#383838' : '#282828';
+      ctx.strokeStyle = f === 0 ? palette.control : palette.line;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(x, padTop);
@@ -196,7 +220,7 @@ export function GraphEditor({ session, onRefresh }: Props) {
       for (const def of CHANNEL_DEFS) {
         if (!activeChannels.has(def.id)) continue;
 
-        ctx.strokeStyle = def.color;
+        ctx.strokeStyle = channelColor(def.id, palette);
         ctx.lineWidth = 2;
         ctx.beginPath();
 
@@ -248,8 +272,8 @@ export function GraphEditor({ session, onRefresh }: Props) {
           const ky = valToY(getChannelVal(kf, def.id));
           const isCurrent = Math.abs(kf.time - time) < (1 / fps) * 0.5;
 
-          ctx.fillStyle = isCurrent ? '#ffffff' : def.color;
-          ctx.strokeStyle = '#1e1e1e';
+          ctx.fillStyle = isCurrent ? palette.text : channelColor(def.id, palette);
+          ctx.strokeStyle = palette.panel;
           ctx.lineWidth = 1.5;
 
           ctx.beginPath();
@@ -266,7 +290,7 @@ export function GraphEditor({ session, onRefresh }: Props) {
 
     // Playhead vertical line
     const playheadX = timeToX(time);
-    ctx.strokeStyle = '#1473e6';
+    ctx.strokeStyle = palette.accent;
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(playheadX, padTop);
@@ -274,7 +298,7 @@ export function GraphEditor({ session, onRefresh }: Props) {
     ctx.stroke();
 
     // Playhead head tag
-    ctx.fillStyle = '#1473e6';
+    ctx.fillStyle = palette.accent;
     ctx.beginPath();
     ctx.moveTo(playheadX - 6, padTop - 12);
     ctx.lineTo(playheadX + 6, padTop - 12);
@@ -305,7 +329,7 @@ export function GraphEditor({ session, onRefresh }: Props) {
   // Redraw whenever parameters change
   useEffect(() => {
     drawGraph();
-  }, [drawGraph]);
+  }, [drawGraph, themeTick]);
 
   // Interactive mouse drag on curve points
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -447,7 +471,7 @@ export function GraphEditor({ session, onRefresh }: Props) {
               key={ch.id}
               type="button"
               className={`tool graph-channel-btn${activeChannels.has(ch.id) ? ' is-active' : ''}`}
-              style={{ borderLeft: `3px solid ${ch.color}` }}
+              style={{ borderLeft: `3px solid ${channelColor(ch.id, getActiveTheme().palette)}` }}
               onClick={() => toggleChannel(ch.id)}
               title={`Toggle ${ch.name}`}
             >

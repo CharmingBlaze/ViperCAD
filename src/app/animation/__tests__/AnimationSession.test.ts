@@ -5,6 +5,9 @@ import { buildBox } from '@/core/mesh/builders/BoxBuilder';
 import { AnimationSession } from '@/app/animation/AnimationSession';
 import { WorkspaceController } from '@/workspace/WorkspaceController';
 import { readRigDocumentSettings } from '@/core/rig/RigDocument';
+import { serializeViperProject } from '@/core/persistence/ProjectSerializer';
+import { openViperProjectText } from '@/core/persistence/projectHealth';
+import { APP_VERSION } from '@/version';
 
 describe('AnimationSession', () => {
   it('binds the current model into a sidecar rig with an armature and clip', () => {
@@ -86,6 +89,39 @@ describe('AnimationSession', () => {
     expect(source?.objects.get(lightId!)?.kind).toBe('light');
     animation.deleteSceneObject(cameraId!);
     expect(source?.objects.has(cameraId!)).toBe(false);
+  });
+
+  it('keeps clip sequence and custom poses after save and open', () => {
+    const editor = new EditorSession();
+    editor.ensureDocumentKind('model');
+    commitMeshObject(editor.document, buildBox({ width: 1, height: 1, depth: 1, centered: true }));
+    const animation = new AnimationSession(editor);
+    animation.enterForModel(editor.documentId);
+    const clip = animation.getClips()[0]!;
+    expect(animation.addClipToSequence(clip.id)).toBeTruthy();
+    expect(animation.saveCustomPose('Idle')).toBe(true);
+    const boneId = [...animation.project.armatures.get(
+      readRigDocumentSettings(animation.rigDocument).armatureId!,
+    )!.bones.keys()][0]!;
+    animation.addConstraint({
+      name: 'Aim',
+      ownerId: boneId,
+      type: 'aim',
+      influence: 0.4,
+      enabled: true,
+    });
+    animation.setConstraintInfluence(animation.constraints[0]!.id, 0.75);
+
+    const loaded = openViperProjectText(serializeViperProject(editor.project, APP_VERSION));
+    const restoredEditor = new EditorSession(loaded.project);
+    const restored = new AnimationSession(restoredEditor);
+    restored.enterForModel(restoredEditor.documentId);
+    expect(restored.clipSequence).toHaveLength(1);
+    expect(restored.clipSequence[0]?.clipId).toBe(clip.id);
+    expect(restored.customPoses.some((pose) => pose.name === 'Idle')).toBe(true);
+    expect(restored.constraints).toHaveLength(1);
+    expect(restored.constraints[0]?.name).toBe('Aim');
+    expect(restored.constraints[0]?.influence).toBeCloseTo(0.75);
   });
 });
 

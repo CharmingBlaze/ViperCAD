@@ -144,4 +144,21 @@ describe('MeshSculptTool', () => {
     const firmTop = Math.max(...[...firm.vertices.values()].map((vertex) => vertex.position.y));
     expect(firmTop - 1).toBeGreaterThan((lightTop - 1) * 3);
   });
+
+  it('does not start a stroke when the ray misses the mesh', () => {
+    const session = new EditorSession();
+    const mesh = buildSphere({ radius: 1, widthSegments: 12, heightSegments: 8, name: 'Sphere' });
+    const { objectId } = commitMeshObject(session.document, mesh, { name: 'Sphere' });
+    session.selection.selectObjects([objectId], 'replace');
+    session.tools.setActive('mesh-sculpt', session.context());
+    const tool = session.tools.get('mesh-sculpt') as MeshSculptTool;
+    const miss = pointer({ x: 8, y: 0, z: 0 });
+    miss.rayOrigin = { x: 8, y: 0, z: 4 };
+    miss.rayDirection = { x: 0, y: 0, z: -1 };
+
+    tool.begin(miss, session.context());
+
+    expect(tool.dragging).toBe(false);
+    expect(tool.previewHit).toBeNull();
+  });
 });

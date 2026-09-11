@@ -168,7 +168,7 @@ export function OutlinerDocumentRow({
           className="outliner-icon danger"
           title="Delete"
           aria-label={`Delete ${doc.name}`}
-          onClick={() => deleteProjectDocument(session, documentId, kind, onRefresh)}
+          onClick={() => void deleteProjectDocument(session, documentId, kind, onRefresh)}
         >
           ×
         </button>

@@ -205,7 +205,45 @@ export class AnimationSession {
       rig.dirty = true;
     }
     this.ensureSetup();
+    this.syncFromProject();
     this.notify();
+  }
+
+  /** Reload sequencer playlist, custom poses, and constraints from the open project. */
+  syncFromProject(): void {
+    const settings = readRigDocumentSettings(this.rigDocument);
+    this.clipSequence = settings.clipSequence.map((item) => ({ ...item }));
+    this.customPoses = settings.customPoses.map((pose) => ({
+      id: pose.id,
+      name: pose.name,
+      transforms: Object.fromEntries(
+        Object.entries(pose.transforms).map(([id, transform]) => [id, cloneTransform(transform)]),
+      ),
+    }));
+    this.constraints = settings.constraints.map((item) => ({ ...item })) as Constraint[];
+    this.selectedSequenceItemId = null;
+  }
+
+  /** Copy live sequencer / pose / constraint edits onto the rig document before save. */
+  flushToProject(): void {
+    this.persistAnimationWorkspace();
+  }
+
+  private persistAnimationWorkspace(): void {
+    const existingId = this.project.rigDocumentIds[0];
+    const doc = existingId ? this.project.documents.get(existingId) : null;
+    if (!doc || doc.kind !== 'rig') return;
+    const settings = readRigDocumentSettings(doc);
+    settings.clipSequence = this.clipSequence.map((item) => ({ ...item }));
+    settings.customPoses = this.customPoses.map((pose) => ({
+      id: pose.id,
+      name: pose.name,
+      transforms: Object.fromEntries(
+        Object.entries(pose.transforms).map(([id, transform]) => [id, cloneTransform(transform)]),
+      ),
+    }));
+    settings.constraints = this.constraints.map((item) => ({ ...item }));
+    writeRigDocumentSettings(doc, settings);
   }
 
   private ensureRigDocument(): ViperDocument {
@@ -465,7 +503,13 @@ export class AnimationSession {
 
   deleteClip(clipId: AnimationClipId) {
     const ok = deleteClipForRig(this.project, this.rigDocument, clipId);
-    if (ok) this.notify();
+    if (ok) {
+      this.clipSequence = this.clipSequence.filter((item) => item.clipId !== clipId);
+      if (this.selectedSequenceItemId && !this.clipSequence.some((item) => item.id === this.selectedSequenceItemId)) {
+        this.selectedSequenceItemId = null;
+      }
+      this.notify();
+    }
     return ok;
   }
 
@@ -755,6 +799,8 @@ export class AnimationSession {
       name: name.trim() || `Pose ${this.customPoses.length + 1}`,
       transforms,
     });
+    this.persistAnimationWorkspace();
+    this.markDirty();
     this.notify();
     return true;
   }
@@ -776,6 +822,8 @@ export class AnimationSession {
 
   deleteCustomPose(poseId: string): void {
     this.customPoses = this.customPoses.filter((p) => p.id !== poseId);
+    this.persistAnimationWorkspace();
+    this.markDirty();
     this.notify();
   }
 
@@ -1359,6 +1407,7 @@ export class AnimationSession {
     };
     this.clipSequence.push(item);
     this.selectedSequenceItemId = item.id;
+    this.persistAnimationWorkspace();
     this.markDirty();
     return item;
   }
@@ -1366,6 +1415,7 @@ export class AnimationSession {
   removeSequenceItem(itemId: string): void {
     this.clipSequence = this.clipSequence.filter((i) => i.id !== itemId);
     if (this.selectedSequenceItemId === itemId) this.selectedSequenceItemId = null;
+    this.persistAnimationWorkspace();
     this.markDirty();
   }
 
@@ -1373,6 +1423,7 @@ export class AnimationSession {
     const item = this.clipSequence.find((i) => i.id === itemId);
     if (!item) return;
     Object.assign(item, updates);
+    this.persistAnimationWorkspace();
     this.markDirty();
   }
 
@@ -1393,6 +1444,7 @@ export class AnimationSession {
   clearSequence(): void {
     this.clipSequence = [];
     this.selectedSequenceItemId = null;
+    this.persistAnimationWorkspace();
     this.markDirty();
   }
 
@@ -1426,6 +1478,7 @@ export class AnimationSession {
       }
 
       this.clipSequence = parsed.clipSequence ?? [];
+      settings.clipSequence = this.clipSequence.map((item) => ({ ...item }));
       writeRigDocumentSettings(doc, settings);
       this.markDirty();
       return true;
@@ -1532,6 +1585,7 @@ export class AnimationSession {
     };
     this.constraints.push(newConstraint);
     this.selectedConstraintId = newConstraint.id;
+    this.persistAnimationWorkspace();
     this.markDirty();
     return newConstraint;
   }
@@ -1539,6 +1593,7 @@ export class AnimationSession {
   removeConstraint(id: string): void {
     this.constraints = this.constraints.filter((c) => c.id !== id);
     if (this.selectedConstraintId === id) this.selectedConstraintId = null;
+    this.persistAnimationWorkspace();
     this.markDirty();
   }
 
@@ -1546,8 +1601,17 @@ export class AnimationSession {
     const c = this.constraints.find((item) => item.id === id);
     if (c) {
       c.enabled = !c.enabled;
+      this.persistAnimationWorkspace();
       this.markDirty();
     }
+  }
+
+  setConstraintInfluence(id: string, influence: number): void {
+    const constraint = this.constraints.find((item) => item.id === id);
+    if (!constraint) return;
+    constraint.influence = Math.max(0, Math.min(1, influence));
+    this.persistAnimationWorkspace();
+    this.markDirty();
   }
 
   mirrorSkinWeightsXForRig(): number {

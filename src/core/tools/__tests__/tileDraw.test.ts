@@ -116,7 +116,7 @@ describe('3D tile draw tool', () => {
     expect(tool.state.pickedTile?.tileX).toBe(0);
 
     tool.setConfig({ mode: 'fill', tileX: 16 }, session.context());
-    tool.begin(pointer(0.2, 0.2), session.context());
+    tool.begin({ ...pointer(0.2, 0.2), shiftKey: true }, session.context());
     tool.confirm(session.context());
     const object = [...session.document.objects.values()][0]!;
     const cells = JSON.parse(object.metadata.tileDrawCells!) as { tileX: number }[];
@@ -206,5 +206,41 @@ describe('3D tile draw tool', () => {
     tool.begin({ ...pointer(0.2, 0.2), altKey: true }, session.context());
     expect(tool.config.mode).toBe('paint');
     expect(tool.consumePickedTile()).toMatchObject({ tileX: 16, tileY: 0 });
+  });
+
+  it('places a fill-size ghost as one click and joins a multi-tile stamp', () => {
+    const session = new EditorSession();
+    session.constructionPlane = WORLD_XZ_PLANE;
+    const tool = session.tools.get('tile-draw') as TileDrawTool;
+    tool.setConfig({
+      mode: 'fill',
+      fillColumns: 3,
+      fillRows: 2,
+      cellWidth: 1,
+      cellHeight: 1,
+      joinMulti: false,
+    }, session.context());
+    session.tools.setActive('tile-draw', session.context());
+    tool.begin(pointer(0.2, 0.2), session.context());
+    tool.confirm(session.context());
+    const object = [...session.document.objects.values()][0]!;
+    expect(getMeshStats(session.document.meshes.get(object.meshId!)!).faces).toBe(6);
+
+    session.undo();
+    tool.setConfig({
+      mode: 'paint',
+      shape: 'single',
+      joinMulti: true,
+      selectionColumns: 2,
+      selectionRows: 2,
+      tileWidth: 16,
+      tileHeight: 16,
+    }, session.context());
+    tool.begin(pointer(0.2, 0.2), session.context());
+    tool.confirm(session.context());
+    const joined = [...session.document.objects.values()][0]!;
+    const mesh = session.document.meshes.get(joined.meshId!)!;
+    expect(getMeshStats(mesh).faces).toBe(1);
+    expect(getMeshStats(mesh).verts).toBe(4);
   });
 });

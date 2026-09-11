@@ -34,16 +34,27 @@ export async function importGltf(data: ArrayBuffer): Promise<EditableMesh[]> {
       return group?.materialIndex ?? 0;
     };
     builder.setMaterialSlotCount(Math.max(1, geometry.groups.length, Array.isArray(node.material) ? node.material.length : 1));
+    const meshName = node.name || `glTF Mesh ${imported.length + 1}`;
+    let added = 0;
     for (let offset = 0; offset + 2 < indices.length; offset += 3) {
       const ids = [indices[offset]!, indices[offset + 1]!, indices[offset + 2]!] as const;
+      if (ids[0] === ids[1] || ids[1] === ids[2] || ids[0] === ids[2]) continue;
+      const a = vertices[ids[0]];
+      const b = vertices[ids[1]];
+      const c = vertices[ids[2]];
+      if (a === undefined || b === undefined || c === undefined) {
+        throw new Error(`${meshName}: glTF index is out of range`);
+      }
       builder.tri(
-        vertices[ids[0]]!,
-        vertices[ids[1]]!,
-        vertices[ids[2]]!,
+        a,
+        b,
+        c,
         uvs ? ids.map((index) => v2(uvs.getX(index), uvs.getY(index))) : undefined,
         materialSlotForTriangle(offset),
       );
+      added += 1;
     }
+    if (added === 0) return;
     imported.push(builder.build());
   });
   if (!imported.length) throw new Error('The glTF file contains no importable mesh geometry.');

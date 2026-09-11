@@ -15,6 +15,7 @@ import {
   lockBlockoutReferences,
   removeBlockoutReference,
   setBlockoutReferenceLocked,
+  setBlockoutShowInPersp,
   syncReferenceConfigFromObject,
 } from '@/core/blockout/BlockoutReferenceObject';
 import { IMAGE_FILES, openNativeFile } from '@/app/platform/FileDialogs';
@@ -670,9 +671,7 @@ export function BlockoutPanel({
             type="checkbox"
             checked={refState.showInPersp}
             onChange={(e) => {
-              refState.showInPersp = e.target.checked;
-              refState.revision += 1;
-              session.requestRedraw();
+              setBlockoutShowInPersp(session, e.target.checked);
               onRefresh();
             }}
           />
@@ -798,7 +797,7 @@ function ReferenceSlot({
           </button>
         </span>
       </div>
-      <img src={config.url} alt={`${label} reference`} className="blockout-ref-thumb" />
+      {config.url ? <img src={config.url} alt={`${label} reference`} className="blockout-ref-thumb" /> : null}
       <div className="blockout-row">
         <span className="blockout-label">Opacity</span>
         <input

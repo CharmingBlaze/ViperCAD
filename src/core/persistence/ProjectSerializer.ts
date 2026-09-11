@@ -1,7 +1,8 @@
 import { APP_VERSION } from '@/version';
 import { reserveExistingIds } from '@/core/ids/IdService';
 import { normalizeMaterialAsset } from '@/core/material/MaterialPresets';
-import { emptyDirtyFlags, type EditableMesh, type FaceCorner } from '@/core/mesh/types';
+import { emptyDirtyFlags, type EditableMesh, type FaceCorner, type VertexId } from '@/core/mesh/types';
+import { peekMeshMask } from '@/core/sculpt/SculptMask';
 import { validateMeshFull } from '@/core/mesh/Validation';
 import { normalizeDocumentObjects } from '@/core/document/SceneObjectKind';
 import {
@@ -28,7 +29,7 @@ import {
 export const PROJECT_FORMAT = 'vipercad';
 export const PROJECT_FORMAT_VERSION = 4;
 
-type EncodedMesh = Omit<EditableMesh, 'vertices' | 'edges' | 'halfEdges' | 'faces' | 'faceCorners' | 'uvLayers' | 'triangulationHints'> & {
+type EncodedMesh = Omit<EditableMesh, 'vertices' | 'edges' | 'halfEdges' | 'faces' | 'faceCorners' | 'uvLayers' | 'triangulationHints' | 'sculptMask'> & {
   vertices: EditableMesh['vertices'] extends Map<unknown, infer V> ? V[] : never;
   edges: EditableMesh['edges'] extends Map<unknown, infer V> ? V[] : never;
   halfEdges: EditableMesh['halfEdges'] extends Map<unknown, infer V> ? V[] : never;
@@ -36,6 +37,7 @@ type EncodedMesh = Omit<EditableMesh, 'vertices' | 'edges' | 'halfEdges' | 'face
   faceCorners: (Omit<FaceCorner, 'uvs'> & { uvs: [string, { x: number; y: number }][] })[];
   uvLayers: EditableMesh['uvLayers'] extends Map<unknown, infer V> ? V[] : never;
   triangulationHints: [string, '0-2' | '1-3'][];
+  sculptMask?: [string, number][];
 };
 
 type LegacyProjectFile = {
@@ -299,11 +301,64 @@ function reserveProjectIds(project: ViperProject): void {
 // Legacy types removed — v3 is primary; v1/v2 load via legacy branch above.
 
 function encodeMesh(mesh: EditableMesh): EncodedMesh {
-  return { ...mesh, dirty: { ...mesh.dirty }, vertices: [...mesh.vertices.values()].map((v) => ({ ...v, position: { ...v.position } })), edges: [...mesh.edges.values()].map((e) => ({ ...e })), halfEdges: [...mesh.halfEdges.values()].map((h) => ({ ...h })), faces: [...mesh.faces.values()].map((f) => ({ ...f })), faceCorners: [...mesh.faceCorners.values()].map((c) => ({ ...c, uvs: [...c.uvs.entries()].map(([id, uv]) => [id, { ...uv }]) })), uvLayers: [...mesh.uvLayers.values()].map((u) => ({ ...u })), triangulationHints: [...mesh.triangulationHints] } as EncodedMesh;
+  const { sculptMask: _sculptMask, ...rest } = mesh;
+  const encoded = {
+    ...rest,
+    dirty: { ...mesh.dirty },
+    vertices: [...mesh.vertices.values()].map((v) => ({ ...v, position: { ...v.position } })),
+    edges: [...mesh.edges.values()].map((e) => ({ ...e })),
+    halfEdges: [...mesh.halfEdges.values()].map((h) => ({ ...h })),
+    faces: [...mesh.faces.values()].map((f) => ({ ...f })),
+    faceCorners: [...mesh.faceCorners.values()].map((c) => ({ ...c, uvs: [...c.uvs.entries()].map(([id, uv]) => [id, { ...uv }]) })),
+    uvLayers: [...mesh.uvLayers.values()].map((u) => ({ ...u })),
+    triangulationHints: [...mesh.triangulationHints],
+  } as EncodedMesh;
+  const maskEntries = encodeSculptMask(mesh);
+  if (maskEntries) encoded.sculptMask = maskEntries;
+  return encoded;
+}
+
+function encodeSculptMask(mesh: EditableMesh): [string, number][] | undefined {
+  const source = peekMeshMask(mesh.id) ?? mesh.sculptMask;
+  if (!source?.size) return undefined;
+  const entries: [string, number][] = [];
+  for (const [id, value] of source) {
+    if (!mesh.vertices.has(id) || !Number.isFinite(value) || value <= 0.001) continue;
+    entries.push([id, Math.min(1, value)]);
+  }
+  return entries.length ? entries : undefined;
+}
+
+function decodeSculptMask(mesh: EditableMesh, encoded: EncodedMesh['sculptMask']): Map<VertexId, number> | undefined {
+  if (!encoded?.length) return undefined;
+  const restored = new Map<VertexId, number>();
+  for (const entry of encoded) {
+    if (!Array.isArray(entry) || entry.length < 2) continue;
+    const id = entry[0];
+    const value = entry[1];
+    if (typeof id !== 'string' || typeof value !== 'number' || !Number.isFinite(value)) continue;
+    if (!mesh.vertices.has(id) || value <= 0.001) continue;
+    restored.set(id, Math.min(1, value));
+  }
+  return restored.size ? restored : undefined;
 }
 
 function decodeMesh(encoded: EncodedMesh): EditableMesh {
-  return { ...encoded, vertices: new Map(encoded.vertices.map((v) => [v.id, v])), edges: new Map(encoded.edges.map((e) => [e.id, e])), halfEdges: new Map(encoded.halfEdges.map((h) => [h.id, h])), faces: new Map(encoded.faces.map((f) => [f.id, f])), faceCorners: new Map(encoded.faceCorners.map((c) => [c.id, { ...c, uvs: new Map(c.uvs) }])), uvLayers: new Map(encoded.uvLayers.map((u) => [u.id, u])), triangulationHints: new Map(encoded.triangulationHints), dirty: emptyDirtyFlags(true) };
+  const { sculptMask, ...rest } = encoded;
+  const mesh: EditableMesh = {
+    ...rest,
+    vertices: new Map(encoded.vertices.map((v) => [v.id, v])),
+    edges: new Map(encoded.edges.map((e) => [e.id, e])),
+    halfEdges: new Map(encoded.halfEdges.map((h) => [h.id, h])),
+    faces: new Map(encoded.faces.map((f) => [f.id, f])),
+    faceCorners: new Map(encoded.faceCorners.map((c) => [c.id, { ...c, uvs: new Map(c.uvs) }])),
+    uvLayers: new Map(encoded.uvLayers.map((u) => [u.id, u])),
+    triangulationHints: new Map(encoded.triangulationHints),
+    dirty: emptyDirtyFlags(true),
+  };
+  const restored = decodeSculptMask(mesh, sculptMask);
+  if (restored) mesh.sculptMask = restored;
+  return mesh;
 }
 
 function encodeImageAsset(image: ImageAsset) {

@@ -7,6 +7,8 @@ import {
   Vector3,
   type Camera,
 } from 'three';
+import type { ViewportTheme } from '@/app/theme/themeTokens';
+import { applyThemeHex } from '@/renderer/themeColor';
 
 /** Neutral slate values used by the professional modelling canvas. */
 export const VIEWPORT_ZENITH = 0x22262b;
@@ -83,6 +85,15 @@ export class ViewportWorld extends Mesh<PlaneGeometry, ShaderMaterial> {
     this.matrixAutoUpdate = false;
     this.name = 'ViewportWorld';
     this.raycast = () => undefined;
+  }
+
+  applyPalette(palette: ViewportTheme): void {
+    const uniforms = this.material.uniforms;
+    applyThemeHex(uniforms.zenith.value, palette.zenith);
+    applyThemeHex(uniforms.horizon.value, palette.horizon);
+    applyThemeHex(uniforms.ground.value, palette.ground);
+    applyThemeHex(uniforms.sunColor.value, palette.sun);
+    this.material.uniformsNeedUpdate = true;
   }
 
   sync(camera: Camera): void {

@@ -16,6 +16,8 @@ import {
   Color,
   OrthographicCamera,
 } from 'three';
+import type { ViewportTheme } from '@/app/theme/themeTokens';
+import { applyThemeHex } from '@/renderer/themeColor';
 import type { AxisConstraint, GizmoMode, OrientationBasis, TransformType } from '@/core/transform/types';
 
 export type GizmoHandleId =
@@ -112,6 +114,13 @@ export class TransformGizmo {
   setActiveHandle(id: GizmoHandleId | null): void {
     this.active = id;
     this.refreshStyles();
+  }
+
+  applyPalette(palette: ViewportTheme): void {
+    for (const [id, entry] of this.handles) {
+      applyThemeHex(entry.material.color, gizmoColorForHandle(id, palette));
+      entry.material.needsUpdate = true;
+    }
   }
 
   setConstraintHighlight(constraint: AxisConstraint | null, type?: TransformType | null): void {
@@ -476,6 +485,18 @@ export class TransformGizmo {
       entry.visual.scale.setScalar(isHot ? 1.08 : 1);
     }
   }
+}
+
+function gizmoColorForHandle(id: GizmoHandleId, palette: ViewportTheme): string {
+  if (id === 'rotate-view') return palette.gizmoView;
+  if (id === 'move-view' || id === 'scale-uniform') return palette.gizmoCentre;
+  if (id.includes('-xy')) return palette.gizmoZ;
+  if (id.includes('-xz')) return palette.gizmoY;
+  if (id.includes('-yz')) return palette.gizmoX;
+  if (id.endsWith('-x')) return palette.gizmoX;
+  if (id.endsWith('-y')) return palette.gizmoY;
+  if (id.endsWith('-z')) return palette.gizmoZ;
+  return palette.gizmoCentre;
 }
 
 function alignY(obj: Object3D, dir: Vector3): void {

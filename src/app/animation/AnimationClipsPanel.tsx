@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { BlenderIcon } from '@/components/BlenderIcon';
 import { getActiveClip } from '@/core/rig/RigDocument';
+import { confirmAction } from '@/app/platform/appDialogs';
 import type { AnimationClipId } from '@/core/rig/types';
 import type { AnimationSession } from './AnimationSession';
 
@@ -260,10 +261,17 @@ export function AnimationClipsPanel({
                         className="rig-tool-btn danger"
                         title="Delete Clip"
                         onClick={() => {
-                          if (window.confirm(`Delete animation "${clip.name}"?`)) {
+                          void (async () => {
+                            const confirmed = await confirmAction({
+                              title: 'Delete animation',
+                              message: `Delete animation "${clip.name}"? This cannot be undone.`,
+                              confirmLabel: 'Delete',
+                              danger: true,
+                            });
+                            if (!confirmed) return;
                             session.deleteClip(clip.id);
                             onRefresh();
-                          }
+                          })();
                         }}
                       >
                         <BlenderIcon name="trash" size={12} />

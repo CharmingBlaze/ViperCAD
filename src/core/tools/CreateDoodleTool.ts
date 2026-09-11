@@ -1,3 +1,4 @@
+import { applyDefaultBlockoutLook } from '@/core/blockout/BlockoutMaterial';
 import { commitMeshObject } from '@/core/document/ModelDocument';
 import {
   applySimpleTextureToObject,
@@ -606,9 +607,15 @@ export class CreateDoodleTool implements Tool {
     const label = this.objectLabel();
     const { objectId, meshId } = commitMeshObject(context.document, mesh, { name: label });
     const object = context.document.objects.get(objectId)!;
-    object.transform.position = localized.position;
+    object.parentId = null;
     object.kind = 'mesh';
+    object.transform.position = localized.position;
     object.metadata.curveOperation = serializeCurveOperation(operation);
+    delete object.metadata.simpleTexture;
+    delete object.metadata.simpleTextureMaterialId;
+    if (!context.document.rootObjectIds.includes(object.id)) {
+      context.document.rootObjectIds.push(object.id);
+    }
     if (this.createContext === 'workflows') {
       const axes = (['x', 'y', 'z'] as const).filter(
         (axis) => context.document.settings.symmetry[axis],
@@ -620,8 +627,10 @@ export class CreateDoodleTool implements Tool {
         });
         object.metadata.blockoutCreationSymmetry = axes.join(',');
       }
+      applyDefaultBlockoutLook(context.document, objectId);
+    } else {
+      applySimpleTextureToObject(context.document, object, this.simpleTextureSettings);
     }
-    applySimpleTextureToObject(context.document, object, this.simpleTextureSettings);
     const meshRef = context.document.meshes.get(meshId)!;
     context.selection.setMode('object');
     if (this.createContext === 'workflows' || this.inputMode !== 'pen') {

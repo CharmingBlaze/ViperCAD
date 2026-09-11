@@ -8,13 +8,18 @@ import { pushToast } from '@/app/Toast';
 import { beginInteractiveLoopCut } from '@/app/LoopCutHotkey';
 import { beginInteractivePushPull } from '@/app/PushPullHotkey';
 import { PushPullTool } from '@/core/tools/PushPullTool';
-import { fillHoles, makeFaceFromVertices } from '@/core/mesh/ops/draw';
+import { makeFaceFromVertices } from '@/core/mesh/ops/draw';
+import {
+  applyFillHotkey,
+  applyMergeHotkey,
+  canFillSelection,
+  canMergeSelection,
+} from '@/app/ModelingEditHotkeys';
 import {
   bridgeEdgeLoops,
   dissolveEdges,
   dissolveFaces,
   flipFaces,
-  mergeVertices,
   relaxVertices,
   splitEdge,
   triangulateFaces,
@@ -30,11 +35,11 @@ import {
 } from '@/core/mesh/ops/shading';
 import { pokeFaces, subdivideFaces } from '@/core/mesh/ops/subdivide';
 import { validateMeshFull } from '@/core/mesh/Validation';
+import { applyDefaultBlockoutLook } from '@/core/blockout/BlockoutMaterial';
 import { duplicateObject } from '@/core/document/ModelDocument';
 import {
   cloneMeshPreserveIds,
   faceVertexIds,
-  isBoundaryEdge,
 } from '@/core/mesh/EditableMesh';
 import { bevelEdges } from '@/core/mesh/ops/bevel';
 import { solidifyMesh } from '@/core/mesh/ops/solidify';
@@ -371,17 +376,13 @@ export function AppInspectorPanel({
     return operation && isWorkflowOperation(operation) ? operation : null;
   })();
   const makeFaceReady = !!activeMesh && sel.mode === 'vertex' && sel.selectedVertexIds.size >= 3;
-  const fillReady =
-    !!activeMesh &&
-    sel.mode === 'edge' &&
-    sel.selectedEdgeIds.size >= 1 &&
-    [...sel.selectedEdgeIds].some((id) => isBoundaryEdge(activeMesh, id));
+  const fillReady = canFillSelection(session);
   const dissolveReady =
     !!activeMesh &&
     ((sel.mode === 'edge' && sel.selectedEdgeIds.size > 0) ||
       (sel.mode === 'face' && sel.selectedFaceIds.size > 1));
   const splitReady = !!activeMesh && sel.mode === 'edge' && sel.selectedEdgeIds.size > 0;
-  const mergeReady = !!activeMesh && sel.mode === 'vertex' && sel.selectedVertexIds.size >= 2;
+  const mergeReady = canMergeSelection(session);
   const separateReady = !!activeMesh && faceEditReady && sel.selectedFaceIds.size < activeMesh.faces.size;
   const selectedEdgeKey = [...sel.selectedEdgeIds].sort().join('|');
   const solidifyReady = !!activeMesh && activeMesh.faces.size > 0;
@@ -423,6 +424,9 @@ export function AppInspectorPanel({
     rebuilt.id = activeMesh.id;
     session.document.meshes.set(activeMesh.id, rebuilt);
     activeObject.metadata.curveOperation = serializeCurveOperation(next);
+    if (isWorkflowOperation(next)) {
+      applyDefaultBlockoutLook(session.document, activeObject.id);
+    }
     session.document.dirty = true;
   };
 
@@ -614,13 +618,11 @@ export function AppInspectorPanel({
   };
 
   const fillBoundary = () => {
-    if (!activeMesh || !fillReady) return;
-    const edges = [...sel.selectedEdgeIds];
-    runDrawOp('Fill Boundary', (mesh) => {
-      const result = fillHoles(mesh, edges);
-      if (!result.ok) throw new Error(result.error?.message ?? 'Fill failed');
-      session.selection.applyTopologyChange(result.change);
-    });
+    if (!applyFillHotkey(session)) {
+      if (fillReady) pushToast('Fill failed', 'error');
+      return;
+    }
+    onRefresh();
   };
 
   const flipSelectedFaces = () => {
@@ -647,13 +649,11 @@ export function AppInspectorPanel({
   };
 
   const mergeVerts = () => {
-    if (!activeMesh || !mergeReady) return;
-    const verts = [...sel.selectedVertexIds];
-    runDrawOp('Merge Vertices', (mesh) => {
-      const result = mergeVertices(mesh, verts);
-      if (!result.ok) throw new Error(result.error?.message ?? 'Merge failed');
-      session.selection.applyTopologyChange(result.change);
-    });
+    if (!applyMergeHotkey(session)) {
+      if (mergeReady) pushToast('Merge failed', 'error');
+      return;
+    }
+    onRefresh();
   };
 
   const addLoopCut = () => {
@@ -829,7 +829,7 @@ export function AppInspectorPanel({
       <button type="button" className="tool" disabled={!makeFaceReady} onClick={makeFace}>
         {drawTool.faceMode === 'double' ? 'Make Double' : 'Make Face'}
       </button>
-      <button type="button" className="tool" disabled={!fillReady} onClick={fillBoundary}>
+      <button type="button" className="tool" disabled={!fillReady} onClick={fillBoundary} title="Fill (F)">
         Fill
       </button>
       <button type="button" className="tool" disabled={!dissolveReady} onClick={dissolveSelection}>
@@ -838,8 +838,8 @@ export function AppInspectorPanel({
       <button type="button" className="tool" disabled={!splitReady} onClick={splitEdges}>
         Split Edges
       </button>
-      <button type="button" className="tool" disabled={!mergeReady} onClick={mergeVerts}>
-        Merge Verts
+      <button type="button" className="tool" disabled={!mergeReady} onClick={mergeVerts} title="Merge (M)">
+        Merge
       </button>
       <button
         type="button"

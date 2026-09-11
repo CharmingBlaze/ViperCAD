@@ -10,6 +10,8 @@ import {
   Vector3,
   type Camera,
 } from 'three';
+import type { ViewportTheme } from '@/app/theme/themeTokens';
+import { applyThemeHex } from '@/renderer/themeColor';
 import type { ViewId, ViewPreset } from '@/workspace/types';
 
 /** Number of cells used when a caller only supplies a patch size. */
@@ -59,12 +61,12 @@ export class ViewportGrid extends Group {
         cellSize: { value: 1 },
         majorEvery: { value: MAJOR_EVERY },
         planeMode: { value: 0 },
-        minorColor: { value: GRID_MINOR },
-        majorColor: { value: GRID_MAJOR },
-        axisX: { value: AXIS_X },
-        axisY: { value: AXIS_Y },
-        axisZ: { value: AXIS_Z },
-        floorColor: { value: FLOOR },
+        minorColor: { value: GRID_MINOR.clone() },
+        majorColor: { value: GRID_MAJOR.clone() },
+        axisX: { value: AXIS_X.clone() },
+        axisY: { value: AXIS_Y.clone() },
+        axisZ: { value: AXIS_Z.clone() },
+        floorColor: { value: FLOOR.clone() },
       },
       vertexShader: /* glsl */ `
         varying vec3 vWorldPos;
@@ -157,6 +159,17 @@ export class ViewportGrid extends Group {
     this.mesh.raycast = () => undefined;
     this.add(this.mesh);
     this.visible = false;
+  }
+
+  applyPalette(palette: ViewportTheme): void {
+    const uniforms = this.mesh.material.uniforms;
+    applyThemeHex(uniforms.minorColor.value, palette.gridMinor);
+    applyThemeHex(uniforms.majorColor.value, palette.gridMajor);
+    applyThemeHex(uniforms.axisX.value, palette.gizmoX);
+    applyThemeHex(uniforms.axisY.value, palette.gizmoY);
+    applyThemeHex(uniforms.axisZ.value, palette.gizmoZ);
+    applyThemeHex(uniforms.floorColor.value, palette.gridFloor);
+    this.mesh.material.uniformsNeedUpdate = true;
   }
 
   update(viewId: ViewId | ViewPreset, size: number, target: Vector3, spacing = size / GRID_BASE_DIVISIONS): void {

@@ -3,11 +3,8 @@ import { isGroupObject } from '@/core/document/SceneObjectKind';
 import { buildBoneTree } from '@/core/rig/boneTree';
 import { readRigDocumentSettings } from '@/core/rig/RigDocument';
 import type { BoneId } from '@/core/rig/types';
-import type { ObjectId, SceneObject } from '@/core/document/types';
-import {
-  listSceneCameras,
-  sceneObjectKindLabel,
-} from '../scene/RigSceneAssets';
+import type { ObjectId } from '@/core/document/types';
+import { sceneObjectKindLabel } from '../scene/RigSceneAssets';
 import type { RigSession } from '../RigSession';
 import type { RigWorkspace } from '../RigWorkspace';
 import { RIG_CAMERA_PANE } from '../RigWorkspace';

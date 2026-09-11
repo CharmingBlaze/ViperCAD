@@ -26,6 +26,8 @@ import {
   renderStyleHidesEdgeOverlay,
   renderStyleShowsAllEdges,
 } from '@/renderer/ViewportRenderStyle';
+import type { ViewportTheme } from '@/app/theme/themeTokens';
+import { applyThemeHex } from '@/renderer/themeColor';
 import type { ObjectRenderHandle } from './MeshRenderAdapter';
 
 /**
@@ -109,6 +111,32 @@ export class SelectionOverlaySystem {
     this.root.add(this.topologyVertices);
     this.root.add(this.vertices);
     this.root.add(this.faceFill);
+  }
+
+  applyPalette(palette: ViewportTheme): void {
+    applyThemeHex(SELECTION_COLORS.hover, palette.overlayHover);
+    applyThemeHex(SELECTION_COLORS.selected, palette.overlaySelected);
+    applyThemeHex(SELECTION_COLORS.active, palette.overlayActive);
+    applyThemeHex(SELECTION_COLORS.objectOutline, palette.overlaySelected);
+    applyThemeHex(SELECTION_COLORS.objectHover, palette.overlayHover);
+    applyThemeHex(SELECTION_COLORS.faceTintSelected, palette.overlaySelected);
+    applyThemeHex(SELECTION_COLORS.faceTintHover, palette.overlayHover);
+    applyThemeHex(SELECTION_COLORS.faceTintActive, palette.overlayActive);
+    const selectedMat = this.selectedEdges.material as LineBasicMaterial;
+    const hoverMat = this.hoverEdge.material as LineBasicMaterial;
+    const activeMat = this.activeEdge.material as LineBasicMaterial;
+    const faceMat = this.faceFill.material as MeshBasicMaterial;
+    selectedMat.color.copy(SELECTION_COLORS.selected);
+    hoverMat.color.copy(SELECTION_COLORS.hover);
+    activeMat.color.copy(SELECTION_COLORS.active);
+    faceMat.color.copy(SELECTION_COLORS.faceTintSelected);
+    selectedMat.needsUpdate = true;
+    hoverMat.needsUpdate = true;
+    activeMat.needsUpdate = true;
+    faceMat.needsUpdate = true;
+    for (const line of this.outlinePool.values()) {
+      (line.material as LineBasicMaterial).needsUpdate = true;
+    }
   }
 
   /**

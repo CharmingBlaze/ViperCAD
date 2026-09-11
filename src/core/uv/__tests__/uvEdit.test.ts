@@ -9,6 +9,9 @@ import {
   cornersInUvRect,
   expandWeldedUvCorners,
   flipUvs,
+  copyFaceUvs,
+  pasteFaceUvs,
+  mirrorUvsAcrossAxis,
   pickUvElement,
   pickUvGizmo,
   rotateUvsFromSnapshot,
@@ -345,4 +348,58 @@ describe('UvEdit', () => {
       expect(Number.isFinite(point.x) && Number.isFinite(point.y)).toBe(true);
     }
   });
+
+  it('copies and pastes UVs to target faces with horizontal flip', () => {
+    const mesh = buildBox({ width: 2, height: 2, depth: 2 });
+    const layerId = mesh.defaultUvLayerId!;
+    const faces = [...mesh.faces.keys()];
+    const srcFace = faces[0]!;
+    const dstFace = faces[1]!;
+
+    const clipboard = copyFaceUvs(mesh, [srcFace], layerId);
+    expect(clipboard).not.toBeNull();
+    expect(clipboard!.faces.length).toBe(1);
+
+    const pasteResult = pasteFaceUvs(mesh, [dstFace], layerId, clipboard!, { flipAxis: 'u' });
+    expect(pasteResult.success).toBe(true);
+    expect(pasteResult.modifiedFaceCount).toBe(1);
+
+    const dstCorners = faceCornerIds(mesh, dstFace);
+    for (const cId of dstCorners) {
+      const uv = mesh.faceCorners.get(cId)!.uvs.get(layerId)!;
+      expect(Number.isFinite(uv.x)).toBe(true);
+      expect(Number.isFinite(uv.y)).toBe(true);
+    }
+  });
+
+  it('mirrors UVs across X axis for symmetrical faces', () => {
+    const mesh = buildBox({ width: 2, height: 2, depth: 2 });
+    const layerId = mesh.defaultUvLayerId!;
+
+    // Find a face that is strictly on +X side
+    let posXFace: string | null = null;
+    for (const [faceId] of mesh.faces) {
+      const corners = faceCornerIds(mesh, faceId);
+      const allPositiveX = corners.every((cId) => (mesh.vertices.get(mesh.faceCorners.get(cId)!.vertexId)?.position.x ?? 0) > 0.5);
+      if (allPositiveX) {
+        posXFace = faceId;
+        break;
+      }
+    }
+    expect(posXFace).not.toBeNull();
+
+    const result = mirrorUvsAcrossAxis(mesh, [posXFace!], layerId, 'x');
+    expect(result.success).toBe(true);
+    expect(result.mirroredFaceCount).toBe(1);
+    expect(result.mirroredFaceIds.length).toBe(1);
+
+    // Verify target face corners now have valid UVs
+    const targetCorners = faceCornerIds(mesh, result.mirroredFaceIds[0]!);
+    for (const cId of targetCorners) {
+      const uv = mesh.faceCorners.get(cId)!.uvs.get(layerId)!;
+      expect(Number.isFinite(uv.x)).toBe(true);
+      expect(Number.isFinite(uv.y)).toBe(true);
+    }
+  });
 });
+

@@ -128,7 +128,7 @@ export type FloodFillOptions = {
 };
 
 /**
- * Paint-bucket fill with Photoshop-style tolerance and contiguous matching.
+ * Paint-bucket fill with adjustable tolerance and contiguous matching.
  * A maximum per-channel distance is used so a tolerance value is predictable
  * for pixel art as well as photographic textures.
  */
@@ -196,6 +196,26 @@ export function floodFill(
 }
 
 export function paintUvHit(image: ImageAsset, uv: { x: number; y: number }, colour: Rgba): boolean { return setPixel(image, Math.min(image.width - 1, Math.max(0, Math.floor(uv.x * image.width))), Math.min(image.height - 1, Math.max(0, Math.floor((1 - uv.y) * image.height))), colour); }
+
+/** PNG data URL for inspector thumbs. Empty when canvas is unavailable (Node tests). */
+export function imageAssetToDataUrl(image: ImageAsset): string {
+  if (typeof document === 'undefined' || typeof ImageData === 'undefined') return '';
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext('2d');
+    if (!context) return '';
+    context.putImageData(
+      new ImageData(new Uint8ClampedArray(image.pixels), image.width, image.height),
+      0,
+      0,
+    );
+    return canvas.toDataURL('image/png');
+  } catch {
+    return '';
+  }
+}
 
 function inside(image: ImageAsset, x: number, y: number) { return Number.isInteger(x) && Number.isInteger(y) && x >= 0 && y >= 0 && x < image.width && y < image.height; }
 function write(image: ImageAsset, x: number, y: number, c: Rgba) { writePaintPixel(image, x, y, c); }

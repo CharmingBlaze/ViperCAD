@@ -93,6 +93,32 @@ describe('ViewportRenderStyle', () => {
     expect(std.map).toBeTruthy();
   });
 
+  it('makes solids see-through in X-Ray and restores them after', () => {
+    const doc = createEmptyDocument('Test');
+    const built = buildBox({ width: 1, height: 1, depth: 1, name: 'Box' });
+    commitMeshObject(doc, built, { name: 'Box' });
+    const mesh = doc.meshes.get(built.id)!;
+    const material = [...doc.materials.values()][0]!;
+    const handle = createObjectRenderHandle('obj', mesh, [material]);
+    const std = handle.materials[0] as unknown as {
+      opacity: number;
+      transparent: boolean;
+      depthWrite: boolean;
+      side: number;
+    };
+    applyViewportRenderStyle(handle, 'material');
+    expect(std.opacity).toBe(1);
+    expect(std.transparent).toBe(false);
+    applyViewportRenderStyle(handle, 'material', { xRay: true });
+    expect(std.transparent).toBe(true);
+    expect(std.opacity).toBeLessThan(0.5);
+    expect(std.depthWrite).toBe(false);
+    applyViewportRenderStyle(handle, 'material', { xRay: false });
+    expect(std.opacity).toBe(1);
+    expect(std.transparent).toBe(false);
+    expect(std.depthWrite).toBe(true);
+  });
+
   it('renderStyleShowsAllEdges only for the topology outline mode', () => {
     expect(renderStyleShowsAllEdges('material')).toBe(false);
     expect(renderStyleShowsAllEdges('outlines')).toBe(true);

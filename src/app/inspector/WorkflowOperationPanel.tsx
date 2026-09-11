@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import type { EditorSession } from '@/core/editor/EditorSession';
 import type { SceneObject } from '@/core/document/types';
 import type { EditableMesh } from '@/core/mesh/types';
+import { applyDefaultBlockoutLook } from '@/core/blockout/BlockoutMaterial';
 import {
   curveOperationLabel,
   evaluateCurveOperation,
@@ -68,13 +69,14 @@ export function WorkflowOperationPanel({
   const applyLive = (next: CurveOperation) => {
     const afterMesh = evaluateCurveOperation(next);
     afterMesh.id = meshId;
-    const afterMetadata = serializeCurveOperation(next);
     session.document.meshes.set(meshId, afterMesh);
-    object.metadata.curveOperation = afterMetadata;
+    object.metadata.curveOperation = serializeCurveOperation(next);
+    applyDefaultBlockoutLook(session.document, object.id);
+    const afterMetadata = object.metadata.curveOperation ?? serializeCurveOperation(next);
     session.document.dirty = true;
     session.requestRedraw();
     onRefresh();
-    return { afterMesh, afterMetadata };
+    return { afterMesh: session.document.meshes.get(meshId) ?? afterMesh, afterMetadata };
   };
 
   const commitHistory = (
