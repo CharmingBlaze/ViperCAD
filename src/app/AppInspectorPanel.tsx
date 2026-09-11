@@ -3004,7 +3004,7 @@ export function AppInspectorPanel({
 
             {createMode === 'primitive' && isCreatingPrimitive && (
               primitiveTool.state.stage !== 'idle' ||
-              ['cylinder', 'cone', 'sphere', 'capsule', 'tube', 'stairs', 'arch', 'torus'].includes(
+              ['cylinder', 'cone', 'sphere', 'capsule', 'tube', 'stairs', 'arch', 'torus', 'circle', 'ring', 'polygon', 'star', 'prism'].includes(
                 primitiveTool.state.kind,
               )
             ) && (
@@ -3032,7 +3032,7 @@ export function AppInspectorPanel({
                     />
                   </label>
                 ))}
-                {['cylinder', 'cone', 'sphere', 'capsule', 'tube'].includes(
+                {['cylinder', 'cone', 'sphere', 'capsule', 'tube', 'circle', 'ring', 'polygon', 'prism'].includes(
                   primitiveTool.state.kind,
                 ) && (
                   <label className="uv-field">
@@ -3052,6 +3052,65 @@ export function AppInspectorPanel({
                       }}
                     />
                   </label>
+                )}
+                {['ring', 'tube'].includes(primitiveTool.state.kind) && (
+                  <label className="uv-field">
+                    <span>Thickness</span>
+                    <input
+                      className="uv-text"
+                      type="number"
+                      min={0.05}
+                      max={0.45}
+                      step={0.05}
+                      value={primitiveTool.parameters.wallThickness}
+                      onChange={(e) => {
+                        primitiveTool.setParameters(
+                          { wallThickness: Number(e.target.value) },
+                          session.context(),
+                        );
+                        onRefresh();
+                      }}
+                    />
+                  </label>
+                )}
+                {primitiveTool.state.kind === 'star' && (
+                  <>
+                    <label className="uv-field">
+                      <span>Points</span>
+                      <input
+                        className="uv-text"
+                        type="number"
+                        min={3}
+                        max={16}
+                        value={primitiveTool.parameters.radialSegments}
+                        onChange={(e) => {
+                          primitiveTool.setParameters(
+                            { radialSegments: Number(e.target.value) },
+                            session.context(),
+                          );
+                          onRefresh();
+                        }}
+                      />
+                    </label>
+                    <label className="uv-field">
+                      <span>Inner Radius</span>
+                      <input
+                        className="uv-text"
+                        type="number"
+                        min={0.1}
+                        max={0.9}
+                        step={0.05}
+                        value={primitiveTool.parameters.wallThickness}
+                        onChange={(e) => {
+                          primitiveTool.setParameters(
+                            { wallThickness: Number(e.target.value) },
+                            session.context(),
+                          );
+                          onRefresh();
+                        }}
+                      />
+                    </label>
+                  </>
                 )}
                 {primitiveTool.state.kind === 'stairs' && (
                   <label className="uv-field">

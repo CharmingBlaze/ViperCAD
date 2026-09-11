@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { defaultPrimitiveParameters, buildPrimitiveInCage, PRIMITIVE_KINDS } from '@/core/primitives/PrimitiveFactory';
+import { defaultPrimitiveParameters, buildPrimitiveInCage, PRIMITIVE_KINDS, is2dPrimitive } from '@/core/primitives/PrimitiveFactory';
 import { computeFaceNormal } from '@/core/mesh/Normals';
 import { validateMeshFull } from '@/core/mesh/Validation';
 import { EditorSession } from '@/core/editor/EditorSession';
@@ -11,7 +11,7 @@ const cage = { origin: { x: -1, y: 0, z: -1.5 }, axisU: { x: 1, y: 0, z: 0 }, ax
 describe('universal primitive factory', () => {
   for (const kind of PRIMITIVE_KINDS) {
     it(`${kind} builds valid editable topology inside one cage`, () => {
-      const mesh = buildPrimitiveInCage(kind, kind === 'plane' ? { ...cage, sizeNormal: 0 } : cage, defaultPrimitiveParameters(kind));
+      const mesh = buildPrimitiveInCage(kind, is2dPrimitive(kind) ? { ...cage, sizeNormal: 0 } : cage, defaultPrimitiveParameters(kind));
       const report = validateMeshFull(mesh);
       expect(report.issues.filter((i) => i.severity === 'error')).toEqual([]);
       expect(mesh.faces.size).toBeGreaterThan(0);
@@ -22,8 +22,8 @@ describe('universal primitive factory', () => {
     });
   }
 
-  it('plane faces the construction-plane top, not the underside', () => {
-    const top = buildPrimitiveInCage('plane', { ...cage, sizeNormal: 0 }, defaultPrimitiveParameters('plane'));
+  it('2D planar shapes face the construction-plane top, not the underside', () => {
+    const twoDShapes = ['plane', 'circle', 'ring', 'polygon', 'star'] as const;
     const frontCage = {
       ...cage,
       axisU: { x: 1, y: 0, z: 0 },
@@ -40,14 +40,17 @@ describe('universal primitive factory', () => {
       sizeNormal: 0,
       constructionPlaneId: 'right',
     };
-    const front = buildPrimitiveInCage('plane', frontCage, defaultPrimitiveParameters('plane'));
-    const right = buildPrimitiveInCage('plane', rightCage, defaultPrimitiveParameters('plane'));
-    const topN = computeFaceNormal(top, [...top.faces.keys()][0]!);
-    const frontN = computeFaceNormal(front, [...front.faces.keys()][0]!);
-    const rightN = computeFaceNormal(right, [...right.faces.keys()][0]!);
-    expect(topN.y).toBeGreaterThan(0.9);
-    expect(frontN.z).toBeGreaterThan(0.9);
-    expect(rightN.x).toBeGreaterThan(0.9);
+    for (const kind of twoDShapes) {
+      const top = buildPrimitiveInCage(kind, { ...cage, sizeNormal: 0 }, defaultPrimitiveParameters(kind));
+      const front = buildPrimitiveInCage(kind, frontCage, defaultPrimitiveParameters(kind));
+      const right = buildPrimitiveInCage(kind, rightCage, defaultPrimitiveParameters(kind));
+      const topN = computeFaceNormal(top, [...top.faces.keys()][0]!);
+      const frontN = computeFaceNormal(front, [...front.faces.keys()][0]!);
+      const rightN = computeFaceNormal(right, [...right.faces.keys()][0]!);
+      expect(topN.y, `${kind} top normal Y`).toBeGreaterThan(0.9);
+      expect(frontN.z, `${kind} front normal Z`).toBeGreaterThan(0.9);
+      expect(rightN.x, `${kind} right normal X`).toBeGreaterThan(0.9);
+    }
   });
 
   it('pyramid fills the construction cage like a cone', () => {
@@ -162,5 +165,112 @@ describe('universal primitive factory', () => {
 
   it('cancels a centre-based proportional cage without touching the document', () => {
     const session=new EditorSession(),tool=session.tools.get('create-primitive') as CreatePrimitiveTool;const start={button:'left' as const,screenX:0,screenY:0,worldPosition:null,rayOrigin:{x:0,y:10,z:0},rayDirection:{x:0,y:-1,z:0},shiftKey:false,ctrlKey:false,altKey:true};tool.begin(start,session.context());tool.update({...start,rayOrigin:{x:2,y:10,z:1},shiftKey:true},session.context());const cage=tool.getCage()!;expect(cage.sizeU).toBe(cage.sizeV);expect(cage.sizeU).toBe(4);tool.cancel(session.context());expect(session.document.objects.size).toBe(0);expect(session.history.canUndo()).toBe(false);
+  });
+
+  it('creates a top-view circle as a single-stage 2D primitive with undo/redo', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-primitive') as CreatePrimitiveTool;
+    tool.selectPrimitive('circle', session.context());
+    session.constructionPlane = WORLD_XZ_PLANE;
+    session.constructionPlaneId = 'top';
+
+    const input = (x: number, z: number) => ({
+      button: 'left' as const,
+      screenX: 0,
+      screenY: 0,
+      worldPosition: null,
+      rayOrigin: { x, y: 10, z },
+      rayDirection: { x: 0, y: -1, z: 0 },
+      shiftKey: false,
+      ctrlKey: false,
+      altKey: false,
+    });
+
+    tool.begin(input(0, 0), session.context());
+    tool.update(input(2, 2), session.context());
+    // Single stage: second click immediately commits 2D shape without height step
+    tool.begin(input(2, 2), session.context());
+
+    expect(session.document.objects.size).toBe(1);
+    const object = [...session.document.objects.values()][0]!;
+    const mesh = session.document.meshes.get(object.meshId!)!;
+    expect(mesh.name).toBe('Circle');
+    expect(mesh.faces.size).toBe(1);
+    expect(validateMeshFull(mesh).ok).toBe(true);
+
+    // Normal faces upwards (+Y)
+    const normal = computeFaceNormal(mesh, [...mesh.faces.keys()][0]!);
+    expect(normal.y).toBeGreaterThan(0.9);
+
+    // Undo / Redo
+    expect(session.undo()).toBe(true);
+    expect(session.document.objects.size).toBe(0);
+    expect(session.redo()).toBe(true);
+    expect(session.document.objects.size).toBe(1);
+  });
+
+  it('creates a top-view ring as a 2D annulus with inner and outer radius', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-primitive') as CreatePrimitiveTool;
+    tool.selectPrimitive('ring', session.context());
+    session.constructionPlane = WORLD_XZ_PLANE;
+    session.constructionPlaneId = 'top';
+
+    const input = (x: number, z: number) => ({
+      button: 'left' as const,
+      screenX: 0,
+      screenY: 0,
+      worldPosition: null,
+      rayOrigin: { x, y: 10, z },
+      rayDirection: { x: 0, y: -1, z: 0 },
+      shiftKey: false,
+      ctrlKey: false,
+      altKey: false,
+    });
+
+    tool.begin(input(0, 0), session.context());
+    tool.update(input(4, 4), session.context());
+    tool.begin(input(4, 4), session.context());
+
+    expect(session.document.objects.size).toBe(1);
+    const object = [...session.document.objects.values()][0]!;
+    const mesh = session.document.meshes.get(object.meshId!)!;
+    expect(mesh.name).toBe('Ring');
+    expect(mesh.faces.size).toBe(16); // 16 quads in radialSegments: 16
+    expect(validateMeshFull(mesh).ok).toBe(true);
+  });
+
+  it('creates a 3D prism with two-stage extrusion height', () => {
+    const session = new EditorSession();
+    const tool = session.tools.get('create-primitive') as CreatePrimitiveTool;
+    tool.selectPrimitive('prism', session.context());
+    session.constructionPlane = WORLD_XZ_PLANE;
+    session.constructionPlaneId = 'top';
+
+    const input = (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => ({
+      button: 'left' as const,
+      screenX: 0,
+      screenY: 0,
+      worldPosition: null,
+      rayOrigin: origin,
+      rayDirection: direction,
+      shiftKey: false,
+      ctrlKey: false,
+      altKey: false,
+    });
+
+    tool.begin(input({ x: 0, y: 10, z: 0 }, { x: 0, y: -1, z: 0 }), session.context());
+    tool.update(input({ x: 2, y: 10, z: 2 }, { x: 0, y: -1, z: 0 }), session.context());
+    tool.begin(input({ x: 2, y: 10, z: 2 }, { x: 0, y: -1, z: 0 }), session.context());
+    expect(tool.state.stage).toBe('height');
+    tool.update(input({ x: 2, y: 5, z: 10 }, { x: 0, y: 0, z: -1 }), session.context());
+    tool.begin(input({ x: 2, y: 5, z: 10 }, { x: 0, y: 0, z: -1 }), session.context());
+
+    expect(session.document.objects.size).toBe(1);
+    const object = [...session.document.objects.values()][0]!;
+    const mesh = session.document.meshes.get(object.meshId!)!;
+    expect(mesh.name).toBe('Prism');
+    expect(mesh.faces.size).toBe(8); // 6 side quads + 2 caps
+    expect(validateMeshFull(mesh).ok).toBe(true);
   });
 });

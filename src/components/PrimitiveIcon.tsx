@@ -149,6 +149,64 @@ function TubeIcon() {
   );
 }
 
+function CircleIcon() {
+  return (
+    <>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8v8M8 12h8" opacity="0.35" />
+    </>
+  );
+}
+
+function RingIcon() {
+  return (
+    <>
+      <circle cx="12" cy="12" r="8.2" />
+      <circle cx="12" cy="12" r="4.2" />
+    </>
+  );
+}
+
+function PolygonIcon() {
+  return <path d="M12 3.8l7.1 4.1v8.2L12 20.2l-7.1-4.1V7.9Z" />;
+}
+
+function StarIcon() {
+  return (
+    <path d="M12 3.5l2.6 5.3 5.9.8-4.2 4.1 1 5.8-5.3-2.8-5.3 2.8 1-5.8-4.2-4.1 5.9-.8Z" />
+  );
+}
+
+function PrismIcon() {
+  return (
+    <>
+      <path d="M12 3.6l6 3.4v10l-6 3.4-6-3.4v-10Z" />
+      <path d="M12 3.6v16.8" />
+      <path d="M6 7l6 3.4 6-3.4" />
+    </>
+  );
+}
+
+function WedgeIcon() {
+  return (
+    <>
+      <path d="M4.5 18.5 12 7.5l7.5 4v7L12 20.5Z" />
+      <path d="M12 7.5v13" />
+      <path d="M4.5 18.5 12 20.5" />
+    </>
+  );
+}
+
+function OctahedronIcon() {
+  return (
+    <>
+      <path d="M12 3 19.5 12 12 21 4.5 12Z" />
+      <path d="M4.5 12h15" />
+      <path d="M12 3v18" opacity="0.35" />
+    </>
+  );
+}
+
 const ICONS: Record<PrimitiveKind, () => ReactNode> = {
   box: BoxIcon,
   plane: PlaneIcon,
@@ -163,6 +221,13 @@ const ICONS: Record<PrimitiveKind, () => ReactNode> = {
   arch: ArchIcon,
   torus: TorusIcon,
   tube: TubeIcon,
+  circle: CircleIcon,
+  ring: RingIcon,
+  polygon: PolygonIcon,
+  star: StarIcon,
+  prism: PrismIcon,
+  wedge: WedgeIcon,
+  octahedron: OctahedronIcon,
 };
 
 export function PrimitiveIcon({ kind, size = 19 }: Props) {

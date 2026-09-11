@@ -10,7 +10,7 @@ import {
   type Vec3,
 } from '@/core/math/Vec3';
 import { validateMeshFull } from '@/core/mesh/Validation';
-import { buildPrimitiveInCage, clampPrimitiveParameters, defaultPrimitiveParameters, localizePrimitiveMesh, PRIMITIVE_LABELS, type ComplexityPreset, type PrimitiveConstructionCage, type PrimitiveKind, type PrimitiveParameters } from '@/core/primitives/PrimitiveFactory';
+import { buildPrimitiveInCage, clampPrimitiveParameters, defaultPrimitiveParameters, is2dPrimitive, localizePrimitiveMesh, PRIMITIVE_LABELS, type ComplexityPreset, type PrimitiveConstructionCage, type PrimitiveKind, type PrimitiveParameters } from '@/core/primitives/PrimitiveFactory';
 import { cloneSelection, type SelectionState } from '@/core/selection/SelectionManager';
 import { SNAP_TARGET_LABELS, rayPlaneIntersection, resolveSnap, type ConstructionPlane } from '@/core/snap/SnapEngine';
 import type { ModellingContext, Tool, ToolPointerInput } from './Tool';
@@ -62,7 +62,7 @@ export class CreatePrimitiveTool implements Tool {
     if (this.state.stage === 'base') {
       const hit = this.hitOnPlane(input, this.state.plane!, context); if (hit) this.state.cornerB = this.constrainBase(hit.position, input.shiftKey);
       if (!this.validBase(context)) return;
-      if (this.state.kind === 'plane') { this.confirm(context); return; }
+      if (is2dPrimitive(this.state.kind)) { this.confirm(context); return; }
       this.state.stage = 'height';
       this.heightScreenAnchor = null;
       // Seed a visible default height so ortho views show extrusion immediately.
@@ -101,7 +101,7 @@ export class CreatePrimitiveTool implements Tool {
     if (!this.validBase(context)) return;
 
     // Ortho views often leave height at 0; Enter / third-click must still finalize.
-    if (this.state.kind !== 'plane') {
+    if (!is2dPrimitive(this.state.kind)) {
       const tolerance = this.tolerance(context);
       if (Math.abs(this.state.normalDistance) < tolerance) {
         const base = this.getCage();
@@ -120,7 +120,7 @@ export class CreatePrimitiveTool implements Tool {
     if (
       cage.sizeU < tolerance ||
       cage.sizeV < tolerance ||
-      (this.state.kind !== 'plane' && cage.sizeNormal < tolerance)
+      (!is2dPrimitive(this.state.kind) && cage.sizeNormal < tolerance)
     ) {
       return;
     }
@@ -166,7 +166,7 @@ export class CreatePrimitiveTool implements Tool {
     let origin: Vec3, sizeU: number, sizeV: number;
     if (this.state.fromCentre) { sizeU = Math.abs(u) * 2; sizeV = Math.abs(v) * 2; origin = addVec3(cornerA, addVec3(scaleVec3(plane.xAxis, -Math.abs(u)), scaleVec3(plane.yAxis, -Math.abs(v)))); }
     else { sizeU = Math.abs(u); sizeV = Math.abs(v); origin = addVec3(cornerA, addVec3(scaleVec3(plane.xAxis, Math.min(0, u)), scaleVec3(plane.yAxis, Math.min(0, v)))); }
-    let normal = this.state.kind === 'plane' ? 0 : Math.abs(this.state.normalDistance); const direction: 1 | -1 = this.state.normalDistance < 0 ? -1 : 1;
+    let normal = is2dPrimitive(this.state.kind) ? 0 : Math.abs(this.state.normalDistance); const direction: 1 | -1 = this.state.normalDistance < 0 ? -1 : 1;
     if (this.state.normalDistance < 0) origin = addVec3(origin, scaleVec3(plane.normal, -normal));
     if (previewStability && normal === 0) normal = Math.max(0.0001, Math.min(sizeU, sizeV) * 0.015);
     return { origin, axisU: plane.xAxis, axisV: plane.yAxis, axisNormal: plane.normal, sizeU, sizeV, sizeNormal: normal, minLocal: { x: 0, y: 0, z: 0 }, maxLocal: { x: sizeU, y: normal, z: sizeV }, constructionPlaneId: this.state.constructionPlaneId, creationDirection: direction };
@@ -196,7 +196,7 @@ export class CreatePrimitiveTool implements Tool {
       this.hoverOrigin,
       addVec3(scaleVec3(plane.xAxis, -size * 0.5), scaleVec3(plane.yAxis, -size * 0.5)),
     );
-    const height = this.state.kind === 'plane' ? 0 : size;
+    const height = is2dPrimitive(this.state.kind) ? 0 : size;
     return {
       origin,
       axisU: plane.xAxis,

@@ -1,6 +1,6 @@
 import { addVec3, crossVec3, dotVec3, normalizeVec3, scaleVec3, subVec3, type Vec3, v3 } from '@/core/math/Vec3';
 import { MeshBuilder } from '@/core/mesh/MeshBuilder';
-import { buildBox, buildCone, buildCylinder, buildPlane, buildPyramid, buildRamp, buildSphere } from '@/core/mesh/builders';
+import { buildBox, buildCone, buildCylinder, buildPlane, buildPyramid, buildRamp, buildSphere, buildCircle, buildRing, buildPolygon, buildStar, buildPrism, buildWedge, buildOctahedron } from '@/core/mesh/builders';
 import { faceCornerIds, faceHalfEdgeIds } from '@/core/mesh/EditableMesh';
 import { computeFaceNormal } from '@/core/mesh/Normals';
 import { flipFaces } from '@/core/mesh/ops/basic';
@@ -9,7 +9,31 @@ import { unwrapUvAuto } from '@/core/uv/UvOperations';
 import { v2 } from '@/core/math/Vec2';
 import { validateMeshFull } from '@/core/mesh/Validation';
 
-export type PrimitiveKind = 'box' | 'plane' | 'cylinder' | 'cone' | 'pyramid' | 'sphere' | 'icosphere' | 'capsule' | 'ramp' | 'stairs' | 'arch' | 'torus' | 'tube';
+export type PrimitiveKind =
+  | 'box'
+  | 'plane'
+  | 'cylinder'
+  | 'cone'
+  | 'pyramid'
+  | 'sphere'
+  | 'icosphere'
+  | 'capsule'
+  | 'ramp'
+  | 'stairs'
+  | 'arch'
+  | 'torus'
+  | 'tube'
+  | 'circle'
+  | 'ring'
+  | 'polygon'
+  | 'star'
+  | 'prism'
+  | 'wedge'
+  | 'octahedron';
+
+export function is2dPrimitive(kind: PrimitiveKind): boolean {
+  return kind === 'plane' || kind === 'circle' || kind === 'ring' || kind === 'polygon' || kind === 'star';
+}
 export type ComplexityPreset = 'low' | 'medium' | 'custom';
 
 export type PrimitiveConstructionCage = {
@@ -44,12 +68,47 @@ export const PRIMITIVE_LIMITS = {
   radialSegments: { min: 3, max: 32 }, heightSegments: { min: 1, max: 16 }, subdivisions: { min: 0, max: 2 }, stairCount: { min: 1, max: 64 }, archSegments: { min: 3, max: 32 }, torusMajorSegments: { min: 6, max: 32 }, torusTubeSegments: { min: 3, max: 16 },
 } as const;
 
-export const PRIMITIVE_LABELS: Record<PrimitiveKind, string> = { box: 'Box', plane: 'Plane', cylinder: 'Cylinder', cone: 'Cone', pyramid: 'Pyramid', sphere: 'Sphere', icosphere: 'Icosphere', capsule: 'Capsule', ramp: 'Ramp', stairs: 'Stairs', arch: 'Arch', torus: 'Torus', tube: 'Tube' };
+export const PRIMITIVE_LABELS: Record<PrimitiveKind, string> = {
+  box: 'Box',
+  plane: 'Plane',
+  cylinder: 'Cylinder',
+  cone: 'Cone',
+  pyramid: 'Pyramid',
+  sphere: 'Sphere',
+  icosphere: 'Icosphere',
+  capsule: 'Capsule',
+  ramp: 'Ramp',
+  stairs: 'Stairs',
+  arch: 'Arch',
+  torus: 'Torus',
+  tube: 'Tube',
+  circle: 'Circle',
+  ring: 'Ring',
+  polygon: 'Polygon',
+  star: 'Star',
+  prism: 'Prism',
+  wedge: 'Wedge',
+  octahedron: 'Octahedron',
+};
 export const PRIMITIVE_KINDS = Object.keys(PRIMITIVE_LABELS) as PrimitiveKind[];
 
 export function defaultPrimitiveParameters(kind: PrimitiveKind, preset: ComplexityPreset = 'low'): PrimitiveParameters {
   const medium = preset === 'medium';
-  return { preset, radialSegments: medium ? 16 : kind === 'cone' ? 8 : 12, heightSegments: medium ? 8 : 6, subdivisions: medium ? 2 : 1, stairCount: 5, archSegments: medium ? 12 : 8, torusMajorSegments: medium ? 20 : 12, torusTubeSegments: medium ? 10 : 8, wallThickness: 0.2, smooth: !['box', 'plane', 'pyramid', 'icosphere', 'ramp', 'stairs', 'arch'].includes(kind), capped: true };
+  return {
+    preset,
+    radialSegments: medium
+      ? (kind === 'polygon' || kind === 'prism' ? 8 : kind === 'star' ? 6 : 24)
+      : (kind === 'cone' ? 8 : kind === 'polygon' || kind === 'prism' ? 6 : kind === 'star' ? 5 : kind === 'circle' || kind === 'ring' ? 16 : 12),
+    heightSegments: medium ? 8 : 6,
+    subdivisions: medium ? 2 : 1,
+    stairCount: 5,
+    archSegments: medium ? 12 : 8,
+    torusMajorSegments: medium ? 20 : 12,
+    torusTubeSegments: medium ? 10 : 8,
+    wallThickness: kind === 'star' ? 0.4 : kind === 'ring' ? 0.25 : 0.2,
+    smooth: !['box', 'plane', 'pyramid', 'icosphere', 'ramp', 'stairs', 'arch', 'polygon', 'star', 'prism', 'wedge', 'octahedron'].includes(kind),
+    capped: true,
+  };
 }
 
 export function clampPrimitiveParameters(p: PrimitiveParameters): PrimitiveParameters {
@@ -109,12 +168,12 @@ export function buildPrimitiveInCage(kind: PrimitiveKind, cage: PrimitiveConstru
   // Open planes have only one face — keep it aligned with the construction-plane
   // normal (the "top" of the draw) instead of the closed-mesh heuristic.
   const basisSign = Math.sign(dotVec3(cage.axisU, crossVec3(cage.axisNormal, cage.axisV))) || 1;
-  const flipWinding = kind !== 'plane' && reflectNormal !== (basisSign < 0);
+  const flipWinding = !is2dPrimitive(kind) && reflectNormal !== (basisSign < 0);
   for (const vertex of mesh.vertices.values()) {
     const local = vertex.position;
     vertex.position = addVec3(centre, addVec3(scaleVec3(cage.axisU, local.x * cage.sizeU), addVec3(scaleVec3(cage.axisNormal, local.y * cage.sizeNormal * (reflectNormal ? -1 : 1)), scaleVec3(cage.axisV, local.z * cage.sizeV))));
   }
-  if (kind === 'plane') alignFacesToNormal(mesh, cage.axisNormal);
+  if (is2dPrimitive(kind)) alignFacesToNormal(mesh, cage.axisNormal);
   else if (flipWinding) flipFaces(mesh, [...mesh.faces.keys()]);
   mesh.name = PRIMITIVE_LABELS[kind];
   mesh.geometryVersion += 1; mesh.dirty.positions = mesh.dirty.normals = mesh.dirty.bounds = mesh.dirty.bvh = true;
@@ -135,7 +194,14 @@ function buildNormalised(kind: PrimitiveKind, p: PrimitiveParameters): EditableM
   else if (kind === 'stairs') mesh = buildStairs(p.stairCount);
   else if (kind === 'arch') mesh = buildArch(p.archSegments, p.wallThickness);
   else if (kind === 'torus') mesh = buildTorus(p.torusMajorSegments, p.torusTubeSegments, p.wallThickness);
-  else mesh = buildTube(p.radialSegments, p.wallThickness);
+  else if (kind === 'tube') mesh = buildTube(p.radialSegments, p.wallThickness);
+  else if (kind === 'circle') mesh = buildCircle({ radius: 0.5, radialSegments: p.radialSegments, name: PRIMITIVE_LABELS[kind] });
+  else if (kind === 'ring') mesh = buildRing({ outerRadius: 0.5, radialSegments: p.radialSegments, wallThickness: p.wallThickness, name: PRIMITIVE_LABELS[kind] });
+  else if (kind === 'polygon') mesh = buildPolygon({ radius: 0.5, sides: p.radialSegments, name: PRIMITIVE_LABELS[kind] });
+  else if (kind === 'star') mesh = buildStar({ outerRadius: 0.5, points: p.radialSegments, innerRatio: p.wallThickness, name: PRIMITIVE_LABELS[kind] });
+  else if (kind === 'prism') mesh = buildPrism({ radius: 0.5, height: 1, radialSegments: p.radialSegments, name: PRIMITIVE_LABELS[kind] });
+  else if (kind === 'wedge') mesh = buildWedge({ width: 1, height: 1, depth: 1, name: PRIMITIVE_LABELS[kind] });
+  else mesh = buildOctahedron({ radius: 0.5, height: 1, name: PRIMITIVE_LABELS[kind] });
   let report = validateMeshFull(mesh);
   if (report.issues.some((issue) => issue.code === 'INWARD_WINDING')) {
     const flipped = flipFaces(mesh, [...mesh.faces.keys()]);
@@ -188,7 +254,7 @@ function alignFacesToNormal(mesh: EditableMesh, target: Vec3): void {
 function applyShading(mesh: EditableMesh, kind: PrimitiveKind, p: PrimitiveParameters): void {
   if (!p.smooth) return;
   for (const face of mesh.faces.values()) face.flatShaded = false;
-  if (kind === 'cylinder' || kind === 'cone') {
+  if (kind === 'cylinder' || kind === 'cone' || kind === 'prism') {
     for (const face of mesh.faces.values()) if (faceHalfEdgeIds(mesh, face.id).length > 4) face.flatShaded = true;
     for (const edge of mesh.edges.values()) {
       const faces = [edge.halfEdgeAId, edge.halfEdgeBId].filter((id): id is string => !!id).map((id) => mesh.halfEdges.get(id)?.faceId).filter(Boolean).map((id) => mesh.faces.get(id!));

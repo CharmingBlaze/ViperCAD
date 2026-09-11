@@ -12,6 +12,13 @@ import {
   isStrokeClosed,
   strokePathLength,
 } from './StrokeInflateBuilder';
+import { CircleBuilder, buildCircle } from './CircleBuilder';
+import { RingBuilder, buildRing } from './RingBuilder';
+import { PolygonBuilder, buildPolygon } from './PolygonBuilder';
+import { StarBuilder, buildStar } from './StarBuilder';
+import { PrismBuilder, buildPrism } from './PrismBuilder';
+import { WedgeBuilder, buildWedge } from './WedgeBuilder';
+import { OctahedronBuilder, buildOctahedron } from './OctahedronBuilder';
 import type { PrimitiveBuilder, PrimitiveBuilderId } from './types';
 
 export * from './types';
@@ -22,6 +29,13 @@ export * from './ConeBuilder';
 export * from './SphereBuilder';
 export * from './PyramidBuilder';
 export * from './RampBuilder';
+export * from './CircleBuilder';
+export * from './RingBuilder';
+export * from './PolygonBuilder';
+export * from './StarBuilder';
+export * from './PrismBuilder';
+export * from './WedgeBuilder';
+export * from './OctahedronBuilder';
 export * from './StrokeTubeBuilder';
 export * from './StrokeInflateBuilder';
 
@@ -33,6 +47,13 @@ export const primitiveBuilders: PrimitiveBuilder<unknown>[] = [
   SphereBuilder as PrimitiveBuilder<unknown>,
   PyramidBuilder as PrimitiveBuilder<unknown>,
   RampBuilder as PrimitiveBuilder<unknown>,
+  CircleBuilder as PrimitiveBuilder<unknown>,
+  RingBuilder as PrimitiveBuilder<unknown>,
+  PolygonBuilder as PrimitiveBuilder<unknown>,
+  StarBuilder as PrimitiveBuilder<unknown>,
+  PrismBuilder as PrimitiveBuilder<unknown>,
+  WedgeBuilder as PrimitiveBuilder<unknown>,
+  OctahedronBuilder as PrimitiveBuilder<unknown>,
 ];
 
 export function getPrimitiveBuilder(id: PrimitiveBuilderId): PrimitiveBuilder<unknown> | undefined {
@@ -48,6 +69,13 @@ export {
   buildSphere,
   buildPyramid,
   buildRamp,
+  buildCircle,
+  buildRing,
+  buildPolygon,
+  buildStar,
+  buildPrism,
+  buildWedge,
+  buildOctahedron,
   buildStrokeTube,
   resampleStrokePoints,
   buildInflatedDoodle,

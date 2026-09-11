@@ -13,7 +13,14 @@ export type PrimitiveBuilderId =
   | 'stairs'
   | 'arch'
   | 'torus'
-  | 'tube';
+  | 'tube'
+  | 'circle'
+  | 'ring'
+  | 'polygon'
+  | 'star'
+  | 'prism'
+  | 'wedge'
+  | 'octahedron';
 
 export type PrimitiveBuilder<TOptions> = {
   id: PrimitiveBuilderId;
